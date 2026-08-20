@@ -1,0 +1,9 @@
+config/secrets.json
+# Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs and runtime data
+logs/
+*.log

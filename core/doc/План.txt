@@ -1,0 +1,43 @@
+
+Шаг	Что делаем	Файл	Размер
+1	Логирование	core/logger.py	~80 строк
+2	Типы данных	core/types.py	~80 строк
+3	Event Bus (шина)	core/event_bus.py	~150 строк
+4	REST адаптер	adapters/binance_rest.py	~300 строк (чистим старый)
+5	WS адаптер	adapters/binance_ws.py	~300 строк (чистим старый)
+6	Конфиги	config/*.json	4 файла
+7	Паспорт (SSOT)	trading/passport.py	~150 строк
+8	Паспорт менеджер	trading/passport_manager.py	~150 строк
+9	Трейдер	trading/trader.py	~300 строк
+10	Оркестратор	trading/orchestrator.py	~250 строк
+11	Базовый класс стратегии	strategies/base.py	~50 строк
+12	Стратегия WallFade	strategies/wall_fade.py	~250 строк
+13	Стратегия Absorption	strategies/absorption.py	~250 строк
+14	Точка входа	main.py	~150 строк
+
+
+
+№	Статус                  	Значение	                    Когда
+1	SIGNAL_GENERATED	      Сигнал принят,паспорт создан	    Сразу после сигнала
+2	ORDER_SENT	              Ордер отправлен на биржу	        После отправки
+3	ORDER_ACK	              Биржа подтвердила ордер       	После ORDER_ACK
+4	LIMIT_ON_BOOK	          Лимитный ордер в стакане      	Для LIMIT ордеров
+5	PARTIAL_FILL	          Частичное исполнение (вход)	    При частичном заполнении
+6	OPEN	                  Позиция открыта	                После FILLED
+7	PARTIAL_CLOSE	          Частичное закрытие (TP1)      	При TP1
+8	CLOSING	                  Закрытие в процессе           	При отправке закрытия
+9	CANCELED	              Ордер отменён	                    При отмене
+10	CLOSED	                  Сделка завершена              	После полного закрытия
+11	UNKNOWN	                  Состояние не определено	        При ошибке восстановления
+
+SIGNAL_GENERATED	✅ НЕ ТРОГАТЬ (ждём ордер)
+SIGNAL_GENERATED	        ✅ НЕ ТРОГАТЬ (ждём WS)
+ORDER_ACK	        ✅ НЕ ТРОГАТЬ (ждём WS)
+LIMIT_ON_BOOK	    ✅ НЕ ТРОГАТЬ (ждём исполнения)
+PARTIAL_FILL	    ✅ НЕ ТРОГАТЬ (ждём полного)
+OPEN	            ⚠️ ПРОВЕРЯТЬ (если size=0 → CLOSED)
+PARTIAL_CLOSE	    ⚠️ ПРОВЕРЯТЬ (если size=0 → CLOSED)
+CLOSING	            ⚠️ ПРОВЕРЯТЬ (если size=0 → CLOSED)
+CANCELED	        ❌ Игнорировать
+CLOSED	            ❌ Игнорировать
+UNKNOWN	            ❌ Игнорировать
