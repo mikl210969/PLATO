@@ -1,10 +1,21 @@
 import time
-from typing import TYPE_CHECKING, Dict, Any
+import datetime
+import json
+from typing import TYPE_CHECKING, Dict, Any, Optional
 
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
 
 class EventHandlersMixin:
+    # Явные аннотации типов для удовлетворения Pylance (эти атрибуты есть в Orchestrator)
+    _log: Any
+    bus: Any
+    passport_manager: Any
+    repository: Any
+    state_manager: Any
+    config: Any
+    get_trader: Any
+
     def __init__(self):
         self._last_signal_time: Dict[str, float] = {}
         self._signal_cooldown = 5.0  # секунд
@@ -98,9 +109,7 @@ class EventHandlersMixin:
 
     async def _on_order_update(self, event):
         """Обработка обновлений статуса ордеров от биржи (WebSocket)."""
-        import json
-        
-        # 1. Максимально безопасное извлечение payload (работает и с объектом Event, и с прямым dict)
+        # 1. Безопасно получаем payload
         payload = getattr(event, 'payload', event)
         
         # 2. Если вдруг пришла строка, пытаемся распарсить
@@ -116,7 +125,7 @@ class EventHandlersMixin:
             self._log("order_update_payload_not_dict", {"type": str(type(payload))})
             return
 
-        # 4. Извлекаем данные (поддерживаем и нормализованный формат из main.py, и сырой Binance)
+        # 4. Извлекаем данные (поддерживаем и нормализованный формат, и сырой Binance)
         order_data = payload.get('o', payload)
         
         client_order_id = str(order_data.get('client_order_id') or order_data.get('c') or '')
@@ -152,7 +161,7 @@ class EventHandlersMixin:
             "new_status": order_status
         })
 
-        # 6. Логика перехода статусов (🔥 ИСПРАВЛЕНО: передаем словари, а не строки, в handle_event)
+        # 6. Логика перехода статусов
         if order_status == 'NEW':
             self.state_manager.handle_event(passport, "ORDER_ACK", {"details": "Order ACK received"})
             self.repository.save(passport)
@@ -191,23 +200,55 @@ class EventHandlersMixin:
             self.repository.save(passport)
 
     async def _on_account_update(self, event):
-        """Обработка обновлений баланса и позиций от биржи."""
+        """Обработка обновлений баланса и позиций от биржи (WebSocket)."""
         payload = event.payload
-        symbol = payload.get('symbol')
-        position_size = payload.get('size', 0.0)
         
-        self._log("account_update_received", {
-            "symbol": symbol,
-            "position_size": position_size
-        })
+        # Структура Binance WS: данные аккаунта лежат в ключе 'a', позиции в 'P' (список)
+        account_data = payload.get('a', payload)
+        positions = account_data.get('P', [])
         
-        # Если позиция закрыта на бирже (размер стал 0), синхронизируем паспорт
-        if symbol and abs(position_size) < 0.01:
-            passport = self.passport_manager.get_active_by_symbol(symbol)
-            if passport and passport.status not in ["CLOSED", "CANCELED", "FAILED"]:
-                self._log("external_position_close_detected", {"passport_id": passport.passport_id})
-                self.state_manager.handle_event(passport, "EXTERNAL_CLOSE", "Position size is 0 on exchange")
-                self.repository.save(passport)
+        if not positions:
+            return
+
+        for pos in positions:
+            symbol = pos.get('s')  # Символ позиции (например, 'SOLUSDT')
+            if not symbol:
+                continue
+                
+            # pa = position amount (размер позиции). Может быть отрицательным для шорта
+            pos_amt = float(pos.get('pa', 0))
+            
+            # Если размер позиции стал практически нулевым
+            if abs(pos_amt) < 0.01:
+                # Ищем локальный паспорт для этого символа
+                passport = self.passport_manager.get_active_by_symbol(symbol)
+                
+                # Если паспорт есть и он всё ещё считается "открытым" локально
+                if passport and passport.status in ["OPEN", "ORDER_ACK", "ORDER_SENT"]:
+                    self._log("external_close_detected", {
+                        "passport_id": passport.passport_id, 
+                        "symbol": symbol,
+                        "previous_size": passport.position_size
+                    })
+                    
+                    # 🔥 Обновляем паспорт, чтобы он отражал реальность
+                    passport.position_size = 0.0
+                    passport.status = "EXTERNAL_CLOSE"
+                    passport.exit_reason = "EXTERNAL_CLOSE"
+                    
+                    # Добавляем запись в timeline
+                    passport.timeline.append({
+                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "event": "STATUS: EXTERNAL_CLOSE",
+                        "details": "Position closed manually or liquidated on exchange"
+                    })
+                    
+                    # Сохраняем изменения
+                    self.repository.save(passport)
+                    
+                    self._log("passport_marked_as_external_close", {
+                        "passport_id": passport.passport_id
+                    })
 
     async def _on_position_closed(self, event):
         self._log("position_closed_event", {"event": event.payload})
