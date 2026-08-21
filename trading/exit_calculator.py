@@ -15,6 +15,26 @@ class ExitCalculator:
         self.atr_multiplier_tp1 = config.get('atr_multiplier_tp1', 2.0)
         self.atr_multiplier_tp2 = config.get('atr_multiplier_tp2', 3.0)
 
+        # === ВАЛИДАЦИЯ R:R (Stable Core защита) ===
+        # Платформа не должна стартовать с убыточной математикой.
+        # TP1 должен быть строго больше SL, TP2 строго больше TP1.
+        if self.atr_multiplier_tp1 <= self.atr_multiplier_sl:
+            raise ValueError(
+                f"КРИТИЧЕСКАЯ ОШИБКА КОНФИГА: "
+                f"Множитель TP1 ({self.atr_multiplier_tp1}) должен быть строго больше "
+                f"множителя SL ({self.atr_multiplier_sl}). "
+                f"Проверьте config/trading.json!"
+            )
+
+        if self.atr_multiplier_tp2 <= self.atr_multiplier_tp1:
+            raise ValueError(
+                f"КРИТИЧЕСКАЯ ОШИБКА КОНФИГА: "
+                f"Множитель TP2 ({self.atr_multiplier_tp2}) должен быть строго больше "
+                f"множителя TP1 ({self.atr_multiplier_tp1}). "
+                f"Проверьте config/trading.json!"
+            )
+        # === КОНЕЦ ВАЛИДАЦИИ ===
+
     def calculate(
         self,
         side: str,

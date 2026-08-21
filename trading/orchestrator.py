@@ -180,11 +180,13 @@ class Orchestrator:
         # 6. Отправляем команду трейдеру
         quantity = self.config.get('trading', {}).get('lot_size', 7.0)
         order_type = self.config.get('trading', {}).get('entry_order_type', 'market')
+        
         self._log("sending_order", {
             "symbol": signal.symbol,
             "side": signal.side,
             "quantity": quantity,
-            "order_type": order_type
+            "order_type": order_type,
+            "limit_price": signal.entry_price if order_type == 'limit' else None # 🔥 Добавили для отладки
         })
 
         result = await trader.execute_order(
@@ -193,13 +195,15 @@ class Orchestrator:
             quantity=quantity,
             order_type=order_type,
             client_order_id=signal.signal_id,
-            passport_id=passport.passport_id
+            passport_id=passport.passport_id,
+            limit_price=signal.entry_price if order_type == 'limit' else None  # 🔥 ВОТ ЭТОГО НЕ ХВАТАЛО!
         )
 
         self._log("order_result", {
             "passport_id": passport.passport_id,
             "success": result.get('success'),
-            "order_id": result.get('order_id')
+            "order_id": result.get('order_id'),
+            "error": result.get('error') # 🔥 Добавили, чтобы видеть ошибку, если она есть
         })
 
         # 7. Обновляем паспорт по результату
