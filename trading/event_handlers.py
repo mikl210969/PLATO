@@ -1,0 +1,219 @@
+import time
+from typing import TYPE_CHECKING, Dict, Any
+
+if TYPE_CHECKING:
+    from .orchestrator import Orchestrator
+
+class EventHandlersMixin:
+    def __init__(self):
+        self._last_signal_time: Dict[str, float] = {}
+        self._signal_cooldown = 5.0  # секунд
+
+    def _subscribe_to_events(self):
+        """Подписка на события шины."""
+        self.bus.subscribe("SIGNAL_GENERATED", self._on_signal)
+        self.bus.subscribe("ORDER_TRADE_UPDATE", self._on_order_update)
+        self.bus.subscribe("ACCOUNT_UPDATE", self._on_account_update)
+        self.bus.subscribe("POSITION_CLOSED", self._on_position_closed)
+        self.bus.subscribe("SYNC_REQUEST", self._on_sync_request)
+        self.bus.subscribe("TTL_EXPIRED", self._on_ttl_expired)
+        
+        self._log("subscribed_to_events", {
+            "subscriptions": ["SIGNAL_GENERATED", "ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "POSITION_CLOSED", "SYNC_REQUEST", "TTL_EXPIRED"]
+        })
+
+    async def _on_signal(self, event):
+        """Обработка сигнала от стратегии."""
+        self._log("signal_received", {"event": event.type})
+        payload = event.payload
+        signal = payload.get('signal')
+        if not signal:
+            self._log("signal_rejected", {"reason": "signal_is_none"})
+            return
+
+        # Защита от повторных сигналов
+        current_time = time.time()
+        last_time = self._last_signal_time.get(signal.symbol, 0)
+        if current_time - last_time < self._signal_cooldown:
+            self._log("signal_cooldown", {"symbol": signal.symbol})
+            return
+        self._last_signal_time[signal.symbol] = current_time
+
+        if self.passport_manager.is_symbol_busy(signal.symbol):
+            self._log("symbol_busy", {"symbol": signal.symbol, "signal_id": signal.signal_id})
+            return
+
+        # Создаём паспорт
+        passport = self.passport_manager.create(
+            symbol=signal.symbol, signal_id=signal.signal_id, strategy=signal.strategy,
+            side=signal.side, entry_price=signal.entry_price, confidence=signal.confidence
+        )
+        self._log("passport_created", {"passport_id": passport.passport_id})
+
+        # Рассчитываем уровни выхода
+        trader = self.get_trader(signal.symbol)
+        if trader:
+            atr_value = self.config.get('trading', {}).get('atr_value', 0.5)
+            levels = trader.calculate_exit_levels(side=signal.side, entry_price=signal.entry_price, atr_value=atr_value)
+            passport.sl_price = levels.get('sl_price', 0)
+            passport.tp1_price = levels.get('tp1_price', 0)
+            passport.tp2_price = levels.get('tp2_price', 0)
+
+        self.repository.save(passport)
+
+        # Отправляем команду трейдеру (🔥 ИСПРАВЛЕНИЕ: добавлен limit_price)
+        quantity = self.config.get('trading', {}).get('lot_size', 7.0)
+        order_type = self.config.get('trading', {}).get('entry_order_type', 'market')
+        
+        self._log("sending_order", {
+            "symbol": signal.symbol, "side": signal.side, "quantity": quantity, 
+            "order_type": order_type, "limit_price": signal.entry_price if order_type == 'limit' else None
+        })
+
+        result = await trader.execute_order(
+            symbol=signal.symbol, side=signal.side, quantity=quantity, order_type=order_type,
+            client_order_id=signal.signal_id, passport_id=passport.passport_id,
+            limit_price=signal.entry_price if order_type == 'limit' else None  # 🔥 Ключевой фикс
+        )
+
+        self._log("order_result", {"passport_id": passport.passport_id, "success": result.get('success'), "error": result.get('error')})
+
+        if result.get('success'):
+            self.state_manager.handle_event(passport, "ORDER_SENT", "Order sent to exchange")
+            self.repository.save(passport)
+            
+            passport.add_order({
+                "order_id": result.get('order_id'), "client_order_id": result.get('client_order_id'),
+                "status": result.get('status', 'NEW'), "type": result.get('order_type', 'MARKET'),
+                "side": signal.side, "price": signal.entry_price, "quantity": result.get('quantity', 0)
+            })
+            self.repository.save(passport)
+
+            if order_type == 'limit':
+                await self.bus.publish(event_type="PASSPORT_CREATED", source="orchestrator", 
+                                       payload={"passport_id": passport.passport_id}, symbol=signal.symbol)
+        else:
+            self.state_manager.handle_event(passport, "ORDER_FAILED", result.get('error', 'unknown'))
+            self.repository.save(passport)
+
+    async def _on_order_update(self, event):
+        """Обработка обновлений статуса ордеров от биржи (WebSocket)."""
+        import json
+        
+        # 1. Максимально безопасное извлечение payload (работает и с объектом Event, и с прямым dict)
+        payload = getattr(event, 'payload', event)
+        
+        # 2. Если вдруг пришла строка, пытаемся распарсить
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                self._log("order_update_payload_invalid_string", {"payload": payload})
+                return
+                
+        # 3. Если это всё ещё не словарь, выходим
+        if not isinstance(payload, dict):
+            self._log("order_update_payload_not_dict", {"type": str(type(payload))})
+            return
+
+        # 4. Извлекаем данные (поддерживаем и нормализованный формат из main.py, и сырой Binance)
+        order_data = payload.get('o', payload)
+        
+        client_order_id = str(order_data.get('client_order_id') or order_data.get('c') or '')
+        order_status = str(order_data.get('status') or order_data.get('X') or '')
+        symbol = str(order_data.get('symbol') or order_data.get('s') or '')
+        
+        self._log("order_update_received", {
+            "client_order_id": client_order_id,
+            "status": order_status,
+            "symbol": symbol
+        })
+
+        if not client_order_id:
+            return
+
+        # 5. Находим паспорт по client_order_id
+        passport = None
+        for p in self.passport_manager.get_active():
+            orders = getattr(p, 'orders', [])
+            for order in orders:
+                if isinstance(order, dict) and str(order.get('client_order_id')) == client_order_id:
+                    passport = p
+                    break
+            if passport:
+                break
+
+        if not passport:
+            self._log("passport_not_found_for_order", {"client_order_id": client_order_id})
+            return
+
+        self._log("passport_found_for_order_update", {
+            "passport_id": passport.passport_id,
+            "new_status": order_status
+        })
+
+        # 6. Логика перехода статусов (🔥 ИСПРАВЛЕНО: передаем словари, а не строки, в handle_event)
+        if order_status == 'NEW':
+            self.state_manager.handle_event(passport, "ORDER_ACK", {"details": "Order ACK received"})
+            self.repository.save(passport)
+            
+        elif order_status in ('PARTIALLY_FILLED', 'FILLED'):
+            # Используем ключи из твоего лога: 'executed_qty' и 'price'
+            executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
+            avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
+            
+            self.state_manager.handle_event(passport, "ORDER_FILLED", {
+                'price': avg_price,
+                'quantity': executed_qty
+            })
+            
+            # 🔥 КРИТИЧЕСКИ ВАЖНО: Обновляем размеры позиции в паспорте
+            if executed_qty > 0:
+                passport.position_size = executed_qty
+                passport.position_entry_price = avg_price if avg_price > 0.0 else passport.entry_price
+                
+                await self.bus.publish(
+                    event_type="POSITION_OPENED",
+                    source="orchestrator",
+                    payload={
+                        "passport_id": passport.passport_id,
+                        "symbol": passport.symbol,
+                        "side": passport.side,
+                        "entry_price": passport.position_entry_price,
+                        "position_size": passport.position_size
+                    },
+                    symbol=passport.symbol
+                )
+            self.repository.save(passport)
+                
+        elif order_status in ('CANCELED', 'EXPIRED', 'REJECTED'):
+            self.state_manager.handle_event(passport, "ORDER_CANCELED", {"details": f"Order {order_status}"})
+            self.repository.save(passport)
+
+    async def _on_account_update(self, event):
+        """Обработка обновлений баланса и позиций от биржи."""
+        payload = event.payload
+        symbol = payload.get('symbol')
+        position_size = payload.get('size', 0.0)
+        
+        self._log("account_update_received", {
+            "symbol": symbol,
+            "position_size": position_size
+        })
+        
+        # Если позиция закрыта на бирже (размер стал 0), синхронизируем паспорт
+        if symbol and abs(position_size) < 0.01:
+            passport = self.passport_manager.get_active_by_symbol(symbol)
+            if passport and passport.status not in ["CLOSED", "CANCELED", "FAILED"]:
+                self._log("external_position_close_detected", {"passport_id": passport.passport_id})
+                self.state_manager.handle_event(passport, "EXTERNAL_CLOSE", "Position size is 0 on exchange")
+                self.repository.save(passport)
+
+    async def _on_position_closed(self, event):
+        self._log("position_closed_event", {"event": event.payload})
+
+    async def _on_sync_request(self, event):
+        self._log("sync_request_received")
+
+    async def _on_ttl_expired(self, event):
+        self._log("ttl_expired", {"event": event.payload})

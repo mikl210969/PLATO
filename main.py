@@ -273,12 +273,36 @@ class Platform:
         # ===== Подписка на события WS → Шина =====
         async def on_order_update(data):
             self._last_user_data_ts = time.time()            
-            print(f"🔍 [PLATFORM] Publishing ORDER_TRADE_UPDATE: {data.get('client_order_id')}")
+            
+            # 🔥 ОТЛАДКА: Печатаем реальные ключи, которые пришли от адаптера
+            print(f"🔍 [DEBUG] RAW DATA KEYS: {list(data.keys())}")
+            
+            # Пробуем разные варианты извлечения
+            if 'o' in data and isinstance(data['o'], dict):
+                order_data = data['o']
+            else:
+                order_data = data
+                
+            # Ищем ключи в любом из возможных написаний (Binance или нормализованные)
+            client_order_id = str(order_data.get('c') or order_data.get('clientOrderId') or order_data.get('client_order_id') or '')
+            order_status = str(order_data.get('X') or order_data.get('status') or '')
+            symbol = str(order_data.get('s') or order_data.get('symbol') or '')
+
+            print(f"🔍 [PLATFORM] Publishing ORDER_TRADE_UPDATE: '{client_order_id}' | '{order_status}' | '{symbol}'")
+            
+            # Если ключи всё ещё не найдены, печатаем содержимое для точного анализа
+            if not client_order_id:
+                print(f"⚠️ [DEBUG] FULL ORDER_DATA CONTENT: {order_data}")
+
             await self.bus.publish(
                 event_type="ORDER_TRADE_UPDATE",
                 source="ws_adapter",
-                payload=data,
-                symbol=self.symbol
+                payload={
+                    "client_order_id": client_order_id,
+                    "status": order_status,
+                    "symbol": symbol
+                },
+                symbol=symbol
             )
         self.ws.on("ORDER_TRADE_UPDATE", on_order_update)
 
@@ -323,7 +347,7 @@ class Platform:
         print(f"✅ [PLATFORM] User data stream subscribed: {listen_key[:10]}...")
 
         # =====================================================================
-        # 🔥 1. ОПРЕДЕЛЕНИЕ ФУНКЦИИ HEALTH CHECK (теперь она объявлена ДО вызова!)
+        # 🔥 1. ОПРЕДЕЛЕНИЕ ФУНКЦИИ HEALTH CHECK
         # =====================================================================
         async def user_data_health_check():
             """Проверяет живость WS на основе ПОТОКА ЦЕН, а не ACCOUNT_UPDATE."""
@@ -339,7 +363,7 @@ class Platform:
                 if has_active and price_age < 60:
                     continue 
                 
-                # 🔥 ИЗМЕНЕНО: Порог увеличен с 30 до 60 секунд
+                # Порог увеличен до 60 секунд для стабильности
                 if has_active and price_age > 60:
                     logger.warning(f"⚠️ WS DEAD: No price updates for {price_age:.0f}s. Forcing refresh.")
                     self.json_logger.log(
@@ -349,24 +373,25 @@ class Platform:
                     )
                     self._last_price_update_ts = time.time()
                     await on_ws_reconnect()
+
         # =====================================================================
         # 🔥 2. ЗАПУСК ВСЕХ ФОНОВЫХ ЗАДАЧ
         # =====================================================================
         asyncio.create_task(self.ws.run())
         asyncio.create_task(self._keep_alive_loop())
-        asyncio.create_task(user_data_health_check())  # <-- Теперь ошибки не будет!
+        asyncio.create_task(user_data_health_check())
         
         await self.orchestrator.start_stuck_orders_monitor()
 
         # =====================================================================
-        # 🔥 3. БЛОКИРУЮЩАЯ СИНХРОНИЗАЦИЯ ПРИ СТАРТЕ (до 15 сек)
+        # 🔥 3. БЛОКИРУЮЩАЯ СИНХРОНИЗАЦИЯ ПРИ СТАРТЕ
         # =====================================================================
         logger.info("🔄 [STARTUP] Performing exchange state recovery (blocking)...")
         await self.orchestrator.perform_startup_recovery(self.symbol)
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
 
         # =====================================================================
-        # 🔥 4. ОСНОВНОЙ ЦИКЛ (ТОЛЬКО ОДИН РАЗ, без дубликатов!)
+        # 🔥 4. ОСНОВНОЙ ЦИКЛ
         # =====================================================================
         last_log_time = 0
         last_position_check_time = 0
