@@ -1,11 +1,19 @@
 import time
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
 
 class MonitorMixin:
+    # Явные аннотации типов для удовлетворения Pylance (эти атрибуты есть в Orchestrator)
+    _log: Any
+    passport_manager: Any
+    repository: Any
+    state_manager: Any
+    bus: Any
+    get_trader: Any
+
     def __init__(self):
         self._stuck_orders_task = None
         self._running = True
@@ -31,7 +39,7 @@ class MonitorMixin:
             await asyncio.sleep(5)
             
             for passport in self.passport_manager.get_active():
-                # 🔥 ИСПРАВЛЕНО: проверяем и ORDER_SENT, и ORDER_ACK
+                # Проверяем и ORDER_SENT, и ORDER_ACK
                 if passport.status not in [PassportStatus.ORDER_SENT.value, PassportStatus.ORDER_ACK.value]:
                     continue
                 

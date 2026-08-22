@@ -257,4 +257,134 @@ class EventHandlersMixin:
         self._log("sync_request_received")
 
     async def _on_ttl_expired(self, event):
-        self._log("ttl_expired", {"event": event.payload})
+        """Обработка истечения TTL лимитного ордера."""
+        import datetime
+        
+        payload = event.payload
+        passport_id = payload.get('passport_id')
+        symbol = payload.get('symbol')
+        order_id = payload.get('order_id')
+        
+        self._log("ttl_expired_handler_started", {
+            "passport_id": passport_id,
+            "symbol": symbol,
+            "order_id": order_id
+        })
+        
+        # Находим паспорт
+        passport = self.passport_manager.get(passport_id)
+        if not passport:
+            self._log("ttl_passport_not_found", {"passport_id": passport_id})
+            return
+        
+        # Получаем трейдера
+        trader = self.get_trader(symbol)
+        if not trader:
+            self._log("ttl_trader_not_found", {"symbol": symbol})
+            return
+        
+        # 🔥 ЛОГИКА В ЗАВИСИМОСТИ ОТ СТАТУСА
+        if passport.status == "OPEN":
+            # Ордер полностью исполнился, TTL не нужен
+            self._log("ttl_skip_fully_filled", {
+                "passport_id": passport_id,
+                "status": passport.status
+            })
+            return
+        
+        elif passport.status == "PARTIALLY_FILLED":
+            # 🔥 ЧАСТИЧНОЕ ИСПОЛНЕНИЕ: отменяем остаток, позиция остается
+            self._log("ttl_partial_fill_detected", {
+                "passport_id": passport_id,
+                "position_size": passport.position_size,
+                "original_quantity": passport.orders[-1].get('quantity', 0) if passport.orders else 0
+            })
+            
+            # Отменяем остаток ордера на бирже
+            cancel_result = await trader.cancel_order(symbol=symbol, order_id=order_id)
+            
+            if cancel_result.get('success'):
+                self._log("ttl_partial_fill_order_canceled", {
+                    "passport_id": passport_id,
+                    "remaining_canceled": True
+                })
+                
+                # Паспорт остается OPEN с фактическим размером позиции
+                passport.status = "OPEN"
+                passport.exit_reason = ""  # Позиция открыта, не закрыта
+                
+                # Добавляем запись в timeline
+                passport.timeline.append({
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "event": "TTL_EXPIRED_PARTIAL_FILL",
+                    "details": f"TTL expired. Remaining order canceled. Position size: {passport.position_size}"
+                })
+                
+                # Сохраняем паспорт
+                self.repository.save(passport)
+                
+                # Публикуем событие, что позиция открыта (для RiskManager и Monitor)
+                await self.bus.publish(
+                    event_type="POSITION_OPENED",
+                    source="lifecycle_manager",
+                    payload={
+                        "passport_id": passport_id,
+                        "symbol": symbol,
+                        "side": passport.side,
+                        "entry_price": passport.position_entry_price,
+                        "position_size": passport.position_size
+                    },
+                    symbol=symbol
+                )
+            else:
+                self._log("ttl_partial_fill_cancel_failed", {
+                    "passport_id": passport_id,
+                    "error": cancel_result.get('error')
+                })
+        
+        else:
+            # ORDER_SENT, ORDER_ACK или другие статусы — ордер не исполнился, отменяем полностью
+            self._log("ttl_canceling_order", {
+                "passport_id": passport_id,
+                "order_id": order_id,
+                "status": passport.status
+            })
+            
+            cancel_result = await trader.cancel_order(symbol=symbol, order_id=order_id)
+            
+            if cancel_result.get('success'):
+                self._log("ttl_order_canceled_success", {
+                    "passport_id": passport_id,
+                    "order_id": order_id
+                })
+                
+                # Меняем статус паспорта
+                passport.status = "TTL_EXPIRED"
+                passport.exit_reason = "TTL_EXPIRED"
+                
+                # Добавляем запись в timeline
+                passport.timeline.append({
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "event": "STATUS: TTL_EXPIRED",
+                    "details": f"Limit order canceled after TTL. Order ID: {order_id}"
+                })
+                
+                # Сохраняем паспорт
+                self.repository.save(passport)
+                
+                # Публикуем событие о закрытии
+                await self.bus.publish(
+                    event_type="POSITION_CLOSED",
+                    source="lifecycle_manager",
+                    payload={
+                        "passport_id": passport_id,
+                        "symbol": symbol,
+                        "exit_reason": "TTL_EXPIRED"
+                    },
+                    symbol=symbol
+                )
+            else:
+                self._log("ttl_cancel_failed", {
+                    "passport_id": passport_id,
+                    "error": cancel_result.get('error')
+                })
