@@ -274,9 +274,6 @@ class Platform:
         async def on_order_update(data):
             self._last_user_data_ts = time.time()            
             
-            # 🔥 ОТЛАДКА: Печатаем реальные ключи, которые пришли от адаптера
-            print(f"🔍 [DEBUG] RAW DATA KEYS: {list(data.keys())}")
-            
             # Пробуем разные варианты извлечения
             if 'o' in data and isinstance(data['o'], dict):
                 order_data = data['o']
@@ -287,8 +284,6 @@ class Platform:
             client_order_id = str(order_data.get('c') or order_data.get('clientOrderId') or order_data.get('client_order_id') or '')
             order_status = str(order_data.get('X') or order_data.get('status') or '')
             symbol = str(order_data.get('s') or order_data.get('symbol') or '')
-
-            print(f"🔍 [PLATFORM] Publishing ORDER_TRADE_UPDATE: '{client_order_id}' | '{order_status}' | '{symbol}'")
             
             # Если ключи всё ещё не найдены, печатаем содержимое для точного анализа
             if not client_order_id:
