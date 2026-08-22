@@ -3,8 +3,9 @@ from typing import Dict, Any, Optional
 from .event_handlers import EventHandlersMixin
 from .monitor import MonitorMixin
 from .recovery import RecoveryMixin
+from .position_monitor import PositionMonitor  # 🔥 Добавляем импорт
 
-class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin):
+class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMonitor):
     """Главный оркестратор платформы. Координирует модули через миксины."""
 
     def __init__(
@@ -30,9 +31,10 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin):
         self.traders: Dict[str, Any] = {}
         self._running = False
 
-        # Инициализация миксинов
+        # 🔥 Инициализация всех миксинов
         EventHandlersMixin.__init__(self)
         MonitorMixin.__init__(self)
+        PositionMonitor.__init__(self)  # 🔥 Добавляем инициализацию PositionMonitor
         
         self._subscribe_to_events()
 
@@ -71,12 +73,14 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin):
         self._log("orchestrator_starting")
         await self.perform_startup_recovery()
         await self.start_stuck_orders_monitor()
+        await self.start_position_monitor()  # 🔥 Запускаем мониторинг позиций
         self._log("orchestrator_started")
 
     async def stop(self):
         self._running = False
         self._log("orchestrator_stopping")
-        await self.stop_monitors()
+        await self.stop_monitors()  # Останавливает MonitorMixin
+        await self.stop_position_monitor()  # 🔥 Останавливает PositionMonitor
         self._log("orchestrator_stopped")
 
     async def close_position(self, symbol: str, exit_reason: str, exit_price: float = 0.0) -> bool:
