@@ -5,14 +5,10 @@ from typing import TYPE_CHECKING, Optional, Any
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
 
-class RecoveryMixin:
-    _log: Any
-    passport_manager: Any
-    repository: Any
-    state_manager: Any
-    bus: Any
-    get_trader: Any
-    config: Any
+from .base_mixin import BaseMixin
+
+class RecoveryMixin(BaseMixin):
+    # Все аннотации типов теперь наследуются от BaseMixin
 
     async def perform_startup_recovery(self, symbol: Optional[str] = None):
         """Блокирующее восстановление состояния при старте платформы."""

@@ -12,22 +12,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.logger import get_logger
-from core.event_bus import EventBus
+from core.event_bus import EventBus, Event
 from core.config_loader import ConfigLoader
+from core.json_logger import JsonLogger
+
 from adapters.binance_rest import BinanceRestClient
 from adapters.binance_ws import BinanceWsAdapter
+from adapters.channel_router import ChannelRouter
+
 from trading.passport_manager import PassportManager
 from trading.passport_repository import PassportRepository
 from trading.trader import Trader
 from trading.orchestrator import Orchestrator
 from trading.state_manager import StateManager
+from trading.lifecycle_manager import LifecycleManager
+from trading.risk_manager import RiskManager
+
 from strategies.wall_fade import WallFadeStrategy
 from strategies.absorption import AbsorptionStrategy
 from strategies.breakout import BreakoutStrategy
-from adapters.channel_router import ChannelRouter
-from core.json_logger import JsonLogger
-from trading.lifecycle_manager import LifecycleManager
-from core.event_bus import EventBus, Event
+
 logger = get_logger(__name__)
 
 
@@ -38,9 +42,8 @@ class Platform:
         self._is_reconnecting = False        
         self._listen_key = None
 
-        # 🔥 Переменная для хранения цены из WS
+        # Переменные для хранения данных из WS
         self.ws_price = 0.0
-        # 🔥 Переменная для хранения стакана из WS
         self.ws_orderbook = {'bids': [], 'asks': []}
 
         # 1. Загрузка конфигов
@@ -52,85 +55,63 @@ class Platform:
         api_secret = secrets.get('api_secret', '') or exchange_config.get('api_secret', '')
 
         self.symbol = exchange_config.get('symbol', 'SOLUSDT')
-        trading_config = self.config.get('trading', {})
 
         # 2. JSON Logger
         self.json_logger = JsonLogger(enabled=True)
-        print(f"✅ [PLATFORM] JSON Logger initialized: enabled={self.json_logger.enabled}")
+        logger.info(f"✅ JSON Logger initialized: enabled={self.json_logger.enabled}")
 
-        # 3. Инициализация компонентов
+        # 3. Инициализация базовых компонентов
         self.bus = EventBus()
         self.passport_manager = PassportManager()
         self.passport_repository = PassportRepository()
 
-        # 4. REST клиент
+        # 4. REST и WS клиенты
         self.rest = BinanceRestClient(
             api_key=api_key,
             api_secret=api_secret,
             base_url=exchange_config.get('rest_base_url', 'https://testnet.binancefuture.com')
         )
 
-        # 5. WS адаптер
         self.ws = BinanceWsAdapter(
             base_url=exchange_config.get('ws_base_url', 'wss://stream.binancefuture.com/ws')
         )
         self.ws.set_json_logger(self.json_logger)
-
-        # 6. Channel Router
         self.router = ChannelRouter(self.ws, self.rest)
 
-        # 7. StateManager
+        # 5. StateManager
         self.state_manager = StateManager(self.passport_manager)
 
-        # 8. Оркестратор
+        # 6. Оркестратор (включает в себя миксины: EventHandlers, Monitor, Recovery, PositionMonitor)
         self.orchestrator = Orchestrator(
+            config=self.config,
             event_bus=self.bus,
             passport_manager=self.passport_manager,
             passport_repository=self.passport_repository,
             state_manager=self.state_manager,
-            config=self.config,
             json_logger=self.json_logger
         )
-        print(f"✅ [PLATFORM] Orchestrator initialized with json_logger")
+        logger.info("✅ Orchestrator initialized")
 
-        # 9. Трейдер (без PassportManager!)
-        symbol = exchange_config.get('symbol', 'SOLUSDT')
+        # 7. Трейдер
         self.trader = Trader(
-            symbol=symbol,
+            symbol=self.symbol,
             rest_client=self.rest,
             ws_adapter=self.ws,
             event_bus=self.bus,
             config=self.config
         )
+        self.orchestrator.register_trader(self.symbol, self.trader)
 
-        self.orchestrator.register_trader(symbol, self.trader)
-
-        # 10. LifecycleManager
-        from trading.lifecycle_manager import LifecycleManager
-
+        # 8. LifecycleManager (управление TTL)
         self.lifecycle_manager = LifecycleManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
             config=self.config,
             json_logger=self.json_logger
         )
-        print(f"✅ [PLATFORM] LifecycleManager initialized")
+        logger.info("✅ LifecycleManager initialized")
 
-        # 11. RecoveryManager
-        from trading.recovery_manager import RecoveryManager
-
-        self.recovery_manager = RecoveryManager(
-            passport_manager=self.passport_manager,
-            passport_repository=self.passport_repository,
-            trader=self.trader,
-            config=self.config,
-            json_logger=self.json_logger
-        )
-        print(f"✅ [PLATFORM] RecoveryManager initialized")
-
-        # 12. RiskManager (создаётся ПОСЛЕ трейдера)
-        from trading.risk_manager import RiskManager
-
+        # 9. RiskManager
         self.risk_manager = RiskManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
@@ -138,19 +119,16 @@ class Platform:
             config=self.config,
             json_logger=self.json_logger
         )
-        print(f"✅ [PLATFORM] RiskManager initialized")
-
-        # 13. Передаём RiskManager в Оркестратор (ТОЛЬКО ПОСЛЕ создания)
         self.orchestrator.set_risk_manager(self.risk_manager)
-        print(f"✅ [PLATFORM] RiskManager set in Orchestrator")
+        logger.info("✅ RiskManager initialized and set in Orchestrator")
 
-        # 14. Стратегии
+        # 10. Стратегии
         strategies_config = self.config.get('strategies', {})
         self.wall_fade = WallFadeStrategy(strategies_config.get('wall_fade', {}))
         self.absorption = AbsorptionStrategy(strategies_config.get('absorption', {}))
         self.breakout = BreakoutStrategy(strategies_config.get('breakout', {}))
 
-        logger.info(f"✅ Platform initialized | symbol={symbol} | profile={profile}")
+        logger.info(f"✅ Platform initialized | symbol={self.symbol} | profile={profile}")
 
         # Тест JSON Logger
         self.json_logger.log(
@@ -158,19 +136,13 @@ class Platform:
             event="test_log",
             data={"message": "JSON Logger is working"}
         )
-        print(f"✅ [PLATFORM] Test log written to platform_log.json")
 
     async def _generate_signals(self, context: dict):
         signals = []
-        signal = self.wall_fade.generate_signal(context)
-        if signal:
-            signals.append(signal)
-        signal = self.absorption.generate_signal(context)
-        if signal:
-            signals.append(signal)
-        signal = self.breakout.generate_signal(context)
-        if signal:
-            signals.append(signal)
+        for strategy in [self.wall_fade, self.absorption, self.breakout]:
+            signal = strategy.generate_signal(context)
+            if signal:
+                signals.append(signal)
         return signals
 
     async def _main_loop(self):
@@ -180,28 +152,19 @@ class Platform:
         self._listen_key = listen_key
         logger.info(f"✅ Listen key obtained: {listen_key[:10]}...")
 
-        self.json_logger.log(
-            module="platform",
-            event="listen_key_obtained",
-            data={"listen_key": listen_key[:10] + "..."}
-        )
-
         await self.ws.connect()
         asyncio.create_task(self.ws.health_check_loop())
         await self.ws.subscribe_depth(self.symbol)
 
-        # Инициализация таймеров
         self._last_user_data_ts = time.time()
         self._last_price_update_ts = time.time()
 
         # ===== Обработчик переподключения WS =====
         async def on_ws_reconnect():
             if getattr(self, '_is_reconnecting', False):
-                logger.debug("Reconnect already in progress, skipping.")
                 return
             
             self._is_reconnecting = True
-            last_error = None
             refreshed = False
             
             try:
@@ -212,21 +175,10 @@ class Platform:
                         await self.ws.subscribe_user_data(new_listen_key)
                         self._last_user_data_ts = time.time()
                         refreshed = True
-                        self.json_logger.log(
-                            module="platform",
-                            event="listen_key_refreshed_on_reconnect",
-                            data={"listen_key": new_listen_key[:10] + "...", "attempt": attempt + 1}
-                        )
                         logger.info(f"✅ Listen key refreshed on reconnect: {new_listen_key[:10]}...")
                         break
                     except Exception as e:
-                        last_error = e
                         logger.error(f"❌ Refresh listen key attempt {attempt + 1}/3 failed: {e}")
-                        self.json_logger.log(
-                            module="platform",
-                            event="listen_key_refresh_attempt_failed",
-                            data={"attempt": attempt + 1, "error": str(e)}
-                        )
                         try:
                             await self.rest.reset_session()
                         except Exception:
@@ -235,12 +187,7 @@ class Platform:
                             await asyncio.sleep(0.5 * (attempt + 1))
 
                 if not refreshed:
-                    logger.critical(f"❌ CRITICAL: listen key not refreshed after 3 attempts: {last_error}")
-                    self.json_logger.log(
-                        module="platform",
-                        event="listen_key_refresh_failed_all_attempts",
-                        data={"error": str(last_error)}
-                    )
+                    logger.critical("❌ CRITICAL: listen key not refreshed after 3 attempts")
             finally:
                 self._is_reconnecting = False
 
@@ -255,18 +202,10 @@ class Platform:
 
         # ===== Обработчик принудительного реконнекта WS =====
         async def on_ws_reconnect_forced(event: Event):
-            self.json_logger.log(
-                module="platform",
-                event="ws_reconnect_forced",
-                data={"passport_id": event.payload.get('passport_id')}
-            )
             logger.warning(f"⚠️ WS reconnect forced for passport {event.payload.get('passport_id')}")
             
-            close_method = getattr(self.ws, 'close', None)
-            if close_method is not None and callable(close_method):
-                await close_method()  # type: ignore[misc]
-            else:
-                logger.warning("⚠️ WS adapter has no 'close' method. Standard reconnect will handle it.")
+            if hasattr(self.ws, 'close'):
+                await self.ws.close()  # type: ignore[misc]
 
         self.bus.subscribe("WS_RECONNECT_FORCED", on_ws_reconnect_forced)
 
@@ -274,21 +213,11 @@ class Platform:
         async def on_order_update(data):
             self._last_user_data_ts = time.time()            
             
-            # Пробуем разные варианты извлечения
-            if 'o' in data and isinstance(data['o'], dict):
-                order_data = data['o']
-            else:
-                order_data = data
-                
-            # Ищем ключи в любом из возможных написаний (Binance или нормализованные)
+            order_data = data.get('o', data)
             client_order_id = str(order_data.get('c') or order_data.get('clientOrderId') or order_data.get('client_order_id') or '')
             order_status = str(order_data.get('X') or order_data.get('status') or '')
             symbol = str(order_data.get('s') or order_data.get('symbol') or '')
             
-            # Если ключи всё ещё не найдены, печатаем содержимое для точного анализа
-            if not client_order_id:
-                print(f"⚠️ [DEBUG] FULL ORDER_DATA CONTENT: {order_data}")
-
             await self.bus.publish(
                 event_type="ORDER_TRADE_UPDATE",
                 source="ws_adapter",
@@ -320,8 +249,6 @@ class Platform:
                     best_bid = float(bids[0][0])
                     best_ask = float(asks[0][0])
                     self.ws_price = (best_bid + best_ask) / 2
-
-                    # 🔥 КРИТИЧЕСКИ ВАЖНО: Обновляем таймер живости WS
                     self._last_price_update_ts = time.time()
 
                     await self.bus.publish(
@@ -339,55 +266,33 @@ class Platform:
         self.ws.on("depthUpdate", on_depth_update)
 
         await self.ws.subscribe_user_data(listen_key)
-        print(f"✅ [PLATFORM] User data stream subscribed: {listen_key[:10]}...")
+        logger.info(f"✅ User data stream subscribed: {listen_key[:10]}...")
 
-        # =====================================================================
-        # 🔥 1. ОПРЕДЕЛЕНИЕ ФУНКЦИИ HEALTH CHECK
-        # =====================================================================
+        # ===== Фоновые задачи =====
         async def user_data_health_check():
-            """Проверяет живость WS на основе ПОТОКА ЦЕН, а не ACCOUNT_UPDATE."""
             while getattr(self, '_running', True):
                 await asyncio.sleep(10)
-                
                 price_age = time.time() - getattr(self, '_last_price_update_ts', time.time())
-                user_data_age = time.time() - getattr(self, '_last_user_data_ts', time.time())
-                
                 has_active = bool(self.passport_manager.get_active_by_symbol(self.symbol))
                 
-                # Если цена обновлялась менее 60 секунд назад, всё отлично
-                if has_active and price_age < 60:
-                    continue 
-                
-                # Порог увеличен до 60 секунд для стабильности
                 if has_active and price_age > 60:
                     logger.warning(f"⚠️ WS DEAD: No price updates for {price_age:.0f}s. Forcing refresh.")
-                    self.json_logger.log(
-                        module="platform",
-                        event="ws_dead_no_price_updates",
-                        data={"age_sec": round(price_age, 1)}
-                    )
                     self._last_price_update_ts = time.time()
                     await on_ws_reconnect()
 
-        # =====================================================================
-        # 🔥 2. ЗАПУСК ВСЕХ ФОНОВЫХ ЗАДАЧ
-        # =====================================================================
         asyncio.create_task(self.ws.run())
         asyncio.create_task(self._keep_alive_loop())
         asyncio.create_task(user_data_health_check())
         
+        # Запуск мониторинга зависших ордеров (из MonitorMixin)
         await self.orchestrator.start_stuck_orders_monitor()
 
-        # =====================================================================
-        # 🔥 3. БЛОКИРУЮЩАЯ СИНХРОНИЗАЦИЯ ПРИ СТАРТЕ
-        # =====================================================================
+        # ===== Блокирующая синхронизация при старте (из RecoveryMixin) =====
         logger.info("🔄 [STARTUP] Performing exchange state recovery (blocking)...")
-        await self.orchestrator.perform_startup_recovery(self.symbol)
+        await self.orchestrator.perform_startup_recovery(self.symbol)  # type: ignore[misc]
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
 
-        # =====================================================================
-        # 🔥 4. ОСНОВНОЙ ЦИКЛ
-        # =====================================================================
+        # ===== Основной цикл =====
         last_log_time = 0
         last_position_check_time = 0
 
@@ -400,17 +305,18 @@ class Platform:
                     bids = orderbook.get('bids', [])
                     asks = orderbook.get('asks', [])
                     if bids and asks:
-                        best_bid = float(bids[0][0])
-                        best_ask = float(asks[0][0])
-                        current_price = (best_bid + best_ask) / 2
+                        current_price = (float(bids[0][0]) + float(asks[0][0])) / 2
                     else:
                         current_price = 0.0
 
                 current_time = time.time()
+                
+                # Периодическая проверка позиции через REST (для надёжности)
                 if current_time - last_position_check_time >= 10:
-                    position = await self.rest.get_position(self.symbol)
+                    await self.rest.get_position(self.symbol)
                     last_position_check_time = current_time
 
+                # Логирование цены каждые 30 секунд
                 if current_time - last_log_time >= 30:
                     logger.info(f"🔄 Price: {current_price} (from {'WS' if self.ws_price > 0 else 'REST'})")
                     last_log_time = current_time
@@ -433,11 +339,10 @@ class Platform:
                         logger.info(f"  - {s.signal_id} | {s.side} @ {s.entry_price}")
 
                     if not self.passport_manager.is_symbol_busy(self.symbol):
-                        signal = signals[0]
                         await self.bus.publish(
                             event_type="SIGNAL_GENERATED",
                             source="strategy",
-                            payload={"signal": signal},
+                            payload={"signal": signals[0]},
                             symbol=self.symbol
                         )
 
@@ -454,28 +359,11 @@ class Platform:
                 if self._listen_key:
                     await self.rest.renew_listen_key(self._listen_key)
                     logger.info("✅ Listen key renewed")
-                    if hasattr(self, 'json_logger') and self.json_logger:
-                        self.json_logger.log(
-                            module="platform",
-                            event="listen_key_renewed",
-                            data={"listen_key": self._listen_key[:10] + "..."}
-                        )
             except Exception as e:
                 logger.error(f"❌ Failed to renew listen key: {e}")
-                if hasattr(self, 'json_logger') and self.json_logger:
-                    self.json_logger.log(
-                        module="platform",
-                        event="listen_key_renew_failed",
-                        data={"error": str(e)}
-                    )
 
     async def run(self):
         logger.info("🚀 Starting platform...")
-        
-        # 🔥 Восстановление после перезапуска
-        #recovery_stats = await self.recovery_manager.recover()
-        #logger.info(f"♻️ Recovery stats: {recovery_stats}")
-        
         await self.orchestrator.start()
         await self._main_loop()
 

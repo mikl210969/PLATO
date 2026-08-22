@@ -6,15 +6,10 @@ from typing import TYPE_CHECKING, Dict, Any, Optional
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
 
-class EventHandlersMixin:
-    # Явные аннотации типов для удовлетворения Pylance (эти атрибуты есть в Orchestrator)
-    _log: Any
-    bus: Any
-    passport_manager: Any
-    repository: Any
-    state_manager: Any
-    config: Any
-    get_trader: Any
+from .base_mixin import BaseMixin
+
+class EventHandlersMixin(BaseMixin):
+    # Все аннотации типов теперь наследуются от BaseMixin
 
     def __init__(self):
         self._last_signal_time: Dict[str, float] = {}

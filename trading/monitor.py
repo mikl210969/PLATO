@@ -5,15 +5,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
 
-class MonitorMixin:
-    # Явные аннотации типов для удовлетворения Pylance (эти атрибуты есть в Orchestrator)
-    _log: Any
-    passport_manager: Any
-    repository: Any
-    state_manager: Any
-    bus: Any
-    get_trader: Any
+from .base_mixin import BaseMixin
 
+class MonitorMixin(BaseMixin):
+    # Все аннотации типов теперь наследуются от BaseMixin
     def __init__(self):
         self._stuck_orders_task = None
         self._running = True
