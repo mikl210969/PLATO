@@ -62,64 +62,108 @@ class LifecycleManager:
 
     async def _on_passport_created(self, event: Event):
         """Обработка создания паспорта."""
+        print(f"🔥 [DEBUG TTL] 1. LifecycleManager получил событие. Payload: {event.payload}")
+        
         payload = event.payload
         passport_id = payload.get('passport_id')
         order_type = payload.get('order_type', 'market')
         client_order_id = payload.get('client_order_id', '')
 
+        print(f"🔥 [DEBUG TTL] 2. Извлеченные данные: passport_id='{passport_id}', order_type='{order_type}'")
+
         # Только для лимитных ордеров
-        if order_type != 'limit':
+        if str(order_type).lower() != 'limit':
+            print(f"⚠️ [DEBUG TTL] 3. ВЫХОД: order_type не 'limit' (получено: '{order_type}')")
             return
+        print(f"✅ [DEBUG TTL] 3. Проверка order_type пройдена.")
 
-        # 🔥 Проверяем, что client_order_id — это строка
+        # Проверяем, что client_order_id — это строка и не SL ордер
         if client_order_id and isinstance(client_order_id, str):
-            if 'SL_' in client_order_id:
-                self._log("ttl_skip_sl_order", {
-                    "passport_id": passport_id,
-                    "client_order_id": client_order_id
-                })
+            if 'SL_' in client_order_id or 'TP_' in client_order_id:
+                print(f"⚠️ [DEBUG TTL] 4. ВЫХОД: это ордер SL/TP ({client_order_id})")
                 return
+        print(f"✅ [DEBUG TTL] 4. Проверка client_order_id пройдена.")
 
-        # 🔥 Проверяем, что passport_id — это строка
+        # Проверяем, что passport_id — это строка
         if not passport_id or not isinstance(passport_id, str):
-            self._log("ttl_skip_invalid_passport_id", {"passport_id": passport_id})
+            print(f"⚠️ [DEBUG TTL] 5. ВЫХОД: некорректный passport_id ({passport_id})")
             return
+        print(f"✅ [DEBUG TTL] 5. Проверка passport_id пройдена.")
 
+        # Ищем паспорт в менеджере
         passport = self.passport_manager.get(passport_id)
         if not passport:
-            self._log("passport_not_found", {"passport_id": passport_id})
+            print(f"⚠️ [DEBUG TTL] 6. ВЫХОД: паспорт НЕ НАЙДЕН в passport_manager.get('{passport_id}')")
+            # Попробуем вывести все активные ID для сверки
+            active_ids = [p.passport_id for p in self.passport_manager.get_active()]
+            print(f"   Доступные активные паспорта: {active_ids}")
             return
+        print(f"✅ [DEBUG TTL] 6. Паспорт успешно найден!")
 
+        print(f"🚀 [DEBUG TTL] 7. ЗАПУСКАЕМ ТАЙМЕР для {passport_id}")
         self._log("ttl_started_for_limit_order", {
             "passport_id": passport_id,
             "order_type": order_type
         })
 
         await self._start_ttl_timer(passport)
+        print(f"✅ [DEBUG TTL] 8. Метод _start_ttl_timer вызван успешно.")
 
-    async def _start_ttl_timer(self, passport: TradePassport):
+    async def _start_ttl_timer(self, passport: 'TradePassport'):
         """Запустить TTL-таймер для паспорта."""
         passport_id = passport.passport_id
+        
+        # Получаем TTL из конфига
+        trading_config = self.config.get('trading', {})
+        ttl_seconds = trading_config.get('ttl_seconds', 300)
 
-        # Проверяем, нет ли уже активного таймера
-        if passport_id in self._timers:
-            self._log("timer_already_running", {"passport_id": passport_id})
-            return
+        async def ttl_task():
+            try:
+                # Ждем указанное время
+                await asyncio.sleep(ttl_seconds)
+                
+                # Проверяем, актуален ли еще паспорт
+                current_passport = self.passport_manager.get(passport_id)
+                if not current_passport:
+                    return
+                
+                # 🔥 ГЛАВНАЯ ЗАЩИТА: Если ордер уже исполнился (OPEN) или закрыт, 
+                # мы просто выходим. Никаких отмен задач, никаких RecursionError.
+                if current_passport.status in ["OPEN", "CLOSED", "TTL_EXPIRED", "EXTERNAL_CLOSE"]:
+                    return
+                
+                # Если мы здесь, значит ордер всё ещё висит (ORDER_ACK или ORDER_SENT)
+                order_info = current_passport.orders[-1] if current_passport.orders else {}
+                order_id = order_info.get('order_id')
+                
+                self._log("ttl_expired_triggering", {
+                    "passport_id": passport_id,
+                    "order_id": order_id,
+                    "status": current_passport.status
+                })
+                
+                # Публикуем событие для отмены
+                await self.bus.publish(
+                    event_type="TTL_EXPIRED",
+                    source="lifecycle_manager",
+                    payload={
+                        "passport_id": passport_id,
+                        "symbol": current_passport.symbol,
+                        "order_id": order_id
+                    },
+                    symbol=current_passport.symbol
+                )
+                
+            except asyncio.CancelledError:
+                # Тихо игнорируем, если задача была отменена извне
+                pass
+            except Exception as e:
+                self._log("ttl_timer_error", {"passport_id": passport_id, "error": str(e)})
+            # 🔥 МЫ УБРАЛИ БЛОК finally с del self._timers, чтобы избежать RecursionError в Python 3.11
 
-        # Получаем TTL из конфига (по умолчанию 300 секунд = 5 минут)
-        ttl_seconds = self.config.get('trading', {}).get('ttl_seconds', 300)
-
-        self._log("ttl_timer_started", {
-            "passport_id": passport_id,
-            "ttl_seconds": ttl_seconds,
-            "symbol": passport.symbol,
-            "side": passport.side,
-            "entry_price": passport.entry_price
-        })
-
-        # Создаём задачу-таймер
-        task = asyncio.create_task(self._ttl_timer_task(passport, ttl_seconds))
-        self._timers[passport_id] = task
+        # Просто создаем задачу в фоне. Мы не сохраняем ссылку на неё, 
+        # так как проверка статуса паспорта выше делает это безопасным.
+        asyncio.create_task(ttl_task())
 
     async def _ttl_timer_task(self, passport: TradePassport, ttl_seconds: int):
         """Задача таймера."""

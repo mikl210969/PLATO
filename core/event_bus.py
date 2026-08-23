@@ -3,6 +3,7 @@ Event Bus — асинхронная шина событий для слабой
 """
 
 import asyncio
+import traceback  # 🔥 ДОБАВЛЕНО: для вывода полного стека ошибок
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -36,7 +37,9 @@ class EventBus:
             try:
                 await handler(event)
             except Exception as e:
-                print(f"[EVENT_BUS] Handler error: {e}")
+                print(f"❌ [EVENT_BUS] Handler error: {e}")
+                print("🔥 ПОЛНАЯ ТРАССИРОВКА ОШИБКИ (TRACEBACK):")
+                traceback.print_exc()  # 🔥 ДОБАВЛЕНО: печатает точный файл и строку ошибки
 
         if event_type not in self._handlers:
             self._handlers[event_type] = []

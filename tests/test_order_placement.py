@@ -175,7 +175,10 @@ async def test_order_placement_happy_path(mock_components, mock_trader, mock_pas
     event_bus.publish.assert_any_call(
         event_type="PASSPORT_CREATED",
         source="orchestrator",
-        payload={"passport_id": "TEST_PASSPORT_PLACE_001"},
+        payload={
+            "passport_id": "TEST_PASSPORT_PLACE_001",
+            "order_type": "limit"  # ← Добавлено, чтобы соответствовать новому коду
+        },
         symbol="SOLUSDT",
     )
 

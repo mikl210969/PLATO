@@ -210,13 +210,20 @@ class Platform:
         self.bus.subscribe("WS_RECONNECT_FORCED", on_ws_reconnect_forced)
 
         # ===== Подписка на события WS → Шина =====
+
         async def on_order_update(data):
             self._last_user_data_ts = time.time()            
             
             order_data = data.get('o', data)
+            
             client_order_id = str(order_data.get('c') or order_data.get('clientOrderId') or order_data.get('client_order_id') or '')
             order_status = str(order_data.get('X') or order_data.get('status') or '')
             symbol = str(order_data.get('s') or order_data.get('symbol') or '')
+            
+            # 🔥 КРИТИЧЕСКИ ВАЖНО: извлекаем количество и цену исполнения
+            # 'z' - executedQty в сыром формате Binance, 'ap' - averagePrice
+            executed_qty = float(order_data.get('z') or order_data.get('executedQty') or order_data.get('executed_qty') or 0.0)
+            avg_price = float(order_data.get('ap') or order_data.get('avgPrice') or order_data.get('price') or 0.0)
             
             await self.bus.publish(
                 event_type="ORDER_TRADE_UPDATE",
@@ -224,7 +231,9 @@ class Platform:
                 payload={
                     "client_order_id": client_order_id,
                     "status": order_status,
-                    "symbol": symbol
+                    "symbol": symbol,
+                    "executed_qty": executed_qty,  # ← Добавлено
+                    "avg_price": avg_price         # ← Добавлено
                 },
                 symbol=symbol
             )

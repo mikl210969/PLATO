@@ -95,9 +95,24 @@ class EventHandlersMixin(BaseMixin):
             })
             self.repository.save(passport)
 
-            if order_type == 'limit':
-                await self.bus.publish(event_type="PASSPORT_CREATED", source="orchestrator", 
-                                       payload={"passport_id": passport.passport_id}, symbol=signal.symbol)
+            # 🔥 ОТЛАДКА TTL: Проверяем, пытаемся ли мы вообще опубликовать событие
+            print(f"🔥 [DEBUG TTL] Конфиг order_type: '{order_type}' (тип: {type(order_type)})")
+            
+            if str(order_type).lower() == 'limit':
+                print(f"🔥 [DEBUG TTL] Пытаемся опубликовать PASSPORT_CREATED для {passport.passport_id}")
+                await self.bus.publish(
+                    event_type="PASSPORT_CREATED",
+                    source="orchestrator",
+                    payload={
+                        "passport_id": passport.passport_id,
+                        "order_type": str(order_type).lower()
+                    },
+                    symbol=signal.symbol
+                )
+                print(f"✅ [DEBUG TTL] PASSPORT_CREATED успешно опубликован!")
+            else:
+                print(f"⚠️ [DEBUG TTL] Пропускаем публикацию PASSPORT_CREATED, так как order_type = '{order_type}' (ожидался 'limit')")
+                
         else:
             self.state_manager.handle_event(passport, "ORDER_FAILED", result.get('error', 'unknown'))
             self.repository.save(passport)
@@ -266,59 +281,51 @@ class EventHandlersMixin(BaseMixin):
             "order_id": order_id
         })
         
-        # Находим паспорт
         passport = self.passport_manager.get(passport_id)
         if not passport:
             self._log("ttl_passport_not_found", {"passport_id": passport_id})
             return
         
-        # Получаем трейдера
         trader = self.get_trader(symbol)
         if not trader:
             self._log("ttl_trader_not_found", {"symbol": symbol})
             return
         
-        # 🔥 ЛОГИКА В ЗАВИСИМОСТИ ОТ СТАТУСА
+        # Если ордер уже полностью исполнился, TTL не нужен
         if passport.status == "OPEN":
-            # Ордер полностью исполнился, TTL не нужен
-            self._log("ttl_skip_fully_filled", {
-                "passport_id": passport_id,
-                "status": passport.status
-            })
+            self._log("ttl_skip_fully_filled", {"passport_id": passport_id, "status": passport.status})
             return
         
         elif passport.status == "PARTIALLY_FILLED":
-            # 🔥 ЧАСТИЧНОЕ ИСПОЛНЕНИЕ: отменяем остаток, позиция остается
+            # Частичное исполнение: отменяем остаток, но позиция остается OPEN
             self._log("ttl_partial_fill_detected", {
                 "passport_id": passport_id,
                 "position_size": passport.position_size,
                 "original_quantity": passport.orders[-1].get('quantity', 0) if passport.orders else 0
             })
             
-            # Отменяем остаток ордера на бирже
             cancel_result = await trader.cancel_order(symbol=symbol, order_id=order_id)
             
-            if cancel_result.get('success'):
-                self._log("ttl_partial_fill_order_canceled", {
-                    "passport_id": passport_id,
-                    "remaining_canceled": True
-                })
+            is_success = False
+            if isinstance(cancel_result, dict):
+                is_success = cancel_result.get('success', False)
+            else:
+                is_success = bool(cancel_result)
+
+            if is_success:
+                self._log("ttl_partial_fill_order_canceled", {"passport_id": passport_id, "remaining_canceled": True})
                 
-                # Паспорт остается OPEN с фактическим размером позиции
-                passport.status = "OPEN"
-                passport.exit_reason = ""  # Позиция открыта, не закрыта
+                passport.status = "OPEN" # Позиция остается открытой
+                passport.exit_reason = ""
                 
-                # Добавляем запись в timeline
                 passport.timeline.append({
                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "event": "TTL_EXPIRED_PARTIAL_FILL",
                     "details": f"TTL expired. Remaining order canceled. Position size: {passport.position_size}"
                 })
                 
-                # Сохраняем паспорт
                 self.repository.save(passport)
                 
-                # Публикуем событие, что позиция открыта (для RiskManager и Monitor)
                 await self.bus.publish(
                     event_type="POSITION_OPENED",
                     source="lifecycle_manager",
@@ -334,11 +341,11 @@ class EventHandlersMixin(BaseMixin):
             else:
                 self._log("ttl_partial_fill_cancel_failed", {
                     "passport_id": passport_id,
-                    "error": cancel_result.get('error')
+                    "error": str(cancel_result)
                 })
         
         else:
-            # ORDER_SENT, ORDER_ACK или другие статусы — ордер не исполнился, отменяем полностью
+            # ORDER_SENT, ORDER_ACK: ордер не исполнился, отменяем полностью
             self._log("ttl_canceling_order", {
                 "passport_id": passport_id,
                 "order_id": order_id,
@@ -347,39 +354,44 @@ class EventHandlersMixin(BaseMixin):
             
             cancel_result = await trader.cancel_order(symbol=symbol, order_id=order_id)
             
-            if cancel_result.get('success'):
+            is_success = False
+            if isinstance(cancel_result, dict):
+                is_success = cancel_result.get('success', False)
+            else:
+                is_success = bool(cancel_result)
+            
+            if is_success:
                 self._log("ttl_order_canceled_success", {
                     "passport_id": passport_id,
                     "order_id": order_id
                 })
                 
-                # Меняем статус паспорта
-                passport.status = "TTL_EXPIRED"
+                # 🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Статус CLOSED, чтобы освободить символ для новых сигналов
+                passport.status = "CLOSED"
                 passport.exit_reason = "TTL_EXPIRED"
+                passport.closed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 
-                # Добавляем запись в timeline
                 passport.timeline.append({
                     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "event": "STATUS: TTL_EXPIRED",
+                    "event": "STATUS: CLOSED",
                     "details": f"Limit order canceled after TTL. Order ID: {order_id}"
                 })
                 
-                # Сохраняем паспорт
                 self.repository.save(passport)
                 
-                # Публикуем событие о закрытии
                 await self.bus.publish(
                     event_type="POSITION_CLOSED",
                     source="lifecycle_manager",
                     payload={
                         "passport_id": passport_id,
                         "symbol": symbol,
-                        "exit_reason": "TTL_EXPIRED"
+                        "exit_reason": "TTL_EXPIRED",
+                        "gross_pnl": 0.0
                     },
                     symbol=symbol
                 )
             else:
                 self._log("ttl_cancel_failed", {
                     "passport_id": passport_id,
-                    "error": cancel_result.get('error')
+                    "error": str(cancel_result)
                 })
