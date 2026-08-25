@@ -1,16 +1,13 @@
 """
 Трейдер — исполнитель команд. Только отправляет ордера и возвращает результат.
 Никакой логики принятия решений, работы с паспортом или сохранения.
-
 Hedge Mode:
-- position_side передаётся явно (сторона ПОЗИЦИИ).
-- reduceOnly в Hedge Mode НЕ шлётся (запрещён, -1106); биржа сама делает
-  ордера reduce-only по связке side + positionSide.
+position_side передаётся явно (сторона ПОЗИЦИИ).
+reduceOnly в Hedge Mode НЕ шлётся (запрещён, -1106); биржа сама делает
+ордера reduce-only по связке side + positionSide.
 """
-
 import time
 from typing import Optional, Dict, Any
-
 from core.types import OrderSide
 from adapters.binance_rest import BinanceRestClient
 from adapters.binance_ws import BinanceWsAdapter
@@ -33,10 +30,9 @@ class Trader:
         self.ws = ws_adapter
         self.bus = event_bus
         self.config = config
-
         self._running = True
         self._opened_at: Optional[float] = None
-
+        
         # Exit Calculator
         from trading.exit_calculator import ExitCalculator
         self.exit_calculator = ExitCalculator(config.get('trading', {}))
@@ -65,16 +61,17 @@ class Trader:
         """
         Исполнить ордер.
         Возвращает результат.
-
-        order_type: 'market', 'limit', 'stop_market', 'stop_limit'
-        limit_price: цена для лимитного ордера (обязателен для limit, stop_limit)
-        stop_price: цена активации (обязателен для stop_market, stop_limit)
-        position_side: 'LONG'/'SHORT' — сторона ПОЗИЦИИ. Если None — выводится из side.
         """
         try:
+            # 🔥 ФИКС BINANCE: client_order_id должен быть <= 35 символов. Обрезаем, если нужно.
+            if client_order_id:
+                client_order_id = client_order_id[:35]
+            else:
+                client_order_id = f"ORD_{passport_id}"[:35]
+            
             # Определяем сторону ордера
             order_side = OrderSide.SELL.value if side == 'short' else OrderSide.BUY.value
-
+            
             # Hedge Mode: явная сторона позиции, либо вывод из стороны ордера (для входа)
             effective_position_side = position_side or ('SHORT' if side == 'short' else 'LONG')
 
@@ -83,22 +80,16 @@ class Trader:
                     symbol=symbol,
                     side=order_side,
                     quantity=quantity,
-                    new_client_order_id=client_order_id or f"ORD_{passport_id}",
+                    new_client_order_id=client_order_id,
                     reduce_only=reduce_only,
                     position_side=effective_position_side
                 )
-
             elif order_type == 'limit':
                 if limit_price is None or limit_price <= 0:
                     return {
-                        'success': False,
-                        'order_id': None,
-                        'client_order_id': None,
-                        'status': 'FAILED',
-                        'order_type': 'LIMIT',
-                        'quantity': 0,
-                        'symbol': symbol,
-                        'passport_id': passport_id,
+                        'success': False, 'order_id': None, 'client_order_id': None,
+                        'status': 'FAILED', 'order_type': 'LIMIT', 'quantity': 0,
+                        'symbol': symbol, 'passport_id': passport_id,
                         'error': 'Limit price is required for limit order'
                     }
                 result = await self.rest.create_limit_order(
@@ -106,22 +97,16 @@ class Trader:
                     side=order_side,
                     price=limit_price,
                     quantity=quantity,
-                    new_client_order_id=client_order_id or f"ORD_{passport_id}",
+                    new_client_order_id=client_order_id,
                     reduce_only=reduce_only,
                     position_side=effective_position_side
                 )
-
             elif order_type == 'stop_market':
                 if stop_price is None or stop_price <= 0:
                     return {
-                        'success': False,
-                        'order_id': None,
-                        'client_order_id': None,
-                        'status': 'FAILED',
-                        'order_type': 'STOP_MARKET',
-                        'quantity': 0,
-                        'symbol': symbol,
-                        'passport_id': passport_id,
+                        'success': False, 'order_id': None, 'client_order_id': None,
+                        'status': 'FAILED', 'order_type': 'STOP_MARKET', 'quantity': 0,
+                        'symbol': symbol, 'passport_id': passport_id,
                         'error': 'Stop price is required for stop_market order'
                     }
                 result = await self.rest.create_stop_market_order(
@@ -129,34 +114,16 @@ class Trader:
                     side=order_side,
                     stop_price=stop_price,
                     quantity=quantity,
-                    new_client_order_id=client_order_id or f"ORD_{passport_id}",
+                    new_client_order_id=client_order_id,
                     reduce_only=reduce_only
                 )
-
             elif order_type == 'stop_limit':
-                if stop_price is None or stop_price <= 0:
+                if stop_price is None or stop_price <= 0 or limit_price is None or limit_price <= 0:
                     return {
-                        'success': False,
-                        'order_id': None,
-                        'client_order_id': None,
-                        'status': 'FAILED',
-                        'order_type': 'STOP_LIMIT',
-                        'quantity': 0,
-                        'symbol': symbol,
-                        'passport_id': passport_id,
-                        'error': 'Stop price is required for stop_limit order'
-                    }
-                if limit_price is None or limit_price <= 0:
-                    return {
-                        'success': False,
-                        'order_id': None,
-                        'client_order_id': None,
-                        'status': 'FAILED',
-                        'order_type': 'STOP_LIMIT',
-                        'quantity': 0,
-                        'symbol': symbol,
-                        'passport_id': passport_id,
-                        'error': 'Limit price is required for stop_limit order'
+                        'success': False, 'order_id': None, 'client_order_id': None,
+                        'status': 'FAILED', 'order_type': 'STOP_LIMIT', 'quantity': 0,
+                        'symbol': symbol, 'passport_id': passport_id,
+                        'error': 'Stop and Limit prices are required for stop_limit order'
                     }
                 result = await self.rest.create_stop_limit_order(
                     symbol=symbol,
@@ -164,20 +131,14 @@ class Trader:
                     stop_price=stop_price,
                     limit_price=limit_price,
                     quantity=quantity,
-                    new_client_order_id=client_order_id or f"ORD_{passport_id}",
+                    new_client_order_id=client_order_id,
                     reduce_only=reduce_only
                 )
-
             else:
                 return {
-                    'success': False,
-                    'order_id': None,
-                    'client_order_id': None,
-                    'status': 'FAILED',
-                    'order_type': order_type.upper(),
-                    'quantity': 0,
-                    'symbol': symbol,
-                    'passport_id': passport_id,
+                    'success': False, 'order_id': None, 'client_order_id': None,
+                    'status': 'FAILED', 'order_type': order_type.upper(), 'quantity': 0,
+                    'symbol': symbol, 'passport_id': passport_id,
                     'error': f'Unknown order type: {order_type}'
                 }
 
@@ -196,43 +157,18 @@ class Trader:
                 }
             else:
                 return {
-                    'success': False,
-                    'order_id': None,
-                    'client_order_id': None,
-                    'status': 'FAILED',
-                    'order_type': order_type.upper(),
-                    'quantity': 0,
-                    'symbol': symbol,
-                    'passport_id': passport_id,
+                    'success': False, 'order_id': None, 'client_order_id': None,
+                    'status': 'FAILED', 'order_type': order_type.upper(), 'quantity': 0,
+                    'symbol': symbol, 'passport_id': passport_id,
                     'error': result.get('error', 'Unknown error')
                 }
-
         except Exception as e:
             return {
-                'success': False,
-                'order_id': None,
-                'client_order_id': None,
-                'status': 'FAILED',
-                'order_type': order_type.upper(),
-                'quantity': 0,
-                'symbol': symbol,
-                'passport_id': passport_id,
+                'success': False, 'order_id': None, 'client_order_id': None,
+                'status': 'FAILED', 'order_type': order_type.upper(), 'quantity': 0,
+                'symbol': symbol, 'passport_id': passport_id,
                 'error': str(e)
             }
-
-    def _get_limit_price(self, side: str, current_price: float = 0.0, offset: float = 0.0) -> float:
-        """
-        Получить цену для лимитного ордера.
-        Если current_price = 0 — используем конфиг или возвращаем 0.
-        """
-        if current_price > 0:
-            return current_price
-
-        config_price = self.config.get('trading', {}).get('limit_price', 0)
-        if config_price > 0:
-            return config_price
-
-        return 0.0
 
     async def close_position(
         self,
@@ -254,20 +190,23 @@ class Trader:
                 position_side = 'SHORT' if size < 0 else 'LONG'
             except Exception:
                 position_side = 'LONG'
-
+        
         # Закрытие SHORT = BUY, закрытие LONG = SELL
         order_side = OrderSide.BUY.value if position_side == 'SHORT' else OrderSide.SELL.value
-
+        
+        # 🔥 ФИКС BINANCE: Обрезаем client_order_id до 35 символов
+        cid = f"CLOSE_{exit_reason}_{int(time.time() * 1000)}"[:35]
+        
         try:
             result = await self.rest.create_market_order(
                 symbol=symbol,
                 side=order_side,
                 quantity=quantity,
                 reduce_only=False,  # 🔥 в Hedge Mode reduceOnly запрещён
-                new_client_order_id=f"CLOSE_{exit_reason}_{int(time.time() * 1000)}",
+                new_client_order_id=cid,
                 position_side=position_side
             )
-
+            
             if result.get('success'):
                 return {
                     'success': True,
@@ -282,27 +221,16 @@ class Trader:
                 }
             else:
                 return {
-                    'success': False,
-                    'order_id': None,
-                    'client_order_id': None,
-                    'status': 'FAILED',
-                    'quantity': 0,
-                    'symbol': symbol,
-                    'exit_reason': exit_reason,
-                    'exit_price': 0,
+                    'success': False, 'order_id': None, 'client_order_id': None,
+                    'status': 'FAILED', 'quantity': 0, 'symbol': symbol,
+                    'exit_reason': exit_reason, 'exit_price': 0,
                     'error': result.get('error', 'Unknown error')
                 }
-
         except Exception as e:
             return {
-                'success': False,
-                'order_id': None,
-                'client_order_id': None,
-                'status': 'FAILED',
-                'quantity': 0,
-                'symbol': symbol,
-                'exit_reason': exit_reason,
-                'exit_price': 0,
+                'success': False, 'order_id': None, 'client_order_id': None,
+                'status': 'FAILED', 'quantity': 0, 'symbol': symbol,
+                'exit_reason': exit_reason, 'exit_price': 0,
                 'error': str(e)
             }
 
@@ -331,20 +259,17 @@ class Trader:
         except Exception as e:
             print(f"⚠️ [TRADER] Failed to get order status: {e}")
             return None
-        
+
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Отменить ордер (устойчиво к ошибке -2011)."""
         try:
             result = await self.rest.cancel_order(symbol, order_id)
             if result.get('success'):
                 return True
-            
-            # Если биржа вернула ошибку "Unknown order" (-2011), считаем это успехом,
-            # так как наша цель (ордер не активен) достигнута.
+            # Если биржа вернула ошибку "Unknown order" (-2011), считаем это успехом
             error_msg = str(result.get('error', '')).lower()
             if 'unknown order' in error_msg or '-2011' in error_msg:
                 return True
-                
             return False
         except Exception as e:
             print(f"⚠️ [TRADER] Failed to cancel order: {e}")

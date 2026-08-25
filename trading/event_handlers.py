@@ -116,7 +116,8 @@ class EventHandlersMixin(BaseMixin):
                 print(f"⚠️ [DEBUG TTL] Пропускаем публикацию PASSPORT_CREATED, так как order_type = '{order_type}' (ожидался 'limit')")
                 
         else:
-            self.state_manager.handle_event(passport, "ORDER_FAILED", result.get('error', 'unknown'))
+            # 🔥 ИСПРАВЛЕНО: передаём словарь, так как state_manager ожидает Dict[str, Any]
+            self.state_manager.handle_event(passport, "ORDER_FAILED", {'error': result.get('error', 'unknown')})
             self.repository.save(passport)
 
     async def _on_order_update(self, event):

@@ -7,6 +7,7 @@ import asyncio
 import signal
 import sys
 import time
+import traceback  # 🔥 ДОБАВЛЕНО: для детального логирования ошибок
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -154,12 +155,14 @@ class Platform:
 
         await self.ws.connect()
         asyncio.create_task(self.ws.health_check_loop())
+        
+        # Первичная подписка на стакан и пользовательские данные
         await self.ws.subscribe_depth(self.symbol)
 
         self._last_user_data_ts = time.time()
         self._last_price_update_ts = time.time()
 
-        # ===== Обработчик переподключения WS =====
+        # ===== 🔥 ИСПРАВЛЕННЫЙ Обработчик переподключения WS =====
         async def on_ws_reconnect():
             if getattr(self, '_is_reconnecting', False):
                 return
@@ -172,13 +175,25 @@ class Platform:
                     try:
                         new_listen_key = await asyncio.wait_for(self.rest.get_listen_key(), timeout=3.0)
                         self._listen_key = new_listen_key
+                        
+                        # 1. Подписываемся на пользовательские данные
                         await self.ws.subscribe_user_data(new_listen_key)
                         self._last_user_data_ts = time.time()
+                        
+                        # 2. 🔥 КРИТИЧЕСКИЙ ФИКС: ЗАНОВО подписываемся на стакан (depth) при реконнекте!
+                        await self.ws.subscribe_depth(self.symbol)
+                        
                         refreshed = True
                         logger.info(f"✅ Listen key refreshed on reconnect: {new_listen_key[:10]}...")
+                        logger.info(f"✅ Depth stream (orderbook) resubscribed for {self.symbol}")
                         break
+                        
                     except Exception as e:
-                        logger.error(f"❌ Refresh listen key attempt {attempt + 1}/3 failed: {e}")
+                        # 🔥 УЛУЧШЕННОЕ ЛОГИРОВАНИЕ: используем repr(e) и traceback, чтобы видеть реальную ошибку
+                        error_details = repr(e) or str(e) or "Unknown empty error"
+                        logger.error(f"❌ Refresh listen key attempt {attempt + 1}/3 failed: {error_details}")
+                        logger.debug(f"Traceback details:\n{traceback.format_exc()}")
+                        
                         try:
                             await self.rest.reset_session()
                         except Exception:
@@ -191,6 +206,7 @@ class Platform:
             finally:
                 self._is_reconnecting = False
 
+            # Запрашиваем синхронизацию состояния после реконнекта
             await self.bus.publish(
                 event_type="SYNC_REQUEST",
                 source="platform",
@@ -220,8 +236,6 @@ class Platform:
             order_status = str(order_data.get('X') or order_data.get('status') or '')
             symbol = str(order_data.get('s') or order_data.get('symbol') or '')
             
-            # 🔥 КРИТИЧЕСКИ ВАЖНО: извлекаем количество и цену исполнения
-            # 'z' - executedQty в сыром формате Binance, 'ap' - averagePrice
             executed_qty = float(order_data.get('z') or order_data.get('executedQty') or order_data.get('executed_qty') or 0.0)
             avg_price = float(order_data.get('ap') or order_data.get('avgPrice') or order_data.get('price') or 0.0)
             
@@ -232,8 +246,8 @@ class Platform:
                     "client_order_id": client_order_id,
                     "status": order_status,
                     "symbol": symbol,
-                    "executed_qty": executed_qty,  # ← Добавлено
-                    "avg_price": avg_price         # ← Добавлено
+                    "executed_qty": executed_qty,
+                    "avg_price": avg_price
                 },
                 symbol=symbol
             )
@@ -369,7 +383,7 @@ class Platform:
                     await self.rest.renew_listen_key(self._listen_key)
                     logger.info("✅ Listen key renewed")
             except Exception as e:
-                logger.error(f"❌ Failed to renew listen key: {e}")
+                logger.error(f"❌ Failed to renew listen key: {repr(e)}")
 
     async def run(self):
         logger.info("🚀 Starting platform...")

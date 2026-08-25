@@ -4,7 +4,7 @@
   "ttl_seconds": 300,
   "ttl_action": "cancel",
   "atr_value": 0.5,
-  "atr_multiplier_sl": 1.0,
+  "atr_multiplier_sl": 0.5,
   "atr_multiplier_tp1": 0.5,
   "atr_multiplier_tp2": 1.0
 }
