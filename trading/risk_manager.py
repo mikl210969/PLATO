@@ -28,7 +28,7 @@ from core.event_bus import EventBus, Event
 from trading.passport import TradePassport
 from trading.passport_manager import PassportManager
 from trading.trader import Trader
-
+from datetime import datetime, timezone
 
 class RiskManager:
     """Внутренняя защита позиции (Internal Stop)."""
@@ -320,10 +320,9 @@ class RiskManager:
             side=close_side,
             quantity=quantity,
             order_type='market',
-            #client_order_id=f"{reason}_{passport.passport_id}",
-            client_order_id=f"CLOSE_{reason}_{passport.passport_id}",            
+            client_order_id=f"CLOSE_{reason}_{passport.passport_id}",
             passport_id=passport.passport_id,
-            position_side='SHORT' if is_short else 'LONG'  # сторона ПОЗИЦИИ, не ордера
+            position_side='SHORT' if is_short else 'LONG'
         )
 
         self._log("internal_close_sent", {
@@ -335,6 +334,40 @@ class RiskManager:
             "success": result.get('success'),
             "error": result.get('error')
         })
+        
+        # 🔥 НОВОЕ: Обновляем паспорт после успешного закрытия
+        if result.get('success'):
+            # Если закрыли весь остаток → паспорт CLOSED
+            if guard['remaining'] <= quantity:
+                passport.status = PassportStatus.CLOSED.value
+                passport.exit_reason = reason
+                passport.position_size = 0.0
+                passport.closed_at = datetime.now(timezone.utc).isoformat()
+                
+                # Рассчитываем PnL
+                if is_short:
+                    gross_pnl = (passport.position_entry_price - 0) * quantity  # цена выхода = 0 (не знаем)
+                else:
+                    gross_pnl = (0 - passport.position_entry_price) * quantity
+                passport.gross_pnl = gross_pnl
+                
+                self.passport_manager.update(passport)
+                
+                self._log("passport_closed_after_full_close", {
+                    "passport_id": passport.passport_id,
+                    "reason": reason
+                })
+            else:
+                # Частичное закрытие → уменьшаем размер
+                passport.position_size -= quantity
+                self.passport_manager.update(passport)
+                
+                self._log("passport_partial_close", {
+                    "passport_id": passport.passport_id,
+                    "closed_qty": quantity,
+                    "remaining": passport.position_size
+                })
+        
         return bool(result.get('success'))
 
     # ============================================================

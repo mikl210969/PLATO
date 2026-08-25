@@ -321,3 +321,186 @@ async def test_order_placement_market_order(mock_components, mock_trader, mock_p
         passport_id="TEST_PASSPORT_PLACE_001",
         limit_price=None,  # 🔥 Для market ордера limit_price должен быть None
     )
+
+# ============================================================
+# Hedge Mode: проверка position_side и reduce_only
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_hedge_mode_short_entry():
+    """
+    Hedge Mode: SHORT вход → в REST передаётся side='SELL' + position_side='SHORT'.
+    reduce_only НЕ передаётся (или False).
+    """
+    from trading.trader import Trader
+    
+    # Мок REST-клиента
+    rest = MagicMock()
+    rest.create_market_order = AsyncMock(return_value={
+        'success': True,
+        'order_id': 123,
+        'client_order_id': 'test_short',
+        'status': 'FILLED',
+    })
+    ws = MagicMock()
+    bus = MagicMock()
+    
+    trader = Trader(
+        symbol='SOLUSDT',
+        rest_client=rest,
+        ws_adapter=ws,
+        event_bus=bus,
+        config={'trading': {}}
+    )
+    
+    # SHORT вход: side='short' → trader сам выводит position_side='SHORT'
+    result = await trader.execute_order(
+        symbol='SOLUSDT',
+        side='short',
+        quantity=7.0,
+        order_type='market',
+        passport_id='TEST_HEDGE_SHORT_001'
+    )
+    
+    assert result['success'] is True
+    
+    # Проверяем, что в REST переданы правильные параметры Hedge Mode
+    rest.create_market_order.assert_called_once()
+    call_kwargs = rest.create_market_order.call_args.kwargs
+    
+    assert call_kwargs['side'] == 'SELL', "SHORT вход = SELL ордер"
+    assert call_kwargs['position_side'] == 'SHORT', "Hedge Mode: сторона ПОЗИЦИИ = SHORT"
+    assert call_kwargs['quantity'] == 7.0
+    # reduce_only НЕ должен быть True в Hedge Mode
+    assert call_kwargs.get('reduce_only', False) is False
+
+
+@pytest.mark.asyncio
+async def test_hedge_mode_long_entry():
+    """
+    Hedge Mode: LONG вход → в REST передаётся side='BUY' + position_side='LONG'.
+    """
+    from trading.trader import Trader
+    
+    rest = MagicMock()
+    rest.create_market_order = AsyncMock(return_value={
+        'success': True,
+        'order_id': 456,
+        'client_order_id': 'test_long',
+        'status': 'FILLED',
+    })
+    ws = MagicMock()
+    bus = MagicMock()
+    
+    trader = Trader(
+        symbol='SOLUSDT',
+        rest_client=rest,
+        ws_adapter=ws,
+        event_bus=bus,
+        config={'trading': {}}
+    )
+    
+    # LONG вход: side='long' → trader сам выводит position_side='LONG'
+    result = await trader.execute_order(
+        symbol='SOLUSDT',
+        side='long',
+        quantity=5.0,
+        order_type='market',
+        passport_id='TEST_HEDGE_LONG_001'
+    )
+    
+    assert result['success'] is True
+    
+    call_kwargs = rest.create_market_order.call_args.kwargs
+    
+    assert call_kwargs['side'] == 'BUY', "LONG вход = BUY ордер"
+    assert call_kwargs['position_side'] == 'LONG', "Hedge Mode: сторона ПОЗИЦИИ = LONG"
+    assert call_kwargs.get('reduce_only', False) is False
+
+
+@pytest.mark.asyncio
+async def test_hedge_mode_close_position():
+    """
+    Hedge Mode: закрытие SHORT позиции → BUY + position_side='SHORT', reduce_only=False.
+    """
+    from trading.trader import Trader
+    
+    rest = MagicMock()
+    rest.create_market_order = AsyncMock(return_value={
+        'success': True,
+        'order_id': 789,
+        'client_order_id': 'close_short',
+        'status': 'FILLED',
+    })
+    ws = MagicMock()
+    bus = MagicMock()
+    
+    trader = Trader(
+        symbol='SOLUSDT',
+        rest_client=rest,
+        ws_adapter=ws,
+        event_bus=bus,
+        config={'trading': {}}
+    )
+    
+    # Закрываем SHORT позицию: position_side='SHORT' → BUY ордер
+    result = await trader.close_position(
+        symbol='SOLUSDT',
+        quantity=7.0,
+        exit_reason='SL_HIT',
+        position_side='SHORT'
+    )
+    
+    assert result['success'] is True
+    
+    call_kwargs = rest.create_market_order.call_args.kwargs
+    
+    assert call_kwargs['side'] == 'BUY', "Закрытие SHORT = BUY ордер"
+    assert call_kwargs['position_side'] == 'SHORT', "Hedge Mode: закрываем SHORT позицию"
+    assert call_kwargs['quantity'] == 7.0
+    # 🔥 КРИТИЧНО: reduce_only=False (в Hedge Mode запрещён, даёт -1106)
+    assert call_kwargs['reduce_only'] is False
+
+
+@pytest.mark.asyncio
+async def test_hedge_mode_limit_order_position_side():
+    """
+    Hedge Mode: LIMIT ордер тоже получает position_side.
+    """
+    from trading.trader import Trader
+    
+    rest = MagicMock()
+    rest.create_limit_order = AsyncMock(return_value={
+        'success': True,
+        'order_id': 999,
+        'client_order_id': 'limit_short',
+        'status': 'NEW',
+    })
+    ws = MagicMock()
+    bus = MagicMock()
+    
+    trader = Trader(
+        symbol='SOLUSDT',
+        rest_client=rest,
+        ws_adapter=ws,
+        event_bus=bus,
+        config={'trading': {}}
+    )
+    
+    result = await trader.execute_order(
+        symbol='SOLUSDT',
+        side='short',
+        quantity=7.0,
+        order_type='limit',
+        limit_price=91.0,
+        passport_id='TEST_HEDGE_LIMIT_001'
+    )
+    
+    assert result['success'] is True
+    
+    call_kwargs = rest.create_limit_order.call_args.kwargs
+    
+    assert call_kwargs['side'] == 'SELL'
+    assert call_kwargs['position_side'] == 'SHORT'
+    assert call_kwargs['price'] == 91.0
+    assert call_kwargs.get('reduce_only', False) is False

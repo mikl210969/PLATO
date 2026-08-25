@@ -236,15 +236,17 @@ class PositionMonitor(BaseMixin):
             "is_partial": is_partial
         })
         
-        # 🔥 ИСПРАВЛЕНО: Убран reduce_only=True, чтобы избежать ошибки -1106 на Binance Testnet
-        # При закрытии конкретного quantity позиция и так уменьшается.
+        # 🔥 Hedge Mode: передаём position_side явно, reduce_only НЕ шлётся (-1106)
+        position_side = "SHORT" if passport.side == "short" else "LONG"
+        
         result = await trader.execute_order(
             symbol=passport.symbol,
             side="buy" if passport.side == "short" else "sell",
             quantity=quantity,
             order_type="market",
             client_order_id=f"{reason}_{passport.passport_id}",
-            passport_id=passport.passport_id
+            passport_id=passport.passport_id,
+            position_side=position_side
         )
         
         if not result.get('success'):

@@ -76,16 +76,21 @@ class MockBinanceRestClient:
 
     def _apply_market_fill(self, side: str, quantity: float, position_side: str):
         """Эмуляция исполнения market-ордера в Hedge Mode."""
+        print(f"🔍 [DEBUG MOCK] _apply_market_fill: side={side}, qty={quantity}, pos_side={position_side}, before={self._position_size}")
+        
         signed = quantity if side == 'BUY' else -quantity
         if position_side == 'SHORT':
-            new = min(self._position_size + signed, 0.0)   # BUY+SHORT не может стать лонгом
+            new = min(self._position_size + signed, 0.0)
         elif position_side == 'LONG':
             new = max(self._position_size + signed, 0.0)
         else:
             new = self._position_size + signed
+        
         if self._position_size == 0 and new != 0:
             self._entry_price = 76.00
         self._position_size = new
+        
+        print(f"🔍 [DEBUG MOCK] _apply_market_fill: after={self._position_size}")
 
     async def create_market_order(
         self,

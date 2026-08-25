@@ -73,14 +73,16 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
         self._log("orchestrator_starting")
         await self.perform_startup_recovery()
         await self.start_stuck_orders_monitor()
-        await self.start_position_monitor()  # 🔥 Запускаем мониторинг позиций
+        # 🔥 ОТКЛЮЧЕНО: PositionMonitor дублирует RiskManager
+        # await self.start_position_monitor()
         self._log("orchestrator_started")
 
     async def stop(self):
         self._running = False
         self._log("orchestrator_stopping")
-        await self.stop_monitors()  # Останавливает MonitorMixin
-        await self.stop_position_monitor()  # 🔥 Останавливает PositionMonitor
+        await self.stop_monitors()
+        # 🔥 ОТКЛЮЧЕНО: PositionMonitor дублирует RiskManager
+        # await self.stop_position_monitor()
         self._log("orchestrator_stopped")
 
     async def close_position(self, symbol: str, exit_reason: str, exit_price: float = 0.0) -> bool:
@@ -90,7 +92,7 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
         if symbol is None:
             self._log("close_position_symbol_is_none")
             return False
-
+        
         passport = self.passport_manager.get_active_by_symbol(symbol)
         if not passport:
             self._log("no_active_position_for_close", {"symbol": symbol})
@@ -100,31 +102,37 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
             "passport_id": passport.passport_id,
             "size": passport.position_size
         })
-
+        
         trader = self.get_trader(symbol)
         if not trader:
             self._log("trader_not_found_for_close", {"symbol": symbol})
             return False
-
+        
+        # 🔥 Hedge Mode: передаём position_side из паспорта
+        position_side = "SHORT" if passport.side == "short" else "LONG"
+        
         self._log("sending_close_order", {
             "symbol": symbol,
-            "quantity": passport.position_size
+            "quantity": passport.position_size,
+            "position_side": position_side
         })
         
         result = await trader.close_position(
             symbol=symbol,
             quantity=passport.position_size,
             exit_reason=exit_reason,
-            exit_price=exit_price
+            exit_price=exit_price,
+            position_side=position_side  # ← добавлено
         )
-
+        
         self._log("close_order_result", {"success": result.get('success')})
-
+        
         if result.get('success'):
             self.state_manager.handle_event(passport, "POSITION_CLOSING", {'exit_reason': exit_reason})
             self.repository.save(passport)
+            
             self._log("position_closing_initiated", {"passport_id": passport.passport_id})
-
+            
             await self.bus.publish(
                 event_type="POSITION_CLOSING",
                 source="orchestrator",
@@ -132,6 +140,6 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
                 symbol=symbol
             )
             return True
-
+        
         self._log("close_position_failed")
         return False

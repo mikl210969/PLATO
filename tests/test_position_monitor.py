@@ -103,9 +103,9 @@ async def test_position_monitor_sl_hit(mock_passport_short, mock_trader):
         side="buy",
         quantity=10.0,
         order_type="market",
-        reduce_only=True,
         client_order_id="SL_HIT_TEST_PASSPORT_PM_001",
-        passport_id="TEST_PASSPORT_PM_001"
+        passport_id="TEST_PASSPORT_PM_001",
+        position_side="SHORT"
     )
     
     assert mock_passport_short.status == "CLOSED"
@@ -141,9 +141,9 @@ async def test_position_monitor_tp1_hit(mock_passport_short, mock_trader):
         side="buy",
         quantity=5.0,  # 50% от 10.0
         order_type="market",
-        reduce_only=True,
         client_order_id="TP1_TEST_PASSPORT_PM_001",
-        passport_id="TEST_PASSPORT_PM_001"
+        passport_id="TEST_PASSPORT_PM_001",
+        position_side="SHORT"
     )
     
     assert mock_passport_short.position_size == 5.0

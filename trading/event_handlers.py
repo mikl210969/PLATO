@@ -2,6 +2,8 @@ import time
 import datetime
 import json
 from typing import TYPE_CHECKING, Dict, Any, Optional
+from datetime import datetime, timezone
+from core.types import PassportStatus
 
 if TYPE_CHECKING:
     from .orchestrator import Orchestrator
@@ -248,7 +250,7 @@ class EventHandlersMixin(BaseMixin):
                     
                     # Добавляем запись в timeline
                     passport.timeline.append({
-                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                         "event": "STATUS: EXTERNAL_CLOSE",
                         "details": "Position closed manually or liquidated on exchange"
                     })
@@ -264,7 +266,65 @@ class EventHandlersMixin(BaseMixin):
         self._log("position_closed_event", {"event": event.payload})
 
     async def _on_sync_request(self, event):
-        self._log("sync_request_received")
+        """Синхронизация с биржей: проверяем реальное состояние позиции."""
+        payload = event.payload
+        symbol = payload.get('symbol')
+        
+        if not symbol:
+            self._log("sync_request_no_symbol")
+            return
+        
+        self._log("sync_request_received", {"symbol": symbol})
+        
+        # Получаем активный паспорт
+        passport = self.passport_manager.get_active_by_symbol(symbol)
+        if not passport:
+            self._log("sync_no_active_passport", {"symbol": symbol})
+            return
+        
+        # Получаем позицию с биржи
+        trader = self.get_trader(symbol)
+        if not trader:
+            self._log("sync_trader_not_found", {"symbol": symbol})
+            return
+        
+        position = await trader.get_position_from_exchange(symbol)
+        if not position:
+            self._log("sync_position_fetch_failed", {"symbol": symbol})
+            return
+        
+        position_size = abs(float(position.get('size', 0) or 0))
+        
+        self._log("sync_position_check", {
+            "symbol": symbol,
+            "passport_status": passport.status,
+            "exchange_position_size": position_size
+        })
+        
+        # Если на бирже позиции нет, а паспорт OPEN → закрываем паспорт
+        if position_size < 0.01 and passport.status in ["OPEN", "PARTIAL_CLOSE"]:
+            self._log("sync_external_close_detected", {
+                "passport_id": passport.passport_id,
+                "symbol": symbol
+            })
+            
+            passport.status = PassportStatus.CLOSED.value
+            passport.exit_reason = "EXTERNAL_CLOSE"
+            passport.position_size = 0.0
+            passport.closed_at = datetime.now(timezone.utc).isoformat()
+            
+            self.repository.save(passport)
+            
+            await self.bus.publish(
+                event_type="POSITION_CLOSED",
+                source="sync",
+                payload={
+                    "passport_id": passport.passport_id,
+                    "symbol": symbol,
+                    "exit_reason": "EXTERNAL_CLOSE"
+                },
+                symbol=symbol
+            )
 
     async def _on_ttl_expired(self, event):
         """Обработка истечения TTL лимитного ордера."""
