@@ -2,7 +2,7 @@
 PositionMonitor — мониторинг и управление открытыми позициями.
 - Следит за ценой в реальном времени
 - Закрывает позицию при достижении SL, TP1, TP2
-- Сдвигает SL в Break-Even при прохождении 1R
+- Сдвигает SL в Break-Even при прохождении 0.5 ATR в прибыль
 - Проверяет Basis Stop (>1.5%)
 """
 import asyncio
@@ -72,7 +72,6 @@ class PositionMonitor(BaseMixin):
             if not trader:
                 return None
             
-            # 🔥 ИСПРАВЛЕНО: минимальный допустимый limit для Binance равен 5
             orderbook = await trader.rest.get_orderbook(symbol, limit=5)
             bids = orderbook.get('bids', [])
             asks = orderbook.get('asks', [])
@@ -88,11 +87,8 @@ class PositionMonitor(BaseMixin):
             return None
 
     async def _check_basis_stop(self, passport, current_price: float) -> bool:
-        """
-        Проверка Basis Stop (>1.5% движения против позиции).
-        """
+        """Проверка Basis Stop (>1.5% движения против позиции)."""
         basis_threshold = 1.5
-        
         entry_price = passport.position_entry_price or passport.entry_price
         if not entry_price:
             return False
@@ -105,21 +101,16 @@ class PositionMonitor(BaseMixin):
                 "price_change_pct": round(price_change_pct, 2),
                 "threshold": basis_threshold
             })
-            
             await self._close_position(passport, current_price, "BASIS_STOP")
             return True
-        
         return False
 
     async def _check_tp1(self, passport, current_price: float) -> bool:
-        """
-        Проверка TP1: закрытие 50% позиции + сдвиг SL в Break-Even.
-        """
+        """Проверка TP1: закрытие 50% позиции + сдвиг SL в Break-Even."""
         tp1_price = passport.tp1_price
         if not tp1_price or tp1_price <= 0:
             return False
         
-        # Для шорта TP1 ниже цены входа, для лонга — выше
         if passport.side == "short":
             if current_price > tp1_price:
                 return False
@@ -136,20 +127,14 @@ class PositionMonitor(BaseMixin):
             "current_price": current_price
         })
         
-        # Закрываем 50% позиции
         close_quantity = passport.position_size * 0.5
         await self._close_position(passport, current_price, "TP1", quantity=close_quantity)
-        
-        # Сдвигаем SL в Break-Even
         await self._move_sl_to_break_even(passport)
-        
         passport.tp1_closed = True
         return True
 
     async def _check_tp2(self, passport, current_price: float) -> bool:
-        """
-        Проверка TP2: закрытие оставшихся 50% позиции.
-        """
+        """Проверка TP2: закрытие оставшихся 50% позиции."""
         tp2_price = passport.tp2_price
         if not tp2_price or tp2_price <= 0:
             return False
@@ -175,14 +160,11 @@ class PositionMonitor(BaseMixin):
         return True
 
     async def _check_sl(self, passport, current_price: float) -> bool:
-        """
-        Проверка SL: полное закрытие позиции.
-        """
+        """Проверка SL: полное закрытие позиции."""
         sl_price = passport.sl_price
         if not sl_price or sl_price <= 0:
             return False
         
-        # Для шорта SL выше цены входа, для лонга — ниже
         if passport.side == "short":
             if current_price < sl_price:
                 return False
@@ -200,10 +182,7 @@ class PositionMonitor(BaseMixin):
         return True
 
     async def _check_break_even(self, passport, current_price: float):
-        """
-        Сдвиг SL в Break-Even при прохождении 0.5 ATR в прибыль.
-        Новый SL = текущая цена + 0.25 ATR (trailing).
-        """
+        """Сдвиг SL в Break-Even при прохождении 0.5 ATR в прибыль."""
         if getattr(passport, 'sl_moved_to_be', False):
             return
         
@@ -214,7 +193,6 @@ class PositionMonitor(BaseMixin):
         atr_value = self._get_atr_value()
         be_offset = 0.25 * atr_value
         
-        # Рассчитываем прибыль
         if passport.side == "short":
             profit_distance = entry_price - current_price
             new_sl_price = current_price + be_offset
@@ -225,36 +203,21 @@ class PositionMonitor(BaseMixin):
         min_profit_for_be = 0.5 * atr_value
         
         if profit_distance >= min_profit_for_be:
-            # Проверяем, что новый SL лучше текущего
             if passport.side == "short":
                 if new_sl_price < passport.sl_price:
                     passport.sl_price = new_sl_price
                     passport.sl_moved_to_be = True
-                    self._log("break_even_applied", {
-                        "passport_id": passport.passport_id,
-                        "new_sl": new_sl_price
-                    })
+                    self._log("break_even_applied", {"passport_id": passport.passport_id, "new_sl": new_sl_price})
             else:
                 if new_sl_price > passport.sl_price:
                     passport.sl_price = new_sl_price
                     passport.sl_moved_to_be = True
-                    self._log("break_even_applied", {
-                        "passport_id": passport.passport_id,
-                        "new_sl": new_sl_price
-                    })
+                    self._log("break_even_applied", {"passport_id": passport.passport_id, "new_sl": new_sl_price})
             
             self.repository.save(passport)
 
     async def _close_position(self, passport, price: float, reason: str, quantity: Optional[float] = None):
-        """
-        Закрыть позицию (полностью или частично) по рынку.
-        
-        Args:
-            passport: Паспорт позиции
-            price: Цена закрытия
-            reason: Причина (SL_HIT, TP1, TP2, BASIS_STOP)
-            quantity: Количество (None = вся позиция)
-        """
+        """Закрыть позицию (полностью или частично) по рынку."""
         trader = self.get_trader(passport.symbol)
         if not trader:
             self._log("trader_not_found_for_close", {"passport_id": passport.passport_id})
@@ -273,12 +236,13 @@ class PositionMonitor(BaseMixin):
             "is_partial": is_partial
         })
         
+        # 🔥 ИСПРАВЛЕНО: Убран reduce_only=True, чтобы избежать ошибки -1106 на Binance Testnet
+        # При закрытии конкретного quantity позиция и так уменьшается.
         result = await trader.execute_order(
             symbol=passport.symbol,
             side="buy" if passport.side == "short" else "sell",
             quantity=quantity,
             order_type="market",
-            reduce_only=True,
             client_order_id=f"{reason}_{passport.passport_id}",
             passport_id=passport.passport_id
         )
