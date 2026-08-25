@@ -14,13 +14,17 @@
 - [trading/event_handlers.py] Реализована логика `SYNC_REQUEST` — синхронизация паспорта с биржей через REST
 
 ### Отключение дублирования
-- [trading/orchestrator.py] `PositionMonitor` дублирует `RiskManager` по логике TP/SL. Если стенд падает — отключить `start_position_monitor()` / `stop_position_monitor()` в `start()` / `stop()`
+- [trading/orchestrator.py] `PositionMonitor` дублирует `RiskManager` по логике TP/SL. В `start()` / `stop()` закомментированы `start_position_monitor()` / `stop_position_monitor()`
 
 ### Инфраструктура
 - [pytest.ini] Создан конфиг: `pythonpath = .` + `asyncio_mode = auto`
 
+## Статус тестов
+- **pytest:** 27/27 passed
+- **run_test_stand.py:** 19/19 passed (2 сценария: внутренний стоп + SYNC)
+
 ## Известные проблемы
-- `PositionMonitor` и `RiskManager` дублируют логику TP/SL. В текущей конфигурации `PositionMonitor` отключён в `orchestrator.py`. Нужно решить: оставить один модуль или чётко разграничить зоны ответственности.
+- `PositionMonitor` и `RiskManager` дублируют логику TP/SL. В текущей конфигурации `PositionMonitor` отключён. Нужно решить: удалить `PositionMonitor` или чётко разграничить зоны ответственности.
 
 ## Следующие шаги
 - Перейти к следующей задаче (стратегии, риск-менеджмент, работа на реальном тестнете)

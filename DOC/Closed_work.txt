@@ -8,7 +8,9 @@ git status
 git add .
 
 # 4. Делаем коммит с понятным описанием
-git commit -m "описание того, что сделал"
+git commit -m "- [trading/event_handlers.py] Исправлен импорт `datetime` (было `datetime.datetime.now(...)`, стало `datetime.now(timezone.utc)`)
+- [trading/event_handlers.py] Реализована логика `SYNC_REQUEST` — синхронизация паспорта с биржей через REST
+"
 
 # 5. Отправляем изменения в Git (на GitHub)
 git push origin main
