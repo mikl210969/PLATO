@@ -67,17 +67,22 @@ class StateManager:
 
     def transition(self, passport: TradePassport, new_status: str, reason: str = "") -> bool:
         """
-        Выполнить переход, если он разрешён.
-        Возвращает True, если переход выполнен.
+        Выполнить переход, если он разрешён картой.
+        Идемпотентность: повтор того же статуса — тихий no-op.
+        Возвращает True только при реальном изменении статуса.
         """
         current = passport.status
 
-        if not self.can_transition(current, new_status):
-            # Просто игнорируем, без вывода в консоль
-            pass
+        # 1. Идемпотентность: повтор того же статуса — тихий no-op
+        if current == new_status:
             return False
 
-        # Выполняем переход
+        # 2. Проверка карты разрешённых переходов
+        if not self.can_transition(current, new_status):
+            print(f"⚠️ [STATE] Forbidden transition: {current} → {new_status} ({reason})")
+            return False
+
+        # 3. Выполняем переход
         passport.transition_to(new_status, reason)
 
         # Логируем
