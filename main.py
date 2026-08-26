@@ -154,7 +154,7 @@ class Platform:
         logger.info(f"✅ Listen key obtained: {listen_key[:10]}...")
 
         await self.ws.connect()
-        asyncio.create_task(self.ws.health_check_loop())
+        # asyncio.create_task(self.ws.health_check_loop()) # Health check теперь встроен в ws.run()
         
         # Первичная подписка на стакан и пользовательские данные
         await self.ws.subscribe_depth(self.symbol)
@@ -247,7 +247,8 @@ class Platform:
                     "status": order_status,
                     "symbol": symbol,
                     "executed_qty": executed_qty,
-                    "avg_price": avg_price
+                    "avg_price": avg_price,
+                    "dedup_key": data.get("dedup_key"),
                 },
                 symbol=symbol
             )

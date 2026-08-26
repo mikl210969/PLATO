@@ -104,13 +104,18 @@ class StateManager:
 
     def handle_event(self, passport: TradePassport, event_type: str, event_data: Dict[str, Any]) -> bool:
         """
-        Обработать событие и выполнить соответствующий переход.
+        Обработать событие и выполнить переход.
+        - Идемпотентность: повтор того же статусного события — тихий no-op.
+        - Аномалия дрейфа: исполнение по закрытому/отменённому паспорту — сигнал на сверку.
         """
         status = passport.status
         new_status = None
         reason = ""
+        position_size = None
+        position_price = None
+        close_data = None
 
-        # Определяем целевой статус на основе события
+        # 1. Определяем целевой статус и извлекаем данные БЕЗ побочных изменений
         if event_type == "ORDER_SENT":
             new_status = PassportStatus.ORDER_SENT.value
             reason = "Order sent to exchange"
@@ -127,16 +132,14 @@ class StateManager:
         elif event_type == "ORDER_FILLED":
             new_status = PassportStatus.OPEN.value
             reason = "Order filled"
-            # Обновляем данные позиции
-            passport.position_size = event_data.get('executed_qty', 0)
-            passport.position_entry_price = event_data.get('price', 0)
+            position_size = event_data.get('executed_qty', 0)
+            position_price = event_data.get('price', 0)
 
         elif event_type == "ORDER_PARTIAL":
             new_status = PassportStatus.OPEN.value
             reason = f"Partial fill: {event_data.get('executed_qty', 0)}"
-            # Обновляем данные позиции
-            passport.position_size = event_data.get('executed_qty', 0)
-            passport.position_entry_price = event_data.get('price', 0)
+            position_size = event_data.get('executed_qty', 0)
+            position_price = event_data.get('price', 0)
 
         elif event_type == "ORDER_CANCELED":
             new_status = PassportStatus.CANCELED.value
@@ -149,11 +152,11 @@ class StateManager:
         elif event_type == "POSITION_CLOSED":
             new_status = PassportStatus.CLOSED.value
             reason = event_data.get('exit_reason', "Position closed")
-            # Обновляем данные закрытия
-            passport.exit_price = event_data.get('exit_price', 0)
-            passport.gross_pnl = event_data.get('gross_pnl', 0)
-            passport.commission = event_data.get('commission', 0)
-            passport.net_pnl = passport.gross_pnl - passport.commission
+            close_data = {
+                'exit_price': event_data.get('exit_price', 0),
+                'gross_pnl': event_data.get('gross_pnl', 0),
+                'commission': event_data.get('commission', 0),
+            }
 
         elif event_type == "POSITION_CLOSING":
             new_status = PassportStatus.CLOSING.value
@@ -170,7 +173,35 @@ class StateManager:
         if not new_status:
             return False
 
-        # Выполняем переход
+        # 2. АНОМАЛИЯ ДРЕЙФА: исполнение по паспорту в терминальном статусе
+        if event_type in ("ORDER_FILLED", "ORDER_PARTIAL") and status in (
+            PassportStatus.CLOSED.value,
+            PassportStatus.CANCELED.value,
+            PassportStatus.FAILED.value,
+        ):
+            print(
+                f"⚠️ [STATE_ANOMALY] {event_type} при статусе {status} "
+                f"(passport={passport.passport_id}, qty={event_data.get('executed_qty')}) — "
+                f"возможный дрейф состояния, требуется сверка с биржей"
+            )
+            return False
+
+        # 3. ИДЕМПОТЕНТНОСТЬ: повтор того же статусного события — тихий no-op.
+        #    ORDER_PARTIAL исключён: частичные исполнения обязаны обновлять размер позиции.
+        if new_status == status and event_type != "ORDER_PARTIAL":
+            return False
+
+        # 4. Применяем данные позиции/закрытия ТОЛЬКО перед валидным переходом
+        if position_size is not None:
+            passport.position_size = position_size
+            passport.position_entry_price = position_price if position_price else passport.position_entry_price
+        if close_data:
+            passport.exit_price = close_data['exit_price']
+            passport.gross_pnl = close_data['gross_pnl']
+            passport.commission = close_data['commission']
+            passport.net_pnl = passport.gross_pnl - passport.commission
+
+        # 5. Выполняем переход
         return self.transition(passport, new_status, reason)
 
     def sync_with_exchange(self, passport: TradePassport, exchange_status: str, position_size: float = 0) -> bool:

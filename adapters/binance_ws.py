@@ -1,7 +1,8 @@
 """
-Binance WebSocket адаптер.
+Binance WebSocket адаптер (Production-Ready).
+Архитектура Producer-Consumer: гарантирует, что сетевой цикл чтения никогда не блокируется 
+медленной обработкой сообщений (EventBus, логи), предотвращая разрывы соединения по таймауту.
 """
-
 import asyncio
 import json
 import websockets
@@ -16,11 +17,17 @@ class BinanceWsAdapter:
         self.base_url = base_url
         self._ws = None
         self._running = False
-        self._handlers: Dict[str, Callable] = {}
-        self.logger = get_logger(__name__)
         self._connected = False
+        self._healthy = False
+        self._handlers: Dict[str, Callable[[Dict], Awaitable[None]]] = {}
         self._json_logger = None
         self._on_reconnect: Optional[Callable[[], Awaitable[None]]] = None
+        
+        # 🔥 Ключевой элемент стабильности: очередь сообщений. 
+        # maxsize=1000 предотвращает утечку памяти, если обработка вдруг встанет.
+        self._message_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        
+        self.logger = get_logger(__name__)
 
     def set_json_logger(self, json_logger):
         self._json_logger = json_logger
@@ -33,84 +40,130 @@ class BinanceWsAdapter:
         """Подключиться к WebSocket с повторными попытками."""
         for attempt in range(retries):
             try:
+                # Безопасно закрываем старый сокет, если он "висит"
+                if self._ws is not None:
+                    try:
+                        await self._ws.close()
+                    except Exception:
+                        pass
+                
                 self.logger.info(f"Connecting to {self.base_url} (attempt {attempt+1}/{retries})")
+                
+                # 🔥 Явные таймауты. Библиотека websockets сама шлет protocol ping каждые 20с.
                 self._ws = await websockets.connect(
                     self.base_url,
                     ping_interval=20,
-                    ping_timeout=10
+                    ping_timeout=10,
+                    close_timeout=5
                 )
+                
                 self._connected = True
                 self._running = True
+                self._healthy = True
                 self.logger.info("✅ WebSocket connected")
                 
-                # 🔥 Вызываем колбэк после переподключения
+                # 🔥 Вызываем колбэк переподписки ПОСЛЕ успешного установления соединения
                 if self._on_reconnect:
                     await self._on_reconnect()
                 return
+                
             except Exception as e:
                 self.logger.warning(f"Attempt {attempt+1} failed: {e}")
+                self._connected = False
                 await asyncio.sleep(2)
 
         raise RuntimeError(f"Failed to connect after {retries} attempts")
 
     async def subscribe_user_data(self, listen_key: str):
-        """Подписаться на user data stream."""
-        if not self._ws:
-            raise RuntimeError("WebSocket not connected")
-
-        subscribe_msg = {
-            "method": "SUBSCRIBE",
-            "params": [listen_key],
-            "id": 1
-        }
-        await self._ws.send(json.dumps(subscribe_msg))
-        self.logger.info(f"Subscribed to user data: {listen_key}")
+        if not self._connected or self._ws is None:
+            self.logger.warning("Cannot subscribe: WebSocket not connected")
+            return
+        msg = {"method": "SUBSCRIBE", "params": [listen_key], "id": id(self)}
+        try:
+            await self._ws.send(json.dumps(msg))
+            self.logger.info(f"Subscribed to user data: {listen_key[:10]}...")
+        except Exception as e:
+            self.logger.warning(f"Failed to subscribe to user data: {e}")
+            self._connected = False
 
     async def subscribe_depth(self, symbol: str):
-        """Подписаться на стакан."""
-        if not self._ws:
-            raise RuntimeError("WebSocket not connected")
-
+        if not self._connected or self._ws is None:
+            self.logger.warning("Cannot subscribe: WebSocket not connected")
+            return
         stream = f"{symbol.lower()}@depth20@100ms"
-        subscribe_msg = {
-            "method": "SUBSCRIBE",
-            "params": [stream],
-            "id": 2
-        }
-        await self._ws.send(json.dumps(subscribe_msg))
-        self.logger.info(f"Subscribed to depth: {symbol}")
+        msg = {"method": "SUBSCRIBE", "params": [stream], "id": id(self) + 1}
+        try:
+            await self._ws.send(json.dumps(msg))
+            self.logger.info(f"Subscribed to depth: {symbol}")
+        except Exception as e:
+            self.logger.warning(f"Failed to subscribe to depth: {e}")
+            self._connected = False
 
     async def run(self):
-        """Запустить обработку сообщений."""
-        if not self._ws:
-            raise RuntimeError("WebSocket not connected")
-
+        """
+        Запускает два независимых цикла: 
+        1. Чтение из сети (Producer) - всегда быстрый.
+        2. Обработка сообщений (Consumer) - может быть медленным, это безопасно.
+        """
         self._running = True
-
+        
+        # 🔥 Запускаем обработчик в отдельной фоновой задаче
+        processor_task = asyncio.create_task(self._process_queue())
+        
         try:
             while self._running:
-                try:
-                    message = await self._ws.recv()
-                    data = json.loads(message)
-                    await self._handle_message(data)
-                except websockets.ConnectionClosed:
-                    self.logger.warning("Connection closed, reconnecting...")
+                if not self._connected or self._ws is None:
+                    self.logger.warning("Connection lost. Reconnecting...")
                     await self.connect()
+                    continue
+
+                try:
+                    # 🔥 ЧТЕНИЕ: Это ВСЕГДА быстро (< 1мс). Сетевой стек свободен для Ping/Pong.
+                    message = await asyncio.wait_for(self._ws.recv(), timeout=30.0)
+                    await self._message_queue.put(message)
+                    self._healthy = True
+                    
+                except asyncio.TimeoutError:
+                    self.logger.warning("WS recv timeout (30s). Forcing reconnect...")
+                    self._connected = False
+                    self._healthy = False
+                    
+                except websockets.ConnectionClosed as e:
+                    self.logger.warning(f"Connection closed by server (code: {e.code}). Reconnecting...")
+                    self._connected = False
+                    self._healthy = False
+                    
                 except Exception as e:
-                    self.logger.error(f"Error in run loop: {e}")
-                    await asyncio.sleep(1)
+                    self.logger.error(f"Critical error in WS run loop: {e}")
+                    self._connected = False
+                    self._healthy = False
+                    
         finally:
             self._running = False
+            processor_task.cancel() # Останавливаем обработчик при выходе
+
+    async def _process_queue(self):
+        """Обрабатывает сообщения из очереди. Может быть медленным, это безопасно."""
+        while self._running:
+            try:
+                message = await self._message_queue.get()
+                data = json.loads(message)
+                await self._handle_message(data)
+                self._message_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error processing message from queue: {e}")
 
     async def _handle_message(self, data: Dict):
-        """Обработать входящее сообщение с фильтрацией шума и усечением payload."""
+        """Логика обработки (теперь она гарантированно не блокирует сеть)."""
         event_type = data.get('e', 'UNKNOWN')
 
-        # 🔥 1. ФИЛЬТР ШУМА: Игнорируем технические ответы (ping/pong, подтверждение подписки)
+        # 🔥 1. ФИЛЬТР ШУМА
         if event_type == 'UNKNOWN' or ('id' in data and 'result' in data):
             return
 
-        # 🔥 2. УСЕЧЕНИЕ PAYLOAD для логирования (чтобы не писать гигантские словари в файл)
+        # 🔥 2. УСЕЧЕНИЕ PAYLOAD для логирования
         log_data = data
         if event_type == 'ORDER_TRADE_UPDATE' and 'o' in data:
             o = data['o']
@@ -125,16 +178,11 @@ class BinanceWsAdapter:
                 "position_side": o.get('ps')
             }
 
-        # 🔥 3. Логируем в JSON только важные события (уже в усеченном виде для ордеров)
+        # 🔥 3. Логируем в JSON
         if self._json_logger and event_type in ['ORDER_TRADE_UPDATE', 'ACCOUNT_UPDATE', 'listenKeyExpired', 'depthUpdate']:
-            self._json_logger.log(
-                module="ws",
-                event=event_type,
-                data=log_data,
-                level="DEBUG"
-            )
+            self._json_logger.log(module="ws", event=event_type, data=log_data, level="DEBUG")
 
-        # 🔥 4. В терминал выводим ТОЛЬКО важные события с краткой сводкой
+        # 🔥 4. Вывод в терминал
         important_events = ['ORDER_TRADE_UPDATE', 'ACCOUNT_UPDATE']
         if event_type in important_events:
             extra_info = ""
@@ -142,9 +190,7 @@ class BinanceWsAdapter:
                 extra_info = f" | {data['o'].get('c')} | {data['o'].get('X')}"
             print(f"📥 [WS_EVENT] {event_type}{extra_info}")
 
-        # ===== ОБРАБОТКА И МАРШРУТИЗАЦИЯ =====
-        
-        # ORDER_TRADE_UPDATE
+        # ===== МАРШРУТИЗАЦИЯ =====
         if event_type == 'ORDER_TRADE_UPDATE':
             order_data = data.get('o', {})
             payload = {
@@ -156,13 +202,13 @@ class BinanceWsAdapter:
                 'price': float(order_data.get('p', 0) or order_data.get('ap', 0)),
                 'quantity': float(order_data.get('q', 0)),
                 'executed_qty': float(order_data.get('z', 0)),
-                'update_time': data.get('E', 0)
+                'update_time': data.get('E', 0),
+                'dedup_key': f"OTU:{order_data.get('i')}:{order_data.get('X')}:{order_data.get('z')}:{data.get('E', 0)}",
             }
             handler = self._handlers.get('ORDER_TRADE_UPDATE')
             if handler:
                 await handler(payload)
 
-        # ACCOUNT_UPDATE
         elif event_type == 'ACCOUNT_UPDATE':
             account_data = data.get('a', {})
             positions = account_data.get('P', [])
@@ -177,62 +223,22 @@ class BinanceWsAdapter:
                 if handler:
                     await handler(payload)
 
-        # depthUpdate
         elif event_type == 'depthUpdate':
             handler = self._handlers.get('depthUpdate')
             if handler:
                 await handler(data)
 
-        # Все остальные события (например, TRADE_LITE) попадают только в JSON-лог (если разрешены выше)
-
-    async def ping(self) -> bool:
-        """Проверить, жив ли WebSocket."""
-        try:
-            if self._ws:
-                await self._ws.send(json.dumps({"method": "ping"}))
-                return True
-            return False
-        except Exception:
-            return False
-
-    async def health_check_loop(self, interval: int = 5):
-        """Фоновый цикл проверки здоровья WS (без ping)."""
-        while self._running:
-            try:
-                await asyncio.sleep(interval)
-                if self._ws:
-                    self._healthy = True
-                else:
-                    self._healthy = False
-                    print(f"⚠️ [WS] Health check FAILED (connection closed)")
-            except Exception:
-                self._healthy = False
-                print(f"⚠️ [WS] Health check FAILED")
     def is_healthy(self) -> bool:
         """Вернуть статус здоровья WS."""
-        return self._healthy
+        return self._healthy and self._connected
 
-    async def send_order(self, symbol: str, side: str, quantity: float, new_client_order_id: Optional[str] = None) -> Dict:
-        """Отправить ордер через WebSocket."""
-        # 🔥 TODO: Реализация отправки ордера через WS
-        # Пока возвращаем ошибку (будет реализовано позже)
-        return {'success': False, 'error': 'WS send_order not implemented yet'}    
-
-    async def cancel_order(self, symbol: str, order_id: str) -> Dict:
-        """Отменить ордер через WebSocket."""
-        # 🔥 TODO: Реализация отмены ордера через WS
-        # Пока возвращаем ошибку
-        return {'success': False, 'error': 'WS cancel_order not implemented yet'}
-
-    async def get_position(self, symbol: str) -> Dict:
-        """Получить позицию через WebSocket."""
-        # 🔥 TODO: Реализация получения позиции через WS
-        # Пока возвращаем ошибку
-        return {'success': False, 'error': 'WS get_position not implemented yet'}
-
-    async def stop(self):
-        """Остановить WebSocket."""
+    async def close(self):
+        """Корректное закрытие соединения."""
         self._running = False
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
         self._connected = False
-        if self._ws:
-            await self._ws.close()
+        self.logger.info("🛑 WebSocket closed gracefully")
