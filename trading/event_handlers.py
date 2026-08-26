@@ -554,8 +554,7 @@ class EventHandlersMixin(BaseMixin):
     async def _on_order_filled(self, event):
         """
         Обработка события исполнения ордера (WS или REST-верификатор).
-        Ищет паспорт по client_order_id, переводит в OPEN, публикует POSITION_OPENED.
-        Идемпотентность: повторное событие по уже OPEN паспорту — no-op без повторной публикации.
+        Поддерживает как исходные ордера, так и TP/SL ордера закрытия.
         """
         payload = event.payload
         client_order_id = payload.get('client_order_id')
@@ -567,17 +566,37 @@ class EventHandlersMixin(BaseMixin):
             self._log("filled_missing_client_order_id", {"payload": payload})
             return
 
-        # Ищем паспорт по client_order_id среди нетерминальных
+        # 🔥 ШАГ 9: Парсинг passport_id из client_order_id закрытия
+        # Формат: CLOSE_TP1_HIT_PASS_20260826_115647_ или CLOSE_SL_PASS_XXX
         passport = None
-        for p in self.passport_manager.get_all():
-            if p.status in ("CLOSED", "CANCELED", "FAILED"):
-                continue
-            for order in p.orders:
-                if order.get('client_order_id') == client_order_id:
-                    passport = p
+        close_order_detected = False
+        
+        if 'PASS_' in client_order_id:
+            # Извлекаем passport_id (формат: PASS_YYYYMMDD_HHMMSS_XXXXXX)
+            import re
+            match = re.search(r'(PASS_\d{8}_\d{6}_[a-f0-9]+)', client_order_id)
+            if match:
+                extracted_passport_id = match.group(1)
+                passport = self.passport_manager.get(extracted_passport_id)
+                if passport:
+                    close_order_detected = True
+                    self._log("close_order_detected", {
+                        "passport_id": extracted_passport_id,
+                        "client_order_id": client_order_id,
+                        "executed_qty": executed_qty,
+                    })
+
+        # Если это не ордер закрытия, ищем по client_order_id среди активных
+        if not passport:
+            for p in self.passport_manager.get_all():
+                if p.status in ("CLOSED", "CANCELED", "FAILED"):
+                    continue
+                for order in p.orders:
+                    if order.get('client_order_id') == client_order_id:
+                        passport = p
+                        break
+                if passport:
                     break
-            if passport:
-                break
 
         if not passport:
             self._log("filled_passport_not_found", {
@@ -586,18 +605,45 @@ class EventHandlersMixin(BaseMixin):
             })
             return
 
-        # Применяем переход; возвращаемое значение говорит, был ли реальный переход
+        # Если это ордер закрытия, обрабатываем как PARTIAL_CLOSE
+        if close_order_detected:
+            # Обновляем размер позиции
+            passport.position_size -= executed_qty
+            
+            # Если позиция полностью закрыта
+            if passport.position_size < 0.01:
+                self.state_manager.handle_event(passport, "POSITION_CLOSED", {
+                    'exit_reason': 'TP_HIT',
+                    'exit_price': avg_price,
+                    'gross_pnl': 0.0,  # TODO: рассчитать PnL
+                    'commission': 0.0,
+                })
+            else:
+                # Частичное закрытие
+                self.state_manager.handle_event(passport, "PARTIAL_CLOSE", {
+                    'closed_qty': executed_qty,
+                    'exit_price': avg_price,
+                })
+            
+            self.repository.save(passport)
+            self._log("position_partially_closed", {
+                "passport_id": passport.passport_id,
+                "closed_qty": executed_qty,
+                "remaining_size": passport.position_size,
+            })
+            return
+
+        # Обычный ордер открытия — применяем переход
         transitioned = self.state_manager.handle_event(passport, "ORDER_FILLED", {
             'executed_qty': executed_qty,
             'price': avg_price,
         })
 
-        # Отменяем активный верификатор в любом случае — исполнение подтверждено
+        # Отменяем активный верификатор
         if hasattr(self, 'verifier'):
             await self.verifier.cancel_verification(passport.passport_id)
 
         if not transitioned:
-            # Идемпотентный no-op: паспорт уже OPEN (дубль WS + REST)
             self._log("order_filled_noop", {
                 "passport_id": passport.passport_id,
                 "client_order_id": client_order_id,
@@ -617,7 +663,7 @@ class EventHandlersMixin(BaseMixin):
             "new_status": passport.status,
         })
 
-        # Публикуем POSITION_OPENED для RiskManager (он поставит TP/SL)
+        # Публикуем POSITION_OPENED для RiskManager
         await self.bus.publish(
             event_type="POSITION_OPENED",
             source=source,
