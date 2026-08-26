@@ -68,6 +68,16 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
         self.lifecycle_manager = lifecycle_manager
         self._log("lifecycle_manager_set_in_orchestrator")
 
+    def set_drift_monitor(self, drift_monitor):
+        """Установка монитора дрейфа состояния."""
+        self.drift_monitor = drift_monitor
+        self._log("drift_monitor_set_in_orchestrator")
+
+    def set_verifier(self, verifier):
+        """Установка верификатора ордеров."""
+        self.verifier = verifier
+        self._log("verifier_set_in_orchestrator")
+
     async def start(self):
         self._running = True
         self._log("orchestrator_starting")

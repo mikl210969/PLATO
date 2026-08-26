@@ -31,7 +31,7 @@ class EventHandlersMixin(BaseMixin):
         })
 
     async def _on_signal(self, event):
-        """Обработка сигнала от стратегии."""
+        """Обработка сигнала от стратегии с Pre-Trade Gate."""
         self._log("signal_received", {"event": event.type})
         payload = event.payload
         signal = payload.get('signal')
@@ -47,9 +47,33 @@ class EventHandlersMixin(BaseMixin):
             return
         self._last_signal_time[signal.symbol] = current_time
 
+        # Проверка 1: Символ занят?
         if self.passport_manager.is_symbol_busy(signal.symbol):
             self._log("symbol_busy", {"symbol": signal.symbol, "signal_id": signal.signal_id})
             return
+
+        # 🔥 Проверка 2: Активный дрейф?
+        if hasattr(self, 'drift_monitor') and self.drift_monitor.is_drift_active(signal.symbol):
+            self._log("signal_rejected_drift_active", {
+                "symbol": signal.symbol,
+                "signal_id": signal.signal_id,
+                "reason": "drift_monitor_active"
+            })
+            return
+
+        # 🔥 Проверка 3: Активный верификатор для этого символа?
+        if hasattr(self, 'verifier'):
+            # Проверяем, есть ли активная задача верификации для любого паспорта по этому символу
+            active_passports = self.passport_manager.get_by_symbol(signal.symbol)
+            for passport in active_passports:
+                if passport.passport_id in self.verifier._active_tasks:
+                    self._log("signal_rejected_verifier_active", {
+                        "symbol": signal.symbol,
+                        "signal_id": signal.signal_id,
+                        "passport_id": passport.passport_id,
+                        "reason": "verifier_active"
+                    })
+                    return
 
         # Создаём паспорт
         passport = self.passport_manager.create(

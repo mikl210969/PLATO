@@ -122,6 +122,9 @@ class Platform:
             json_logger=self.json_logger
         )
         self.orchestrator.set_risk_manager(self.risk_manager)
+        # 🔥 Передаём DriftMonitor и OrderVerifier в Orchestrator для Pre-Trade Gate
+        self.orchestrator.set_drift_monitor(self.drift_monitor)
+        self.orchestrator.set_verifier(self.verifier)        
         logger.info("✅ RiskManager initialized and set in Orchestrator")
 
         # 10. 🔥 OrderVerifier: асинхронная проверка ордеров через REST
