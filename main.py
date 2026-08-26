@@ -7,7 +7,7 @@ import asyncio
 import signal
 import sys
 import time
-import traceback  # 🔥 ДОБАВЛЕНО: для детального логирования ошибок
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -28,6 +28,7 @@ from trading.orchestrator import Orchestrator
 from trading.state_manager import StateManager
 from trading.lifecycle_manager import LifecycleManager
 from trading.risk_manager import RiskManager
+from trading.order_verifier import OrderVerifier  # 🔥 НОВЫЙ ИМПОРТ
 
 from strategies.wall_fade import WallFadeStrategy
 from strategies.absorption import AbsorptionStrategy
@@ -123,7 +124,16 @@ class Platform:
         self.orchestrator.set_risk_manager(self.risk_manager)
         logger.info("✅ RiskManager initialized and set in Orchestrator")
 
-        # 10. Стратегии
+        # 10. 🔥 OrderVerifier: асинхронная проверка ордеров через REST
+        self.verifier = OrderVerifier(
+            rest_client=self.rest,
+            event_bus=self.bus,
+            poll_interval=3.0,
+            max_attempts=20
+        )
+        logger.info("✅ OrderVerifier initialized")
+
+        # 11. Стратегии
         strategies_config = self.config.get('strategies', {})
         self.wall_fade = WallFadeStrategy(strategies_config.get('wall_fade', {}))
         self.absorption = AbsorptionStrategy(strategies_config.get('absorption', {}))
@@ -154,7 +164,6 @@ class Platform:
         logger.info(f"✅ Listen key obtained: {listen_key[:10]}...")
 
         await self.ws.connect()
-        # asyncio.create_task(self.ws.health_check_loop()) # Health check теперь встроен в ws.run()
         
         # Первичная подписка на стакан и пользовательские данные
         await self.ws.subscribe_depth(self.symbol)
@@ -189,7 +198,6 @@ class Platform:
                         break
                         
                     except Exception as e:
-                        # 🔥 УЛУЧШЕННОЕ ЛОГИРОВАНИЕ: используем repr(e) и traceback, чтобы видеть реальную ошибку
                         error_details = repr(e) or str(e) or "Unknown empty error"
                         logger.error(f"❌ Refresh listen key attempt {attempt + 1}/3 failed: {error_details}")
                         logger.debug(f"Traceback details:\n{traceback.format_exc()}")
@@ -221,9 +229,52 @@ class Platform:
             logger.warning(f"⚠️ WS reconnect forced for passport {event.payload.get('passport_id')}")
             
             if hasattr(self.ws, 'close'):
-                await self.ws.close()  # type: ignore[misc]
+                await self.ws.close()
 
         self.bus.subscribe("WS_RECONNECT_FORCED", on_ws_reconnect_forced)
+
+        # ===== 🔥 Подписка на события для OrderVerifier =====
+        
+        async def on_order_trade_update_for_verifier(event: Event):
+            """Запускает OrderVerifier при получении ORDER_ACK/LIMIT_ON_BOOK."""
+            payload = event.payload
+            status = payload.get('status', '')
+            client_order_id = payload.get('client_order_id', '')
+            
+            # Запускаем верификатор только для начальных статусов
+            if status in ('NEW', 'ORDER_ACK', 'LIMIT_ON_BOOK'):
+                # Находим активный паспорт по client_order_id
+                active_passport = None
+                for passport in self.passport_manager._passports.values():
+                    if passport.orders:
+                        last_order = passport.orders[-1]
+                        if last_order.get('client_order_id') == client_order_id:
+                            active_passport = passport
+                            break
+                
+                if active_passport and active_passport.orders:
+                    last_order = active_passport.orders[-1]
+                    order_id = str(last_order.get('order_id', ''))
+                    
+                    await self.verifier.start_verification(
+                        passport_id=active_passport.passport_id,
+                        order_id=order_id,
+                        symbol=active_passport.symbol,
+                        client_order_id=client_order_id
+                    )
+
+        async def on_terminal_event_for_verifier(event: Event):
+            """Отменяет OrderVerifier при терминальных событиях."""
+            payload = event.payload
+            passport_id = payload.get('passport_id', '')
+            
+            if passport_id:
+                await self.verifier.cancel_verification(passport_id)
+
+        # Подписываемся на события
+        self.bus.subscribe("ORDER_TRADE_UPDATE", on_order_trade_update_for_verifier)
+        self.bus.subscribe("POSITION_CLOSED", on_terminal_event_for_verifier)
+        self.bus.subscribe("ORDER_CANCELED", on_terminal_event_for_verifier)
 
         # ===== Подписка на события WS → Шина =====
 
@@ -313,7 +364,7 @@ class Platform:
 
         # ===== Блокирующая синхронизация при старте (из RecoveryMixin) =====
         logger.info("🔄 [STARTUP] Performing exchange state recovery (blocking)...")
-        await self.orchestrator.perform_startup_recovery(self.symbol)  # type: ignore[misc]
+        await self.orchestrator.perform_startup_recovery(self.symbol)
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
 
         # ===== Основной цикл =====
@@ -394,6 +445,11 @@ class Platform:
     async def stop(self):
         self._running = False
         await self.orchestrator.stop()
+        
+        # 🔥 Останавливаем все активные верификаторы
+        if hasattr(self, 'verifier'):
+            await self.verifier.stop_all()
+        
         await self.rest.close()
         self.json_logger.close()
         logger.info("🛑 Platform stopped")
@@ -411,19 +467,17 @@ async def main():
     
     # Перехватываем сигналы завершения от ОС
     signal.signal(signal.SIGINT, signal_handler(platform))
-    signal.signal(signal.SIGTERM, signal_handler(platform)) # 🔥 Добавлено для перехвата kill-сигналов
+    signal.signal(signal.SIGTERM, signal_handler(platform))
 
     try:
         await platform.run()
     except KeyboardInterrupt:
         print("\n⏹️ Остановка по команде пользователя (Ctrl+C)")
     except asyncio.CancelledError:
-        # 🔥 ЭТО ТО, ЧТО МЫ ИЩЕМ. Если это случилось не по нашей вине, мы это узнаем.
         print("\n⚠️ ВНИМАНИЕ: Главный цикл был принудительно отменён!")
         print("   Возможные причины: закрытие терминала VS Code, перезапуск Python-расширения,")
         print("   или принудительное завершение процесса операционной системой.")
     except Exception as e:
-        # 🔥 Перехват любой другой непредвиденной ошибки
         print(f"\n💥 КРИТИЧЕСКАЯ НЕПРЕДВИДЕННАЯ ОШИБКА: {e}")
         import traceback
         traceback.print_exc()
@@ -437,4 +491,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass # Игнорируем, если прервали уже на этапе запуска
+        pass
