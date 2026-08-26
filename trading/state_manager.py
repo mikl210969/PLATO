@@ -21,7 +21,8 @@ class StateManager:
             PassportStatus.SIGNAL_GENERATED.value: {
                 PassportStatus.ORDER_SENT.value,
                 PassportStatus.CANCELED.value,
-                PassportStatus.CLOSED.value
+                PassportStatus.CLOSED.value,
+                PassportStatus.FAILED.value,  # 🔥 ШАГ 7: ошибка отправки ордера освобождает символ
             },
             PassportStatus.ORDER_SENT.value: {
                 PassportStatus.ORDER_ACK.value,
