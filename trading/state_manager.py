@@ -20,9 +20,11 @@ class StateManager:
         return {
             PassportStatus.SIGNAL_GENERATED.value: {
                 PassportStatus.ORDER_SENT.value,
+                PassportStatus.ORDER_ACK.value,  # 🔥 ШАГ 7.5: WS может прийти быстрее REST
+                PassportStatus.OPEN.value,       # 🔥 ШАГ 7.5: WS FILLED может прийти до REST
                 PassportStatus.CANCELED.value,
                 PassportStatus.CLOSED.value,
-                PassportStatus.FAILED.value,  # 🔥 ШАГ 7: ошибка отправки ордера освобождает символ
+                PassportStatus.FAILED.value,
             },
             PassportStatus.ORDER_SENT.value: {
                 PassportStatus.ORDER_ACK.value,
