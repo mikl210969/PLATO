@@ -122,9 +122,6 @@ class Platform:
             json_logger=self.json_logger
         )
         self.orchestrator.set_risk_manager(self.risk_manager)
-        # 🔥 Передаём DriftMonitor и OrderVerifier в Orchestrator для Pre-Trade Gate
-        self.orchestrator.set_drift_monitor(self.drift_monitor)
-        self.orchestrator.set_verifier(self.verifier)        
         logger.info("✅ RiskManager initialized and set in Orchestrator")
 
         # 10. 🔥 OrderVerifier: асинхронная проверка ордеров через REST
@@ -146,7 +143,13 @@ class Platform:
         )
         logger.info("✅ DriftMonitor initialized")
 
-        # 11. Стратегии
+        # 🔥 Передаём DriftMonitor и OrderVerifier в Orchestrator для Pre-Trade Gate
+        # (ДОЛЖНО БЫТЬ ПОСЛЕ СОЗДАНИЯ обоих компонентов!)
+        self.orchestrator.set_drift_monitor(self.drift_monitor)
+        self.orchestrator.set_verifier(self.verifier)
+        logger.info("✅ DriftMonitor and OrderVerifier set in Orchestrator")
+
+        # 12. Стратегии
         strategies_config = self.config.get('strategies', {})
         self.wall_fade = WallFadeStrategy(strategies_config.get('wall_fade', {}))
         self.absorption = AbsorptionStrategy(strategies_config.get('absorption', {}))
@@ -245,49 +248,6 @@ class Platform:
                 await self.ws.close()
 
         self.bus.subscribe("WS_RECONNECT_FORCED", on_ws_reconnect_forced)
-
-        # ===== 🔥 Подписка на события для OrderVerifier =====
-        
-        async def on_order_trade_update_for_verifier(event: Event):
-            """Запускает OrderVerifier при получении ORDER_ACK/LIMIT_ON_BOOK."""
-            payload = event.payload
-            status = payload.get('status', '')
-            client_order_id = payload.get('client_order_id', '')
-            
-            # Запускаем верификатор только для начальных статусов
-            if status in ('NEW', 'ORDER_ACK', 'LIMIT_ON_BOOK'):
-                # Находим активный паспорт по client_order_id
-                active_passport = None
-                for passport in self.passport_manager._passports.values():
-                    if passport.orders:
-                        last_order = passport.orders[-1]
-                        if last_order.get('client_order_id') == client_order_id:
-                            active_passport = passport
-                            break
-                
-                if active_passport and active_passport.orders:
-                    last_order = active_passport.orders[-1]
-                    order_id = str(last_order.get('order_id', ''))
-                    
-                    await self.verifier.start_verification(
-                        passport_id=active_passport.passport_id,
-                        order_id=order_id,
-                        symbol=active_passport.symbol,
-                        client_order_id=client_order_id
-                    )
-
-        async def on_terminal_event_for_verifier(event: Event):
-            """Отменяет OrderVerifier при терминальных событиях."""
-            payload = event.payload
-            passport_id = payload.get('passport_id', '')
-            
-            if passport_id:
-                await self.verifier.cancel_verification(passport_id)
-
-        # Подписываемся на события
-        self.bus.subscribe("ORDER_TRADE_UPDATE", on_order_trade_update_for_verifier)
-        self.bus.subscribe("POSITION_CLOSED", on_terminal_event_for_verifier)
-        self.bus.subscribe("ORDER_CANCELED", on_terminal_event_for_verifier)
 
         # ===== Подписка на события WS → Шина =====
 

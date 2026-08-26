@@ -25,7 +25,8 @@ class EventHandlersMixin(BaseMixin):
         self.bus.subscribe("POSITION_CLOSED", self._on_position_closed)
         self.bus.subscribe("SYNC_REQUEST", self._on_sync_request)
         self.bus.subscribe("TTL_EXPIRED", self._on_ttl_expired)
-        
+        self.bus.subscribe("ORDER_FILLED", self._on_order_filled)
+        self.bus.subscribe("ORDER_PARTIAL", self._on_order_partial)        
         self._log("subscribed_to_events", {
             "subscriptions": ["SIGNAL_GENERATED", "ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "POSITION_CLOSED", "SYNC_REQUEST", "TTL_EXPIRED"]
         })
@@ -113,6 +114,20 @@ class EventHandlersMixin(BaseMixin):
         if result.get('success'):
             self.state_manager.handle_event(passport, "ORDER_SENT", "Order sent to exchange")
             self.repository.save(passport)
+
+            # 🔥 ШАГ 6: Запускаем REST-верификатор СРАЗУ после отправки ордера.
+            # Это гарантирует, что даже при потере WS-события NEW мы узнаем об исполнении.
+            if hasattr(self, 'verifier'):
+                await self.verifier.start_verification(
+                    passport_id=passport.passport_id,
+                    order_id=str(result.get('order_id', '')),
+                    symbol=signal.symbol,
+                    client_order_id=signal.signal_id
+                )
+                self._log("verifier_started_on_send", {
+                    "passport_id": passport.passport_id,
+                    "order_id": result.get('order_id'),
+                })
             
             passport.add_order({
                 "order_id": result.get('order_id'), "client_order_id": result.get('client_order_id'),
@@ -535,3 +550,119 @@ class EventHandlersMixin(BaseMixin):
             },
             symbol=symbol
         )
+
+    async def _on_order_filled(self, event):
+        """
+        Обработка события исполнения ордера (WS или REST-верификатор).
+        Ищет паспорт по client_order_id, переводит в OPEN, публикует POSITION_OPENED.
+        Идемпотентность: повторное событие по уже OPEN паспорту — no-op без повторной публикации.
+        """
+        payload = event.payload
+        client_order_id = payload.get('client_order_id')
+        executed_qty = float(payload.get('executed_qty', 0) or 0)
+        avg_price = float(payload.get('avg_price', 0) or 0)
+        source = event.source
+
+        if not client_order_id:
+            self._log("filled_missing_client_order_id", {"payload": payload})
+            return
+
+        # Ищем паспорт по client_order_id среди нетерминальных
+        passport = None
+        for p in self.passport_manager.get_all():
+            if p.status in ("CLOSED", "CANCELED", "FAILED"):
+                continue
+            for order in p.orders:
+                if order.get('client_order_id') == client_order_id:
+                    passport = p
+                    break
+            if passport:
+                break
+
+        if not passport:
+            self._log("filled_passport_not_found", {
+                "client_order_id": client_order_id,
+                "source": source,
+            })
+            return
+
+        # Применяем переход; возвращаемое значение говорит, был ли реальный переход
+        transitioned = self.state_manager.handle_event(passport, "ORDER_FILLED", {
+            'executed_qty': executed_qty,
+            'price': avg_price,
+        })
+
+        # Отменяем активный верификатор в любом случае — исполнение подтверждено
+        if hasattr(self, 'verifier'):
+            await self.verifier.cancel_verification(passport.passport_id)
+
+        if not transitioned:
+            # Идемпотентный no-op: паспорт уже OPEN (дубль WS + REST)
+            self._log("order_filled_noop", {
+                "passport_id": passport.passport_id,
+                "client_order_id": client_order_id,
+                "status": passport.status,
+                "source": source,
+            })
+            return
+
+        self.repository.save(passport)
+
+        self._log("order_filled_processed", {
+            "passport_id": passport.passport_id,
+            "client_order_id": client_order_id,
+            "executed_qty": executed_qty,
+            "avg_price": avg_price,
+            "source": source,
+            "new_status": passport.status,
+        })
+
+        # Публикуем POSITION_OPENED для RiskManager (он поставит TP/SL)
+        await self.bus.publish(
+            event_type="POSITION_OPENED",
+            source=source,
+            payload={
+                "passport_id": passport.passport_id,
+                "symbol": passport.symbol,
+                "side": passport.side,
+                "entry_price": passport.position_entry_price,
+                "position_size": passport.position_size,
+            },
+            symbol=passport.symbol,
+        )
+
+    async def _on_order_partial(self, event):
+        """Обработка частичного исполнения."""
+        payload = event.payload
+        client_order_id = payload.get('client_order_id')
+        executed_qty = float(payload.get('executed_qty', 0) or 0)
+        avg_price = float(payload.get('avg_price', 0) or 0)
+
+        if not client_order_id:
+            return
+
+        passport = None
+        for p in self.passport_manager.get_all():
+            if p.status in ("CLOSED", "CANCELED", "FAILED"):
+                continue
+            for order in p.orders:
+                if order.get('client_order_id') == client_order_id:
+                    passport = p
+                    break
+            if passport:
+                break
+
+        if not passport:
+            return
+
+        self.state_manager.handle_event(passport, "ORDER_PARTIAL", {
+            'executed_qty': executed_qty,
+            'price': avg_price,
+        })
+        self.repository.save(passport)
+
+        self._log("order_partial_processed", {
+            "passport_id": passport.passport_id,
+            "client_order_id": client_order_id,
+            "executed_qty": executed_qty,
+        })

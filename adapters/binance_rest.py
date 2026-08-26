@@ -430,16 +430,20 @@ class BinanceRestClient:
         order_id: Optional[str] = None,
         client_order_id: Optional[str] = None
     ) -> Optional[Dict]:
-        """Получить статус ордера с биржи по orderId или client_order_id."""
+        """
+        Получить статус ордера с биржи.
+        ВАЖНО: Binance не принимает оба идентификатора одновременно.
+        Приоритет: orderId (если передан, client_order_id игнорируется).
+        """
         if not order_id and not client_order_id:
             return None
-        
+
         params = {'symbol': symbol}
         if order_id:
             params['orderId'] = order_id
-        if client_order_id:
+        elif client_order_id:
             params['origClientOrderId'] = client_order_id
-        
+
         try:
             result = await self._request('GET', '/fapi/v1/order', params, signed=True)
             return result if result.get('orderId') else None
