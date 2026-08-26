@@ -260,20 +260,29 @@ class Trader:
             print(f"⚠️ [TRADER] Failed to get order status: {e}")
             return None
 
-    async def cancel_order(self, symbol: str, order_id: str) -> bool:
-        """Отменить ордер (устойчиво к ошибке -2011)."""
+    async def cancel_order(self, symbol: str, order_id: str) -> Dict:
+        """
+        Отменить ордер. Возвращает структурированный словарь:
+          {"success": True, "status": "CANCELED"} — успешная отмена
+          {"success": False, "error": "...", "code": -2011} — ордер не найден на бирже
+          {"success": False, "error": "...", "code": None} — другая ошибка
+        """
         try:
             result = await self.rest.cancel_order(symbol, order_id)
             if result.get('success'):
-                return True
-            # Если биржа вернула ошибку "Unknown order" (-2011), считаем это успехом
-            error_msg = str(result.get('error', '')).lower()
-            if 'unknown order' in error_msg or '-2011' in error_msg:
-                return True
-            return False
+                return {"success": True, "status": "CANCELED"}
+
+            # Извлекаем код Binance из строки ошибки вида "... (code: -2011)"
+            import re
+            error_msg = str(result.get('error', ''))
+            code_match = re.search(r'code:\s*(-?\d+)', error_msg)
+            error_code = int(code_match.group(1)) if code_match else None
+
+            return {"success": False, "error": error_msg, "code": error_code}
+
         except Exception as e:
             print(f"⚠️ [TRADER] Failed to cancel order: {e}")
-            return False
+            return {"success": False, "error": str(e), "code": None}
 
     def calculate_exit_levels(self, side: str, entry_price: float, atr_value: float = 0.5) -> Dict:
         """Рассчитать уровни выхода (SL, TP1, TP2) через ExitCalculator."""
