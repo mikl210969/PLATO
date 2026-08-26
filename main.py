@@ -133,6 +133,16 @@ class Platform:
         )
         logger.info("✅ OrderVerifier initialized")
 
+        # 11. 🔥 DriftMonitor: периодическая сверка с биржей
+        from trading.drift_monitor import DriftMonitor
+        self.drift_monitor = DriftMonitor(
+            rest_client=self.rest,
+            passport_manager=self.passport_manager,
+            event_bus=self.bus,
+            poll_interval=30.0
+        )
+        logger.info("✅ DriftMonitor initialized")
+
         # 11. Стратегии
         strategies_config = self.config.get('strategies', {})
         self.wall_fade = WallFadeStrategy(strategies_config.get('wall_fade', {}))
@@ -356,6 +366,8 @@ class Platform:
                     await on_ws_reconnect()
 
         asyncio.create_task(self.ws.run())
+        # 🔥 Запускаем DriftMonitor
+        await self.drift_monitor.start(symbols=[self.symbol])        
         asyncio.create_task(self._keep_alive_loop())
         asyncio.create_task(user_data_health_check())
         
@@ -445,11 +457,22 @@ class Platform:
     async def stop(self):
         self._running = False
         await self.orchestrator.stop()
-        
-        # 🔥 Останавливаем все активные верификаторы
+
+        # 🔥 1. Сначала DriftMonitor — чтобы он перестал делать REST-запросы
+        if hasattr(self, 'drift_monitor'):
+            try:
+                await self.drift_monitor.stop()
+            except Exception as e:
+                logger.error(f"Error stopping DriftMonitor: {e}")
+
+        # 🔥 2. Потом OrderVerifier — отменяем фоновые проверки ордеров
         if hasattr(self, 'verifier'):
-            await self.verifier.stop_all()
-        
+            try:
+                await self.verifier.stop_all()
+            except Exception as e:
+                logger.error(f"Error stopping OrderVerifier: {e}")
+
+        # 🔥 3. В конце закрываем REST-клиент и логи
         await self.rest.close()
         self.json_logger.close()
         logger.info("🛑 Platform stopped")

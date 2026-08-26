@@ -6,7 +6,7 @@ import asyncio  # 🔥 ДОБАВИТЬ
 import hashlib
 import hmac
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import aiohttp
 
 from core.logger import get_logger
@@ -148,6 +148,25 @@ class BinanceRestClient:
         except Exception as e:
             print(f"️ [REST] Failed to get position: {e}")
             return None
+
+    async def get_open_orders(self, symbol: str) -> List[Dict]:
+        """
+        Получить все открытые ордера по символу.
+        Возвращает список ордеров или пустой список при ошибке.
+        """
+        params = {'symbol': symbol}
+        try:
+            result = await self._request('GET', '/fapi/v1/openOrders', params, signed=True)
+            
+            if not isinstance(result, list):
+                self.logger.error(f"Binance returned non-list for openOrders: {type(result)}")
+                return []
+            
+            return result
+            
+        except Exception as e:
+            print(f"⚠️ [REST] Failed to get open orders: {e}")
+            return []
 
     async def get_orderbook(self, symbol: str, limit: int = 20) -> Dict:
         """Получить стакан."""
