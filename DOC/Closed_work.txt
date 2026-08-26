@@ -1,5 +1,5 @@
 # 1. Переходим в папку платформы
-cd C:\Users\m.ongudushev\proga\PLATO
+cd C:\Users\user\PLATO
 
 # 2. Смотрим, что изменилось
 git status

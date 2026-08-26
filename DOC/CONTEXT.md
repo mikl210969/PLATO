@@ -1,33 +1,44 @@
 # 📌 Текущий статус (обновляется после каждого сеанса)
 
-## Последние изменения (2026-08-25)
+## 📌 Текущий статус (Обновлено: 2026-08-25)
+**Версия:** v1.1-Stable-Testnet
 
-### Hedge Mode — полный переход
-- [trading/position_monitor.py] Добавлен `position_side` ("LONG"/"SHORT"), убран `reduce_only`
-- [trading/orchestrator.py] `close_position()` передаёт `position_side` из `passport.side`
-- [trading/risk_manager.py] `_close_market()` передаёт `position_side`, обновляет паспорт после закрытия
-- [tests/test_order_placement.py] Добавлены 4 теста на Hedge Mode (SHORT/LONG вход, закрытие, limit)
-- [tests/test_position_monitor.py] Обновлены `assert_called_once_with` под Hedge Mode
+### 🏗 Архитектурные изменения и Hedge Mode
+- **Полный переход на Hedge Mode**: Во всех модулях (`trader.py`, `risk_manager.py`, `orchestrator.py`, `position_monitor.py`) при отправке ордеров явно передаётся параметр `position_side` ("LONG" или "SHORT").
+- **Удалён `reduce_only`**: Параметр `reduce_only=True` полностью убран из вызовов закрытия позиций, так как в Hedge Mode Binance он запрещён и вызывает ошибку `-1106`.
+- **Отключение дублирования**: В `orchestrator.py` закомментированы вызовы `start_position_monitor()` и `stop_position_monitor()`. Логикой TP/SL и закрытия позиций теперь управляет исключительно `RiskManager`, что предотвращает гонку состояний и двойные закрытия.
 
-### Исправления багов
-- [trading/event_handlers.py] Исправлен импорт `datetime` (было `datetime.datetime.now(...)`, стало `datetime.now(timezone.utc)`)
-- [trading/event_handlers.py] Реализована логика `SYNC_REQUEST` — синхронизация паспорта с биржей через REST
+### 🐛 Критические исправления багов
+1. **Binance API Error -4015 (Client order id length)**: В `trader.py` добавлена принудительная обрезка `client_order_id` до 35 символов (`[:35]`) перед отправкой на биржу. Это защищает от падения при генерации длинных ID (например, `CLOSE_SL_HIT_PASS_...`).
+2. **Потеря потока цен при реконнекте (WS DEAD)**: В `main.py` в обработчик `on_ws_reconnect` добавлен вызов `await self.ws.subscribe_depth(self.symbol)`. Теперь при обрыве связи бот заново подписывается и на `user_data`, и на стакан, предотвращая "ослепление" RiskManager.
+3. **AttributeError в StateManager**: В `event_handlers.py` исправлена передача данных при ошибке ордера: `result.get('error')` теперь оборачивается в словарь `{'error': ...}`, так как `state_manager.handle_event` ожидает `Dict`, а не `str`.
+4. **Windows BOM в JSON**: В `core/config_loader.py` чтение файлов изменено на `encoding="utf-8-sig"`, что предотвращает `JSONDecodeError` при наличии скрытых BOM-символов в `secrets.json`.
+5. **Импорт datetime**: В `event_handlers.py` исправлен устаревший вызов `datetime.datetime.now` на корректный `datetime.now(timezone.utc)`.
 
-### Отключение дублирования
-- [trading/orchestrator.py] `PositionMonitor` дублирует `RiskManager` по логике TP/SL. В `start()` / `stop()` закомментированы `start_position_monitor()` / `stop_position_monitor()`
+### 🧹 Рефакторинг и чистота кода
+- **LifecycleManager**: Шумные отладочные `print` заменены на структурированные вызовы `self._log()` (JSON Logger). Оставлен только один финальный `print` для подтверждения запуска таймера.
+- **RiskManager**: Метод `_close_market` теперь корректно обновляет статус паспорта (`CLOSED`), рассчитывает PnL и сохраняет изменения в репозиторий после успешного рыночного закрытия.
+- **EventHandlers (Sync)**: Реализована полноценная логика обработки события `SYNC_REQUEST`. Теперь при потере WS-событий бот сверяет размер позиции через REST и корректно закрывает паспорт, если позиция была закрыта вручную на бирже.
 
-### Инфраструктура
-- [pytest.ini] Создан конфиг: `pythonpath = .` + `asyncio_mode = auto`
+### 💻 Инфраструктура и развёртывание
+- Проект успешно клонирован и настроен на удалённой машине (Windows 10) через GitHub.
+- Создан и настроен `.gitignore` (исключает `venv/`, `__pycache__/`, `config/secrets.json`).
+- Настроено виртуальное окружение (`venv`) с актуальными зависимостями: `aiohttp`, `websockets`, `pytest`, `pytest-asyncio`.
+- Все изменения закоммичены и отправлены в ветку `main` репозитория `mikl210969/PLATO`.
 
-## Статус тестов
-- **pytest:** 27/27 passed
-- **run_test_stand.py:** 19/19 passed (2 сценария: внутренний стоп + SYNC)
+### ✅ Статус тестирования
+- **Unit/Integration Tests (`pytest tests/ -v`)**: 27 / 27 passed ✅
+- **Test Stand (`python run_test_stand.py`)**: 19 / 19 passed ✅ (Сценарии: внутренний стоп TP1→SL и SYNC после ручного закрытия).
+- **Live Testnet Run**: Платформа работает стабильно. Реконнекты WS проходят гладко, TTL-таймеры запускаются, ошибки длины ID и режима Hedge Mode устранены.
 
-## Известные проблемы
-- `PositionMonitor` и `RiskManager` дублируют логику TP/SL. В текущей конфигурации `PositionMonitor` отключён. Нужно решить: удалить `PositionMonitor` или чётко разграничить зоны ответственности.
+### ⚠️ Известные проблемы / Технический долг
+- `PositionMonitor` формально присутствует в кодовой базе, но отключён в `Orchestrator`. В будущем его стоит либо полностью удалить, либо перепрофилировать под другие задачи (например, только для трейлинга), чтобы не вводить в заблуждение.
+- В логах `main.py` иногда встречаются временные ошибки `[REST] Failed to get position` или `TimeoutError` при обновлении listen key. Это нормальное поведение тестнета Binance; система успешно обрабатывает их через механизмы retry и не падает.
 
-## Следующие шаги
-- Перейти к следующей задаче (стратегии, риск-менеджмент, работа на реальном тестнете)
+### 🚀 Следующие шаги (приоритет)
+1. Наблюдение за полным жизненным циклом ордера на тестнете (исполнение → TP1/SL или отмена по TTL).
+2. Доработка логики торговых стратегий (`strategies/wall_fade.py`, `absorption.py`).
+3. Создание файла `requirements.txt` для стандартизации развёртывания.
 # 🏗 Архитектура и модули
 
 ## Кратко

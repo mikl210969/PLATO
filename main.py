@@ -407,15 +407,33 @@ def signal_handler(platform: Platform):
 
 async def main():
     platform = Platform(profile="testnet_24h_real")
+    
+    # Перехватываем сигналы завершения от ОС
     signal.signal(signal.SIGINT, signal_handler(platform))
+    signal.signal(signal.SIGTERM, signal_handler(platform)) # 🔥 Добавлено для перехвата kill-сигналов
 
     try:
         await platform.run()
     except KeyboardInterrupt:
-        print("\n⏹️  Stopping...")
+        print("\n⏹️ Остановка по команде пользователя (Ctrl+C)")
+    except asyncio.CancelledError:
+        # 🔥 ЭТО ТО, ЧТО МЫ ИЩЕМ. Если это случилось не по нашей вине, мы это узнаем.
+        print("\n⚠️ ВНИМАНИЕ: Главный цикл был принудительно отменён!")
+        print("   Возможные причины: закрытие терминала VS Code, перезапуск Python-расширения,")
+        print("   или принудительное завершение процесса операционной системой.")
+    except Exception as e:
+        # 🔥 Перехват любой другой непредвиденной ошибки
+        print(f"\n💥 КРИТИЧЕСКАЯ НЕПРЕДВИДЕННАЯ ОШИБКА: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
+        print("🛑 Завершение работы платформы и очистка ресурсов...")
         await platform.stop()
+        print("✅ Платформа полностью остановлена.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass # Игнорируем, если прервали уже на этапе запуска
