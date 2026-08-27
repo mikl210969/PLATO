@@ -721,6 +721,42 @@ class EventHandlersMixin(BaseMixin):
             await self.verifier.cancel_verification(passport.passport_id)
 
         if not transitioned:
+            # 🔥 ШАГ 10.2: Умная рекonsиляция объёма
+            # Если статус уже OPEN, но объём отличается от реального — 
+            # значит WS потерял часть partial fill'ов, rest_verifier принёс правду.
+            # Реконсилируем к истине (биржа = источник истины).
+            if passport.status == "OPEN" and executed_qty > 0:
+                old_size = passport.position_size
+                if abs(executed_qty - old_size) > 0.001:
+                    passport.position_size = executed_qty
+                    if avg_price > 0:
+                        passport.position_entry_price = avg_price
+                    
+                    self.repository.save(passport)
+                    
+                    self._log("volume_reconciled", {
+                        "passport_id": passport.passport_id,
+                        "old_size": old_size,
+                        "new_size": executed_qty,
+                        "source": source,
+                    })
+                    
+                    # Перепубликуем POSITION_OPENED для обновления RiskManager
+                    await self.bus.publish(
+                        event_type="POSITION_OPENED",
+                        source=source,
+                        payload={
+                            "passport_id": passport.passport_id,
+                            "symbol": passport.symbol,
+                            "side": passport.side,
+                            "entry_price": passport.position_entry_price,
+                            "position_size": passport.position_size,
+                        },
+                        symbol=passport.symbol,
+                    )
+                    return
+            
+            # Обычный noop — ничего не делаем
             self._log("order_filled_noop", {
                 "passport_id": passport.passport_id,
                 "client_order_id": client_order_id,
