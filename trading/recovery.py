@@ -148,100 +148,91 @@ class RecoveryMixin(BaseMixin):
 
     async def _replay_user_trades(self, symbol: str, rest_client) -> int:
         """
-        🔥 ШАГ 10.4.3.2: Replay трейдов за последние 24 часа.
-        Применяет закрытия (C1_, C2_, CS_) к паспортам.
+        🔥 ШАГ 10.4.4: Replay трейдов за 24 часа.
+        Два параллельных запроса вместо N последовательных (быстро и надежно).
         """
         import re
-        
+        import asyncio
+
         try:
-            # Запрашиваем трейды за последние 24 часа
             end_time = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
-            start_time = end_time - (24 * 60 * 60 * 1000)  # 24 часа назад
-            
-            trades = await rest_client.get_user_trades(
-                symbol=symbol,
-                start_time=start_time,
-                end_time=end_time,
-                limit=1000
+            start_time = end_time - (24 * 60 * 60 * 1000)
+
+            # 🔥 Два параллельных запроса вместо N последовательных
+            trades, orders = await asyncio.gather(
+                rest_client.get_user_trades(symbol, start_time, end_time, 1000),
+                rest_client.get_all_orders(symbol, start_time, end_time, 1000),
+                return_exceptions=True
             )
-            
+
+            if isinstance(trades, Exception) or isinstance(orders, Exception):
+                self._log("recovery_replay_fetch_failed", {
+                    "trades_error": str(trades) if isinstance(trades, Exception) else None,
+                    "orders_error": str(orders) if isinstance(orders, Exception) else None
+                })
+                return 0
+
             if not trades:
                 self._log("recovery_no_trades_found", {"symbol": symbol})
                 return 0
-            
-            # Группируем трейды по orderId
+
+            # Строим карту orderId -> origClientOrderId за ОДИН проход
+            oid_to_cid = {
+                str(o.get('orderId', '')): str(o.get('origClientOrderId', ''))
+                for o in orders if isinstance(o, dict)
+            }
+
             by_order: Dict[str, List[Dict]] = {}
             for trade in trades:
-                order_id = str(trade.get('orderId', ''))
-                by_order.setdefault(order_id, []).append(trade)
-            
+                if isinstance(trade, dict):
+                    by_order.setdefault(str(trade.get('orderId', '')), []).append(trade)
+
             closes_applied = 0
-            
-            # Анализируем каждую группу
+            closes_not_found = 0
+
             for order_id, order_trades in by_order.items():
-                # Берём первый трейд для определения типа
-                sample = order_trades[0]
-                client_order_id = sample.get('orderId', '')
-                
-                # Ищем clientOrderId через get_order_status
-                order_info = await rest_client.get_order_status(
-                    symbol=symbol,
-                    order_id=order_id
-                )
-                if not order_info:
+                client_order_id = oid_to_cid.get(order_id, '')
+                if not client_order_id:
                     continue
-                
-                client_order_id = order_info.get('clientOrderId', '')
-                
-                # Определяем: это закрытие?
+
                 close_match = re.match(r'^(C1|C2|CS|CE)_(PASS_.+)$', client_order_id)
                 if not close_match:
-                    # Не закрытие — пропускаем (входные ордера уже в паспортах)
                     continue
-                
+
                 close_level = close_match.group(1)
                 passport_id = close_match.group(2)
-                
-                # Суммируем qty по всем трейдам этого ордера
+
                 total_qty = sum(float(t.get('qty', 0) or 0) for t in order_trades)
                 total_quote = sum(float(t.get('quoteQty', 0) or 0) for t in order_trades)
                 avg_price = total_quote / total_qty if total_qty > 0 else 0
-                
-                # Применяем к паспорту
+
                 passport = self.passport_manager.get(passport_id)
                 if not passport:
-                    self._log("recovery_close_passport_not_found", {
-                        "passport_id": passport_id,
-                        "close_level": close_level,
-                        "qty": total_qty,
-                    })
+                    closes_not_found += 1
                     continue
-                
+
                 if passport.status in (
                     PassportStatus.CLOSED.value,
                     PassportStatus.CANCELED.value,
                     PassportStatus.FAILED.value,
                 ):
-                    continue  # уже закрыт
-                
-                # Применяем закрытие
+                    continue
+
                 old_size = passport.position_size
                 passport.position_size = max(0.0, passport.position_size - total_qty)
-                
+
                 exit_reason_map = {
-                    'C1': 'TP1_HIT',
-                    'C2': 'TP2_HIT',
-                    'CS': 'SL_HIT',
-                    'CE': 'EXTERNAL_CLOSE',
+                    'C1': 'TP1_HIT', 'C2': 'TP2_HIT',
+                    'CS': 'SL_HIT', 'CE': 'EXTERNAL_CLOSE',
                 }
                 exit_reason = exit_reason_map.get(close_level, 'MANUAL_CLOSE')
-                
+
                 if passport.position_size < 0.01:
                     passport.close(
                         exit_reason=exit_reason,
                         exit_price=avg_price,
                         gross_pnl=self._calculate_pnl(passport, avg_price, total_qty),
-                        commission=0.0
+                        commission=0.0,
                     )
                     self._log("recovery_closed_passport", {
                         "passport_id": passport_id,
@@ -260,17 +251,18 @@ class RecoveryMixin(BaseMixin):
                         "old_size": old_size,
                         "new_size": passport.position_size,
                     })
-                
+
                 self.repository.save(passport)
                 closes_applied += 1
-            
+
             self._log("recovery_replay_summary", {
                 "symbol": symbol,
                 "trades_analyzed": len(trades),
                 "closes_applied": closes_applied,
+                "closes_not_found": closes_not_found,
             })
             return closes_applied
-        
+
         except Exception as e:
             self._log("recovery_replay_failed", {"error": str(e)})
             return 0

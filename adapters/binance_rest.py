@@ -449,6 +449,60 @@ class BinanceRestClient:
             self.logger.error(f"⚠️ [REST] Failed to get user trades: {e}")
             return []
 
+    async def get_all_orders(
+        self,
+        symbol: str,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 1000
+    ) -> List[Dict]:
+        """
+        🔥 ШАГ 10.4.4: История ордеров с origClientOrderId.
+        Один вызов заменяет N вызовов get_order_status в replay.
+        """
+        params = {'symbol': symbol, 'limit': min(limit, 1000)}
+        if start_time:
+            params['startTime'] = start_time
+        if end_time:
+            params['endTime'] = end_time
+
+        try:
+            result = await self._request('GET', '/fapi/v1/allOrders', params, signed=True)
+            if not isinstance(result, list):
+                self.logger.error(f"Binance returned non-list for allOrders: {type(result)}")
+                return []
+            return result
+        except Exception as e:
+            self.logger.error(f"⚠️ [REST] Failed to get all orders: {e}")
+            return []
+
+    async def get_all_orders(
+        self,
+        symbol: str,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 1000
+    ) -> List[Dict]:
+        """
+        🔥 ШАГ 10.4.4: История ордеров с origClientOrderId.
+        Один вызов заменяет N вызовов get_order_status в replay.
+        """
+        params = {'symbol': symbol, 'limit': min(limit, 1000)}
+        if start_time:
+            params['startTime'] = start_time
+        if end_time:
+            params['endTime'] = end_time
+
+        try:
+            result = await self._request('GET', '/fapi/v1/allOrders', params, signed=True)
+            if not isinstance(result, list):
+                self.logger.error(f"Binance returned non-list for allOrders: {type(result)}")
+                return []
+            return result
+        except Exception as e:
+            self.logger.error(f"⚠️ [REST] Failed to get all orders: {e}")
+            return []
+
     async def cancel_order(self, symbol: str, order_id: str) -> Dict:
         params = {
             'symbol': symbol,
