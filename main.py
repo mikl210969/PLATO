@@ -28,7 +28,7 @@ from trading.orchestrator import Orchestrator
 from trading.state_manager import StateManager
 from trading.lifecycle_manager import LifecycleManager
 from trading.risk_manager import RiskManager
-from trading.order_verifier import OrderVerifier  # 🔥 НОВЫЙ ИМПОРТ
+from trading.order_verifier import OrderVerifier
 
 from strategies.wall_fade import WallFadeStrategy
 from strategies.absorption import AbsorptionStrategy
@@ -83,7 +83,7 @@ class Platform:
         # 5. StateManager
         self.state_manager = StateManager(self.passport_manager)
 
-        # 6. Оркестратор (включает в себя миксины: EventHandlers, Monitor, Recovery, PositionMonitor)
+        # 6. Оркестратор
         self.orchestrator = Orchestrator(
             config=self.config,
             event_bus=self.bus,
@@ -104,7 +104,7 @@ class Platform:
         )
         self.orchestrator.register_trader(self.symbol, self.trader)
 
-        # 8. LifecycleManager (управление TTL)
+        # 8. LifecycleManager
         self.lifecycle_manager = LifecycleManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
@@ -124,7 +124,7 @@ class Platform:
         self.orchestrator.set_risk_manager(self.risk_manager)
         logger.info("✅ RiskManager initialized and set in Orchestrator")
 
-        # 10. 🔥 OrderVerifier: асинхронная проверка ордеров через REST
+        # 10. OrderVerifier
         self.verifier = OrderVerifier(
             rest_client=self.rest,
             event_bus=self.bus,
@@ -133,7 +133,7 @@ class Platform:
         )
         logger.info("✅ OrderVerifier initialized")
 
-        # 11. 🔥 DriftMonitor: периодическая сверка с биржей
+        # 11. DriftMonitor
         from trading.drift_monitor import DriftMonitor
         self.drift_monitor = DriftMonitor(
             rest_client=self.rest,
@@ -143,8 +143,7 @@ class Platform:
         )
         logger.info("✅ DriftMonitor initialized")
 
-        # 🔥 Передаём DriftMonitor и OrderVerifier в Orchestrator для Pre-Trade Gate
-        # (ДОЛЖНО БЫТЬ ПОСЛЕ СОЗДАНИЯ обоих компонентов!)
+        # Передаём DriftMonitor и OrderVerifier в Orchestrator
         self.orchestrator.set_drift_monitor(self.drift_monitor)
         self.orchestrator.set_verifier(self.verifier)
         logger.info("✅ DriftMonitor and OrderVerifier set in Orchestrator")
@@ -157,7 +156,6 @@ class Platform:
 
         logger.info(f"✅ Platform initialized | symbol={self.symbol} | profile={profile}")
 
-        # Тест JSON Logger
         self.json_logger.log(
             module="platform",
             event="test_log",
@@ -180,14 +178,12 @@ class Platform:
         logger.info(f"✅ Listen key obtained: {listen_key[:10]}...")
 
         await self.ws.connect()
-        
-        # Первичная подписка на стакан и пользовательские данные
         await self.ws.subscribe_depth(self.symbol)
 
         self._last_user_data_ts = time.time()
         self._last_price_update_ts = time.time()
 
-        # ===== 🔥 ИСПРАВЛЕННЫЙ Обработчик переподключения WS =====
+        # ===== Обработчик переподключения WS =====
         async def on_ws_reconnect():
             if getattr(self, '_is_reconnecting', False):
                 return
@@ -201,11 +197,9 @@ class Platform:
                         new_listen_key = await asyncio.wait_for(self.rest.get_listen_key(), timeout=3.0)
                         self._listen_key = new_listen_key
                         
-                        # 1. Подписываемся на пользовательские данные
                         await self.ws.subscribe_user_data(new_listen_key)
                         self._last_user_data_ts = time.time()
                         
-                        # 2. 🔥 КРИТИЧЕСКИЙ ФИКС: ЗАНОВО подписываемся на стакан (depth) при реконнекте!
                         await self.ws.subscribe_depth(self.symbol)
                         
                         refreshed = True
@@ -213,6 +207,9 @@ class Platform:
                         logger.info(f"✅ Depth stream (orderbook) resubscribed for {self.symbol}")
                         break
                         
+                    except asyncio.CancelledError:
+                        logger.warning("⚠️ Listen key refresh cancelled")
+                        return
                     except Exception as e:
                         error_details = repr(e) or str(e) or "Unknown empty error"
                         logger.error(f"❌ Refresh listen key attempt {attempt + 1}/3 failed: {error_details}")
@@ -227,18 +224,22 @@ class Platform:
 
                 if not refreshed:
                     logger.critical("❌ CRITICAL: listen key not refreshed after 3 attempts")
+            except asyncio.CancelledError:
+                logger.warning("⚠️ Reconnect handler cancelled")
+                return
+            except Exception as e:
+                logger.error(f"❌ Reconnect handler error: {e}")
+                logger.debug(f"Traceback:\n{traceback.format_exc()}")
             finally:
                 self._is_reconnecting = False
 
-            # Запрашиваем синхронизацию состояния после реконнекта
-            await self.bus.publish(
-                event_type="SYNC_REQUEST",
-                source="platform",
-                payload={"symbol": self.symbol},
-                symbol=self.symbol
-            )
-
-        self.ws._on_reconnect = on_ws_reconnect
+            if refreshed:
+                await self.bus.publish(
+                    event_type="SYNC_REQUEST",
+                    source="platform",
+                    payload={"symbol": self.symbol},
+                    symbol=self.symbol
+                )
 
         # ===== Обработчик принудительного реконнекта WS =====
         async def on_ws_reconnect_forced(event: Event):
@@ -319,25 +320,30 @@ class Platform:
         # ===== Фоновые задачи =====
         async def user_data_health_check():
             while getattr(self, '_running', True):
-                await asyncio.sleep(10)
-                price_age = time.time() - getattr(self, '_last_price_update_ts', time.time())
-                has_active = bool(self.passport_manager.get_active_by_symbol(self.symbol))
-                
-                if has_active and price_age > 60:
-                    logger.warning(f"⚠️ WS DEAD: No price updates for {price_age:.0f}s. Forcing refresh.")
-                    self._last_price_update_ts = time.time()
-                    await on_ws_reconnect()
+                try:
+                    await asyncio.sleep(10)
+                    price_age = time.time() - getattr(self, '_last_price_update_ts', time.time())
+                    has_active = bool(self.passport_manager.get_active_by_symbol(self.symbol))
+                    
+                    if has_active and price_age > 60:
+                        logger.warning(f"⚠️ WS DEAD: No price updates for {price_age:.0f}s. Forcing refresh.")
+                        self._last_price_update_ts = time.time()
+                        await on_ws_reconnect()
+                except asyncio.CancelledError:
+                    logger.debug("Health check cancelled")
+                    break
+                except Exception as e:
+                    logger.error(f"Health check error: {e}")
+                    await asyncio.sleep(1)
 
-        asyncio.create_task(self.ws.run())
-        # 🔥 Запускаем DriftMonitor
-        await self.drift_monitor.start(symbols=[self.symbol])        
-        asyncio.create_task(self._keep_alive_loop())
-        asyncio.create_task(user_data_health_check())
+        # 🔥 ШАГ 9.5: Сохраняем ссылки на фоновые задачи
+        self._ws_task = asyncio.create_task(self.ws.run())
+        self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
+        self._health_check_task = asyncio.create_task(user_data_health_check())
         
-        # Запуск мониторинга зависших ордеров (из MonitorMixin)
+        await self.drift_monitor.start(symbols=[self.symbol])        
         await self.orchestrator.start_stuck_orders_monitor()
 
-        # ===== Блокирующая синхронизация при старте (из RecoveryMixin) =====
         logger.info("🔄 [STARTUP] Performing exchange state recovery (blocking)...")
         await self.orchestrator.perform_startup_recovery(self.symbol)
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
@@ -361,12 +367,10 @@ class Platform:
 
                 current_time = time.time()
                 
-                # Периодическая проверка позиции через REST (для надёжности)
                 if current_time - last_position_check_time >= 10:
                     await self.rest.get_position(self.symbol)
                     last_position_check_time = current_time
 
-                # Логирование цены каждые 30 секунд
                 if current_time - last_log_time >= 30:
                     logger.info(f"🔄 Price: {current_price} (from {'WS' if self.ws_price > 0 else 'REST'})")
                     last_log_time = current_time
@@ -398,8 +402,13 @@ class Platform:
 
                 await asyncio.sleep(2)
 
+            except asyncio.CancelledError:
+                logger.warning("⚠️ Main loop received CancelledError, continuing...")
+                await asyncio.sleep(1)
+                continue
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
+                logger.debug(f"Traceback:\n{traceback.format_exc()}")
                 await asyncio.sleep(1)
 
     async def _keep_alive_loop(self):
@@ -419,23 +428,36 @@ class Platform:
 
     async def stop(self):
         self._running = False
+        
+        # 🔥 ШАГ 9.5: Корректная отмена фоновых задач
+        tasks_to_cancel = []
+        if hasattr(self, '_ws_task') and not self._ws_task.done():
+            self._ws_task.cancel()
+            tasks_to_cancel.append(self._ws_task)
+        if hasattr(self, '_keep_alive_task') and not self._keep_alive_task.done():
+            self._keep_alive_task.cancel()
+            tasks_to_cancel.append(self._keep_alive_task)
+        if hasattr(self, '_health_check_task') and not self._health_check_task.done():
+            self._health_check_task.cancel()
+            tasks_to_cancel.append(self._health_check_task)
+        
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        
         await self.orchestrator.stop()
 
-        # 🔥 1. Сначала DriftMonitor — чтобы он перестал делать REST-запросы
         if hasattr(self, 'drift_monitor'):
             try:
                 await self.drift_monitor.stop()
             except Exception as e:
                 logger.error(f"Error stopping DriftMonitor: {e}")
 
-        # 🔥 2. Потом OrderVerifier — отменяем фоновые проверки ордеров
         if hasattr(self, 'verifier'):
             try:
                 await self.verifier.stop_all()
             except Exception as e:
                 logger.error(f"Error stopping OrderVerifier: {e}")
 
-        # 🔥 3. В конце закрываем REST-клиент и логи
         await self.rest.close()
         self.json_logger.close()
         logger.info("🛑 Platform stopped")
@@ -451,7 +473,6 @@ def signal_handler(platform: Platform):
 async def main():
     platform = Platform(profile="testnet_24h_real")
     
-    # Перехватываем сигналы завершения от ОС
     signal.signal(signal.SIGINT, signal_handler(platform))
     signal.signal(signal.SIGTERM, signal_handler(platform))
 
@@ -461,11 +482,14 @@ async def main():
         print("\n⏹️ Остановка по команде пользователя (Ctrl+C)")
     except asyncio.CancelledError:
         print("\n⚠️ ВНИМАНИЕ: Главный цикл был принудительно отменён!")
-        print("   Возможные причины: закрытие терминала VS Code, перезапуск Python-расширения,")
-        print("   или принудительное завершение процесса операционной системой.")
+        print("   Возможные причины:")
+        print("   - Каскадная отмена из-за необработанного исключения в фоновой задаче")
+        print("   - Внешний сигнал (SIGTERM/SIGINT)")
+        print("   - ОС убила процесс (OOM killer)")
+        print("\n   🔍 ТРАССИРОВКА ОШИБКИ:")
+        traceback.print_exc()
     except Exception as e:
         print(f"\n💥 КРИТИЧЕСКАЯ НЕПРЕДВИДЕННАЯ ОШИБКА: {e}")
-        import traceback
         traceback.print_exc()
     finally:
         print("🛑 Завершение работы платформы и очистка ресурсов...")
@@ -473,6 +497,7 @@ async def main():
         print("✅ Платформа полностью остановлена.")
 
 
+# 🔥 КРИТИЧЕСКИЙ БЛОК: без него платформа не запустится!
 if __name__ == "__main__":
     try:
         asyncio.run(main())

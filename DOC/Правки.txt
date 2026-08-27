@@ -1,0 +1,156 @@
+cd C:\Users\user\PLATO31\PLATO
+python main.py
+
+
+Понял. Раз новая версия `binance_ws.py` вызывает сбой, **оставляем старую**. Твой лог это подтверждает: старая версия, несмотря на разрывы, всё же успешно получает и обрабатывает события (видно, как в `08:29:34` пришёл и корректно обработался `FILLED` для закрытия по TP1). 
+
+Но ты абсолютно прав в главном: **полагаться только на WebSocket при таких разрывах нельзя**. Если событие `FILLED` прилетит в ту 1-2 секунду, пока идет реконнект, мы его потеряем навсегда, и паспорт зависнет в `ORDER_ACK`.
+
+Единственный способ сделать платформу устойчивой к таким каналам связи — это **принудительная синхронизация состояния с биржей через REST сразу после каждого успешного реконнекта**.
+
+Давай внедрим этот механизм. Это закроет проблему "потерянных" исполнений.
+
+### 🛠 Шаг: Добавляем принудительную синхронизацию после реконнекта
+
+Нам нужно добавить функцию, которая будет проверять реальные ордера и позиции на бирже и приводить локальные паспорта в соответствие с реальностью.
+
+#### 1. Добавь этот метод в класс `Platform` в файле `main.py`
+(Вставь его перед методом `_main_loop` или в конец класса `Platform`):
+
+```python
+    async def _force_sync_with_exchange(self):
+        """
+        Принудительная сверка локального состояния с биржей после реконнекта.
+        Предотвращает зависание паспортов в статусе ORDER_ACK при потере WS-событий.
+        """
+        self._log("sync_starting", {"symbol": self.symbol})
+        try:
+            # 1. Получаем реальные открытые ордера с биржи
+            open_orders = await self.rest.get_open_orders(self.symbol)
+            open_order_ids = {str(o.get('orderId')) for o in open_orders}
+            
+            # 2. Получаем реальную позицию
+            position = await self.rest.get_position(self.symbol)
+            position_size = abs(float(position.get('positionAmt', 0) or 0))
+            
+            # 3. Проверяем все активные локальные паспорта
+            active_passports = self.passport_manager.get_active_by_symbol(self.symbol)
+            # (Примечание: если get_active_by_symbol возвращает один паспорт, сделаем его списком для универсальности)
+            if active_passports and not isinstance(active_passports, list):
+                active_passports = [active_passports]
+            elif not active_passports:
+                active_passports = []
+
+            for passport in active_passports:
+                if not passport:
+                    continue
+                    
+                last_order = passport.orders[-1] if passport.orders else None
+                if not last_order:
+                    continue
+                    
+                local_order_id = str(last_order.get('order_id', ''))
+                
+                # СЦЕНАРИЙ А: Локально ордер еще не исполнен (ORDER_ACK или ORDER_SENT), 
+                # но на бирже его уже нет в списке открытых (значит, он FILLED или CANCELED)
+                if passport.status in ["ORDER_SENT", "ORDER_ACK", "LIMIT_ON_BOOK"]:
+                    if local_order_id not in open_order_ids:
+                        self._log("sync_detected_missing_order", {
+                            "passport_id": passport.passport_id,
+                            "local_status": passport.status,
+                            "order_id": local_order_id
+                        })
+                        # Мы не знаем точно, FILLED он или CANCELED, но раз его нет, 
+                        # а позиция есть, считаем его исполненным.
+                        if position_size > 0.01: # Если позиция открыта
+                            self._log("sync_upgrading_to_open", {"passport_id": passport.passport_id})
+                            passport.status = "OPEN"
+                            passport.position_size = position_size
+                            # Триггерим событие, чтобы RiskManager подхватил позицию
+                            await self.bus.publish(
+                                event_type="ORDER_FILLED",
+                                source="sync_recovery",
+                                payload={
+                                    "passport_id": passport.passport_id,
+                                    "symbol": self.symbol,
+                                    "executed_qty": position_size,
+                                    "price": float(position.get('entryPrice', 0) or 0)
+                                },
+                                symbol=self.symbol
+                            )
+                            self.passport_manager.update(passport)
+                            
+        except Exception as e:
+            self._log("sync_failed", {"error": str(e)})
+            # Не критично, следующая попытка будет при следующем реконнекте или по таймеру
+```
+
+#### 2. Вызови этот метод внутри обработчика реконнекта
+В методе `_main_loop` найди функцию `on_ws_reconnect` (ту самую, где мы чинили подписку на depth) и добавь вызов синхронизации в самый конец, после успешного обновления ключей:
+
+```python
+        # ===== Обработчик переподключения WS =====
+        async def on_ws_reconnect():
+            if getattr(self, '_is_reconnecting', False):
+                return
+            
+            self._is_reconnecting = True
+            refreshed = False
+            
+            try:
+                for attempt in range(3):
+                    try:
+                        new_listen_key = await asyncio.wait_for(self.rest.get_listen_key(), timeout=3.0)
+                        self._listen_key = new_listen_key
+                        
+                        await self.ws.subscribe_user_data(new_listen_key)
+                        self._last_user_data_ts = time.time()
+                        
+                        # 🔥 КРИТИЧЕСКИЙ ФИКС: ЗАНОВО подписываемся на стакан (depth) при реконнекте!
+                        await self.ws.subscribe_depth(self.symbol)
+                        
+                        refreshed = True
+                        logger.info(f"✅ Listen key refreshed on reconnect: {new_listen_key[:10]}...")
+                        logger.info(f"✅ Depth stream (orderbook) resubscribed for {self.symbol}")
+                        break
+                        
+                    except Exception as e:
+                        error_details = repr(e) or str(e) or "Unknown empty error"
+                        logger.error(f"❌ Refresh listen key attempt {attempt + 1}/3 failed: {error_details}")
+                        try:
+                            await self.rest.reset_session()
+                        except Exception:
+                            pass
+                        if attempt < 2:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+
+                if not refreshed:
+                    logger.critical("❌ CRITICAL: listen key not refreshed after 3 attempts")
+            finally:
+                self._is_reconnecting = False
+
+            # 🔥 НОВОЕ: Сразу после реконнекта сверяем состояние с биржей
+            await self._force_sync_with_exchange()
+
+            await self.bus.publish(
+                event_type="SYNC_REQUEST",
+                source="platform",
+                payload={"symbol": self.symbol},
+                symbol=self.symbol
+            )
+```
+
+---
+
+### 💡 Почему это решает проблему?
+
+Теперь, даже если Binance Testnet разорвет соединение именно в момент исполнения ордера:
+1. Сработает реконнект (мы это уже починили).
+2. Сразу после успешного реконнекта запустится `_force_sync_with_exchange()`.
+3. Она увидит через REST, что ордера `4188072396` больше нет в списке `open_orders`, но при этом `position_size > 0`.
+4. Она **принудительно** переведет локальный паспорт из `ORDER_ACK` в `OPEN` и отправит событие `ORDER_FILLED` в шину.
+5. `RiskManager` получит это событие и начнет управлять позицией (ставить TP/SL), как будто ничего не случилось.
+
+Это **архитектурно правильный** способ работы с ненадежными каналами связи: WebSocket для скорости, REST для гарантированной целостности данных.
+
+Попробуй внедрить эти два фрагмента в `main.py` и запусти. Если будут ошибки — скидывай лог, подправим.
