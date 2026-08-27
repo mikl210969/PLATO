@@ -4,15 +4,15 @@
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from trading.passport import TradePassport
 
 
 class PassportRepository:
     """Сохранение и загрузка паспортов."""
 
-    def __init__(self, logs_dir: str = "logs"):
-        self.logs_dir = Path(logs_dir)
+    def __init__(self, logs_dir: str = "passports"):
+        self.logs_dir = Path(logs_dir)  # 🔥 ШАГ 10.4: Инициализация Path
         self.logs_dir.mkdir(exist_ok=True)
 
     def save(self, passport: TradePassport):
@@ -29,6 +29,23 @@ class PassportRepository:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         return TradePassport(**data)
+
+    def load_all(self) -> List[TradePassport]:
+        """
+        🔥 ШАГ 10.4: Загрузить все паспорта из директории.
+        Используется при старте для восстановления состояния.
+        """
+        passports = []
+        for file_path in self.logs_dir.glob("passport_*.json"):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                passport = TradePassport(**data)
+                passports.append(passport)
+            except Exception as e:
+                # Логируем ошибку, но не прерываем загрузку
+                print(f"⚠️ [REPOSITORY] Failed to load {file_path.name}: {e}")
+        return passports
 
     def delete(self, passport_id: str):
         """Удалить файл паспорта."""
