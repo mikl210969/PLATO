@@ -81,7 +81,7 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
     async def start(self):
         self._running = True
         self._log("orchestrator_starting")
-        await self.perform_startup_recovery()
+        #await self.perform_startup_recovery()
         await self.start_stuck_orders_monitor()
         # 🔥 ОТКЛЮЧЕНО: PositionMonitor дублирует RiskManager
         # await self.start_position_monitor()
