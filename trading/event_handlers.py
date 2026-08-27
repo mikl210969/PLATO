@@ -193,7 +193,33 @@ class EventHandlersMixin(BaseMixin):
         if not client_order_id:
             return
 
-        # 5. Находим паспорт по client_order_id
+        # 🔥 ШАГ 10.1: Парсинг коротких ID закрытий (C1_, C2_, CS_, CE_)
+        import re
+        close_match = re.match(r'^(C1|C2|CS|CE)_(PASS_.+)$', client_order_id)
+        if close_match:
+            close_level = close_match.group(1)  # C1/C2/CS/CE
+            passport_id = close_match.group(2)    # PASS_YYYYMMDD_HHMMSS_XXXXXX
+            
+            passport = self.passport_manager.get(passport_id)
+            if passport and order_status in ('PARTIALLY_FILLED', 'FILLED'):
+                # Публикуем ORDER_FILLED для закрытия — _on_order_filled обработает
+                executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
+                avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
+                
+                await self.bus.publish(
+                    event_type="ORDER_FILLED",
+                    source="ws_adapter",
+                    payload={
+                        "client_order_id": client_order_id,
+                        "executed_qty": executed_qty,
+                        "avg_price": avg_price,
+                        "close_level": close_level,  # C1/C2/CS/CE
+                    },
+                    symbol=symbol
+                )
+                return
+
+        # 5. Находим паспорт по client_order_id (для входных ордеров)
         passport = None
         for p in self.passport_manager.get_active():
             orders = getattr(p, 'orders', [])
@@ -213,13 +239,12 @@ class EventHandlersMixin(BaseMixin):
             "new_status": order_status
         })
 
-        # 6. Логика перехода статусов
+        # 6. Логика перехода статусов (для входных ордеров)
         if order_status == 'NEW':
             self.state_manager.handle_event(passport, "ORDER_ACK", {"details": "Order ACK received"})
             self.repository.save(passport)
             
         elif order_status in ('PARTIALLY_FILLED', 'FILLED'):
-            # Используем ключи из твоего лога: 'executed_qty' и 'price'
             executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
             avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
             
@@ -228,7 +253,6 @@ class EventHandlersMixin(BaseMixin):
                 'quantity': executed_qty
             })
             
-            # 🔥 КРИТИЧЕСКИ ВАЖНО: Обновляем размеры позиции в паспорте
             if executed_qty > 0:
                 passport.position_size = executed_qty
                 passport.position_entry_price = avg_price if avg_price > 0.0 else passport.entry_price
@@ -245,6 +269,10 @@ class EventHandlersMixin(BaseMixin):
                     },
                     symbol=passport.symbol
                 )
+            self.repository.save(passport)
+                
+        elif order_status in ('CANCELED', 'EXPIRED', 'REJECTED'):
+            self.state_manager.handle_event(passport, "ORDER_CANCELED", {"details": f"Order {order_status}"})
             self.repository.save(passport)
                 
         elif order_status in ('CANCELED', 'EXPIRED', 'REJECTED'):
@@ -566,27 +594,45 @@ class EventHandlersMixin(BaseMixin):
             self._log("filled_missing_client_order_id", {"payload": payload})
             return
 
-        # 🔥 ШАГ 9: Парсинг passport_id из client_order_id закрытия
-        # Формат: CLOSE_TP1_HIT_PASS_20260826_115647_ или CLOSE_SL_PASS_XXX
+        # 🔥 ШАГ 10.1: Парсинг коротких ID закрытий (C1_, C2_, CS_, CE_)
         passport = None
         close_order_detected = False
+        close_level = payload.get('close_level')  # C1/C2/CS/CE (если есть)
         
-        if 'PASS_' in client_order_id:
-            # Извлекаем passport_id (формат: PASS_YYYYMMDD_HHMMSS_XXXXXX)
-            import re
+        import re
+        
+        # Приоритет 1: короткий формат C1_PASS_...
+        if close_level or re.match(r'^(C1|C2|CS|CE)_(PASS_.+)$', client_order_id):
+            match = re.match(r'^(C1|C2|CS|CE)_(PASS_.+)$', client_order_id)
+            if match:
+                if not close_level:
+                    close_level = match.group(1)
+                passport_id = match.group(2)
+                passport = self.passport_manager.get(passport_id)
+                if passport:
+                    close_order_detected = True
+                    self._log("close_order_detected_short", {
+                        "passport_id": passport_id,
+                        "close_level": close_level,
+                        "client_order_id": client_order_id,
+                        "executed_qty": executed_qty,
+                    })
+        
+        # Приоритет 2: legacy формат PASS_... (для обратной совместимости)
+        if not passport and 'PASS_' in client_order_id:
             match = re.search(r'(PASS_\d{8}_\d{6}_[a-f0-9]+)', client_order_id)
             if match:
                 extracted_passport_id = match.group(1)
                 passport = self.passport_manager.get(extracted_passport_id)
                 if passport:
                     close_order_detected = True
-                    self._log("close_order_detected", {
+                    self._log("close_order_detected_legacy", {
                         "passport_id": extracted_passport_id,
                         "client_order_id": client_order_id,
                         "executed_qty": executed_qty,
                     })
 
-        # Если это не ордер закрытия, ищем по client_order_id среди активных
+        # Приоритет 3: ищем по client_order_id среди активных (для входных ордеров)
         if not passport:
             for p in self.passport_manager.get_all():
                 if p.status in ("CLOSED", "CANCELED", "FAILED"):
@@ -610,27 +656,58 @@ class EventHandlersMixin(BaseMixin):
             # Обновляем размер позиции
             passport.position_size -= executed_qty
             
+            # Определяем exit_reason из close_level
+            exit_reason_map = {
+                'C1': 'TP1_HIT',
+                'C2': 'TP2_HIT',
+                'CS': 'SL_HIT',
+                'CE': 'EXTERNAL_CLOSE',
+            }
+            exit_reason = exit_reason_map.get(close_level, 'MANUAL_CLOSE')
+            
             # Если позиция полностью закрыта
             if passport.position_size < 0.01:
-                self.state_manager.handle_event(passport, "POSITION_CLOSED", {
-                    'exit_reason': 'TP_HIT',
-                    'exit_price': avg_price,
-                    'gross_pnl': 0.0,  # TODO: рассчитать PnL
-                    'commission': 0.0,
+                passport.close(
+                    exit_reason=exit_reason,
+                    exit_price=avg_price,
+                    gross_pnl=self._calculate_pnl(passport, avg_price, executed_qty),
+                    commission=0.0
+                )
+                self.repository.save(passport)
+                
+                await self.bus.publish(
+                    event_type="POSITION_CLOSED",
+                    source="order_filled",
+                    payload={
+                        "passport_id": passport.passport_id,
+                        "symbol": passport.symbol,
+                        "exit_reason": exit_reason,
+                        "gross_pnl": passport.gross_pnl,
+                    },
+                    symbol=passport.symbol
+                )
+                
+                self._log("position_fully_closed", {
+                    "passport_id": passport.passport_id,
+                    "exit_reason": exit_reason,
+                    "closed_qty": executed_qty,
+                    "gross_pnl": passport.gross_pnl,
                 })
             else:
                 # Частичное закрытие
                 self.state_manager.handle_event(passport, "PARTIAL_CLOSE", {
                     'closed_qty': executed_qty,
                     'exit_price': avg_price,
+                    'exit_reason': exit_reason,
                 })
-            
-            self.repository.save(passport)
-            self._log("position_partially_closed", {
-                "passport_id": passport.passport_id,
-                "closed_qty": executed_qty,
-                "remaining_size": passport.position_size,
-            })
+                self.repository.save(passport)
+                
+                self._log("position_partially_closed", {
+                    "passport_id": passport.passport_id,
+                    "exit_reason": exit_reason,
+                    "closed_qty": executed_qty,
+                    "remaining_size": passport.position_size,
+                })
             return
 
         # Обычный ордер открытия — применяем переход
@@ -712,3 +789,13 @@ class EventHandlersMixin(BaseMixin):
             "client_order_id": client_order_id,
             "executed_qty": executed_qty,
         })
+
+    def _calculate_pnl(self, passport, exit_price: float, quantity: float) -> float:
+        """Рассчитать PnL для закрытия."""
+        if not passport.position_entry_price or passport.position_entry_price == 0:
+            return 0.0
+        
+        if passport.side == 'short':
+            return (passport.position_entry_price - exit_price) * quantity
+        else:
+            return (exit_price - passport.position_entry_price) * quantity

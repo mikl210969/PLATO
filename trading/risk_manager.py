@@ -315,12 +315,22 @@ class RiskManager:
         is_short = guard['side'] == 'short'
         close_side = 'long' if is_short else 'short'  # execute_order: 'long' -> BUY
 
+        # 🔥 ШАГ 10.1: Короткий формат client_order_id (≤35 символов)
+        # Формат: C1_PASS_YYYYMMDD_HHMMSS_XXXXXX (3+27 = 30 символов, влезает в лимит Binance)
+        prefix_map = {
+            'TP1_HIT': 'C1',
+            'TP2_HIT': 'C2',
+            'SL_HIT': 'CS',
+        }
+        prefix = prefix_map.get(reason, 'CE')
+        short_client_order_id = f"{prefix}_{passport.passport_id}"  # ~30 символов
+
         result = await self.trader.execute_order(
             symbol=passport.symbol,
             side=close_side,
             quantity=quantity,
             order_type='market',
-            client_order_id=f"CLOSE_{reason}_{passport.passport_id}",
+            client_order_id=short_client_order_id,
             passport_id=passport.passport_id,
             position_side='SHORT' if is_short else 'LONG'
         )
@@ -331,42 +341,15 @@ class RiskManager:
             "side": close_side,
             "position_side": 'SHORT' if is_short else 'LONG',
             "quantity": quantity,
+            "client_order_id": short_client_order_id,
             "success": result.get('success'),
             "error": result.get('error')
         })
-        
-        # 🔥 НОВОЕ: Обновляем паспорт после успешного закрытия
-        if result.get('success'):
-            # Если закрыли весь остаток → паспорт CLOSED
-            if guard['remaining'] <= quantity:
-                passport.status = PassportStatus.CLOSED.value
-                passport.exit_reason = reason
-                passport.position_size = 0.0
-                passport.closed_at = datetime.now(timezone.utc).isoformat()
-                
-                # Рассчитываем PnL
-                if is_short:
-                    gross_pnl = (passport.position_entry_price - 0) * quantity  # цена выхода = 0 (не знаем)
-                else:
-                    gross_pnl = (0 - passport.position_entry_price) * quantity
-                passport.gross_pnl = gross_pnl
-                
-                self.passport_manager.update(passport)
-                
-                self._log("passport_closed_after_full_close", {
-                    "passport_id": passport.passport_id,
-                    "reason": reason
-                })
-            else:
-                # Частичное закрытие → уменьшаем размер
-                passport.position_size -= quantity
-                self.passport_manager.update(passport)
-                
-                self._log("passport_partial_close", {
-                    "passport_id": passport.passport_id,
-                    "closed_qty": quantity,
-                    "remaining": passport.position_size
-                })
+
+        # 🔥 ШАГ 10.1: НЕ обновляем паспорт здесь — это делает _on_order_filled
+        # при получении события FILLED/PARTIALLY_FILLED от WS или REST.
+        # Это устраняет двойной авторитет и гарантирует, что паспорт обновится
+        # только после реального исполнения на бирже.
         
         return bool(result.get('success'))
 
