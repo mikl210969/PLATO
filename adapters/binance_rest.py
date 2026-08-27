@@ -399,6 +399,56 @@ class BinanceRestClient:
             'raw_response': data
         } 
 
+    async def get_user_trades(
+        self,
+        symbol: str,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 500
+    ) -> List[Dict]:
+        """
+        Получить историю трейдов пользователя.
+        
+        🔥 ШАГ 10.4.2: Используется для replay трейдов при стартовой реконсиляции.
+        
+        Args:
+            symbol: Торговая пара (например, 'SOLUSDT')
+            start_time: Начало периода в мс (Unix timestamp * 1000)
+            end_time: Конец периода в мс
+            limit: Максимальное количество записей (до 1000)
+        
+        Returns:
+            Список трейдов с полями:
+            - symbol, id, orderId
+            - side, positionSide
+            - price, qty, quoteQty
+            - commission, commissionAsset
+            - time, isBuyer, isMaker
+            - isClosePosition, realizedPnl
+        """
+        params = {
+            'symbol': symbol,
+            'limit': min(limit, 1000)  # Binance лимит = 1000
+        }
+        
+        if start_time:
+            params['startTime'] = start_time
+        if end_time:
+            params['endTime'] = end_time
+        
+        try:
+            result = await self._request('GET', '/fapi/v1/userTrades', params, signed=True)
+            
+            if not isinstance(result, list):
+                self.logger.error(f"Binance returned non-list for userTrades: {type(result)}")
+                return []
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"⚠️ [REST] Failed to get user trades: {e}")
+            return []
+
     async def cancel_order(self, symbol: str, order_id: str) -> Dict:
         params = {
             'symbol': symbol,
