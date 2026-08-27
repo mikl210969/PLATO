@@ -56,6 +56,20 @@ class PassportManager:
                 return p
         return None
 
+    def get_all_active_by_symbol(self, symbol: str) -> List[TradePassport]:
+        """
+        🔥 ШАГ 10.4.3: Получить ВСЕ активные паспорта по символу.
+        Используется при реконсиляции для подсчёта суммы локальных позиций.
+        """
+        return [
+            p for p in self._passports.values()
+            if p.symbol == symbol and p.status not in (
+                PassportStatus.CLOSED.value,
+                PassportStatus.CANCELED.value,
+                PassportStatus.FAILED.value
+            )
+        ]
+
     def is_symbol_busy(self, symbol: str) -> bool:
         """Проверить, занят ли символ."""
         return self.get_active_by_symbol(symbol) is not None
