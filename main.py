@@ -148,9 +148,16 @@ class Platform:
         self.orchestrator.set_verifier(self.verifier)
         logger.info("✅ DriftMonitor and OrderVerifier set in Orchestrator")
 
-        # 12. Стратегии
+        # 12. Стратегии (Обогащенная версия v3)
         strategies_config = self.config.get('strategies', {})
-        self.wall_fade = WallFadeStrategy(strategies_config.get('wall_fade', {}))
+        from strategies.wall_fade_v3 import WallFadeStrategyV3
+        
+        # Берем ATR из конфига, чтобы Shadow Risk мог оценить сигнал
+        default_atr = self.config.get('trading', {}).get('atr_value', 0.5)
+        self.wall_fade = WallFadeStrategyV3(
+            strategies_config.get('wall_fade', {}), 
+            atr_value=default_atr
+        )
         self.absorption = AbsorptionStrategy(strategies_config.get('absorption', {}))
         self.breakout = BreakoutStrategy(strategies_config.get('breakout', {}))
 
@@ -162,13 +169,18 @@ class Platform:
         else:
             logger.warning("⚠️ Extensions failed to initialize, running in Core-only mode")
 
-        logger.info(f"✅ Platform initialized | symbol={self.symbol} | profile={profile}")
+        # 14. Shadow Advanced Risk Evaluator
+        from extensions.risk.advanced_risk_service import AdvancedRiskService
+        self.shadow_risk = AdvancedRiskService()
+        
+        async def evaluate_shadow_signal(event):
+            logger.info("[SHADOW DEBUG] Событие SIGNAL_GENERATED перехвачено!")
+            await self.shadow_risk.on_signal(event)
+            
+        self.bus.subscribe("SIGNAL_GENERATED", evaluate_shadow_signal)
+        logger.info("✅ Shadow Advanced Risk Service wired to SIGNAL_GENERATED")
 
-        self.json_logger.log(
-            module="platform",
-            event="test_log",
-            data={"message": "JSON Logger is working"}
-        )
+        logger.info(f"✅ Platform initialized | symbol={self.symbol} | profile={self.profile}")
 
     async def _generate_signals(self, context: dict):
         signals = []
