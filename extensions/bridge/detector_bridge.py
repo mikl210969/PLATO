@@ -127,9 +127,17 @@ class DetectorBridge:
         if not self._publish:
             self._outbox.clear()
             return
+        
         while self._outbox:
             e = self._outbox.pop(0)
             try:
+                # 🔥 ЯРКИЙ ЛОГ ДЛЯ КЛЮЧЕВЫХ СОБЫТИЙ
+                if e.event_type in ("WHALE_BUY", "WHALE_SELL", "WHALE_CLUSTER"):
+                    print(f"🐋 [DETECTOR] {e.event_type} | Цена: {e.price} | Объём: {e.value_usdt:.0f} USDT | Cluster: {e.cluster_size}")
+                elif e.event_type in ("WALL_DETECTED", "WALL_CONFIRMED", "SPOOFING_CONFIRMED", "REPOSITIONING"):
+                    print(f"🧱 [DETECTOR] {e.event_type} | {e.side} @ {e.price} | Vol: {e.volume:.0f} | {e.detail}")
+                
+                # Публикуем в шину для стратегий
                 await self._publish(e.event_type, e.to_dict())
             except Exception as ex:
                 logger.error(f"publish failed: {ex}")

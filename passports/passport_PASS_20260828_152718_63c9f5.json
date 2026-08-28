@@ -1,0 +1,64 @@
+{
+  "passport_id": "PASS_20260828_152718_63c9f5",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "WallFadeV3_SOLUSDT_1787930838",
+  "strategy": "WallFadeV3",
+  "side": "short",
+  "entry_price": 107.53,
+  "confidence": 0.85,
+  "sl_price": 107.53,
+  "tp1_price": 107.28,
+  "tp2_price": 107.03,
+  "position_size": 0.0,
+  "position_entry_price": 0.0,
+  "orders": [
+    {
+      "order_id": 4189678193,
+      "client_order_id": "WallFadeV3_SOLUSDT_1787930838",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 107.53,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-08-28T15:27:18.631294+00:00",
+  "updated_at": "2026-08-28T15:28:57.638897+00:00",
+  "closed_at": "2026-08-28T15:28:57.638897+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-08-28T15:27:18.909262+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-08-28T15:28:02.323092+00:00",
+      "event": "STATUS: OPEN",
+      "details": "Order filled"
+    },
+    {
+      "timestamp": "2026-08-28T15:28:57.306906+00:00",
+      "event": "SL_MOVED_TO_BREAKEVEN",
+      "details": {
+        "price": 107.53,
+        "reason": "TP1_HIT"
+      }
+    },
+    {
+      "timestamp": "2026-08-28T15:28:57.614916+00:00",
+      "event": "STATUS: PARTIAL_CLOSE",
+      "details": "Partial close: 3.5"
+    },
+    {
+      "timestamp": "2026-08-28T15:28:57.638897+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "TP2_HIT"
+    }
+  ],
+  "exit_reason": "TP2_HIT",
+  "exit_price": 0.0,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "net_pnl": 0.0
+}

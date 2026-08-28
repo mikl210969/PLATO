@@ -49,8 +49,11 @@ class AdvancedRiskService:
             return None
 
     def evaluate(self, symbol: str, side: str, entry_price: float, edge_price: float,
-                 rr_ratio: float, confidence: float, atr: float, volatility_mode: str, 
-                 basis: float) -> dict:
+                    rr_ratio: float, confidence: float, atr: float, volatility_mode: str, 
+                    basis: float) -> dict:
+        print(f"👁️ [SHADOW EVAL] Считаем Grade для {symbol} {side} | atr={atr}, rr={rr_ratio}") # <-- ДОБАВИТЬ ЭТО
+        grade, size_mult = calculate_position_grade(rr_ratio, confidence)
+
         """Оценка сигнала и расчет уровней."""
         grade, size_mult = calculate_position_grade(rr_ratio, confidence)
 

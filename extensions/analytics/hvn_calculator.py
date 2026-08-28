@@ -67,7 +67,9 @@ class HVNCalculator:
 
         # 2. Определяем текущую цену (если не передана)
         if current_price is None:
-            current_price = trades_df['price'].iloc[-1]
+            current_price = float(trades_df['price'].iloc[-1])
+        else:
+            current_price = float(current_price)  # 🔥 Явное приведение для Pylance
 
         # 3. Группируем по ценовым уровням
         volume_profile = self._build_volume_profile(trades_df, current_price)
@@ -139,32 +141,45 @@ class HVNCalculator:
 
     # ------------------------------------------------------------ internal
     def _load_trades(self, symbol: str) -> pd.DataFrame:
-        """Загрузить тиковые данные из Cold Storage (Parquet)."""
+        """Загрузить тиковые данные из Cold Storage (Parquet или JSONL)."""
         import time
+        import json
+        import pandas as pd
 
-        # Ищем файлы за последние lookback_hours часов
         now = time.time()
         cutoff = now - (self.lookback_hours * 3600)
 
-        trades_list = []
+        # 1. Сначала ищем Parquet файлы (для больших исторических данных)
         parquet_files = list(self.cold_storage_path.glob(f"{symbol}_trades_*.parquet"))
+        if parquet_files:
+            trades_list = []
+            for file_path in parquet_files:
+                try:
+                    df = pd.read_parquet(file_path)
+                    if 'timestamp' in df.columns:
+                        df = df[df['timestamp'] >= cutoff]
+                    trades_list.append(df)
+                except Exception as e:
+                    logger.warning(f"Не удалось прочитать {file_path}: {e}")
+            if trades_list:
+                return pd.concat(trades_list, ignore_index=True)
 
-        for file_path in parquet_files:
-            # Проверяем timestamp в имени файла (формат: SOLUSDT_trades_20260828_120000.parquet)
-            # Если файл новее cutoff — читаем
+        # 2. Если Parquet нет, читаем живой JSONL файл (fallback для текущей сессии)
+        jsonl_file = self.cold_storage_path / f"{symbol}_trades.jsonl"
+        if jsonl_file.exists():
+            trades_list = []
             try:
-                df = pd.read_parquet(file_path)
-                # Фильтруем по timestamp (предполагаем, что есть колонка 'timestamp')
-                if 'timestamp' in df.columns:
-                    df = df[df['timestamp'] >= cutoff]
-                trades_list.append(df)
+                with open(jsonl_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        record = json.loads(line)
+                        if record.get("timestamp", 0) >= cutoff:
+                            trades_list.append(record)
+                if trades_list:
+                    return pd.DataFrame(trades_list)
             except Exception as e:
-                logger.warning(f"Не удалось прочитать {file_path}: {e}")
+                logger.warning(f"Ошибка чтения JSONL {jsonl_file}: {e}")
 
-        if not trades_list:
-            return pd.DataFrame()
-
-        return pd.concat(trades_list, ignore_index=True)
+        return pd.DataFrame()
 
     def _build_volume_profile(
         self,

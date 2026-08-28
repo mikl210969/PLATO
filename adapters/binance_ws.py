@@ -232,6 +232,51 @@ class BinanceWsAdapter:
         """Вернуть статус здоровья WS."""
         return self._healthy and self._connected
 
+    # ========================================================================
+    # НОВЫЙ МЕТОД: Подписка на спотовые сделки (Spot AggTrades)
+    # ========================================================================
+    async def subscribe_spot_agg_trade(self, symbol: str, callback):
+        """
+        Подписка на поток спотовых сделок (aggTrade) для Whale/Spoofing детекторов.
+        Использует отдельное публичное WS-подключение к спотовому рынку Binance.
+        """
+        import logging
+        import json
+        import asyncio
+        import websockets
+        
+        # Локальный логгер, чтобы не зависеть от импортов в начале файла
+        logger = logging.getLogger(__name__)
+        spot_url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@aggTrade"
+        
+        logger.info(f"🔄 Connecting to SPOT aggTrade stream: {spot_url}")
+        
+        # Цикл с автоматическим переподключением
+        while getattr(self, '_running', True):
+            try:
+                async with websockets.connect(spot_url, ping_interval=20, ping_timeout=20) as ws:
+                    logger.info(f"✅ Spot WS connected for {symbol}")
+                    async for message in ws:
+                        try:
+                            data = json.loads(message)
+                            # Нормализуем формат под наш DetectorBridge
+                            normalized_data = {
+                                "e": "aggTrade",
+                                "s": data.get("s"),
+                                "p": data.get("p"),
+                                "q": data.get("q"),
+                                "m": data.get("m"),  # m=True значит продавец был мейкером (агрессор - BUY)
+                                "T": data.get("T")
+                            }
+                            # Вызываем переданный callback (аналогично тому, как работает self.on в main.py)
+                            if callback:
+                                await callback("MARKET_TRADE", normalized_data)
+                        except Exception as e:
+                            logger.error(f"Error processing spot trade: {e}")
+            except Exception as e:
+                logger.warning(f"⚠️ Spot WS connection lost or failed: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
+
     async def close(self):
         """Корректное закрытие соединения."""
         self._running = False

@@ -152,12 +152,15 @@ class Platform:
         strategies_config = self.config.get('strategies', {})
         from strategies.wall_fade_v3 import WallFadeStrategyV3
         
-        # Берем ATR из конфига, чтобы Shadow Risk мог оценить сигнал
         default_atr = self.config.get('trading', {}).get('atr_value', 0.5)
         self.wall_fade = WallFadeStrategyV3(
             strategies_config.get('wall_fade', {}), 
             atr_value=default_atr
         )
+        
+        #  НОВОЕ: Подключаем стратегию к EventBus для получения событий детекторов
+        self.wall_fade.subscribe_to_events(self.bus)
+        
         self.absorption = AbsorptionStrategy(strategies_config.get('absorption', {}))
         self.breakout = BreakoutStrategy(strategies_config.get('breakout', {}))
 
@@ -370,6 +373,52 @@ class Platform:
 
         # 🔥 ШАГ 9.5: Сохраняем ссылки на фоновые задачи
         self._ws_task = asyncio.create_task(self.ws.run())
+        
+        # 🔥 НОВОЕ: Определяем callback для спотовых сделок и запускаем задачу
+        import json
+        from pathlib import Path
+        
+        # Готовим директорию для Cold Storage
+        self._cold_storage_dir = Path("data/cold_storage")
+        self._cold_storage_dir.mkdir(parents=True, exist_ok=True)
+        self._tick_file = self._cold_storage_dir / f"{self.symbol}_trades.jsonl"
+
+        async def on_spot_trade(event_type: str, data: dict):
+            # 1. Отправляем в EventBus для детекторов (Whale/Spoofing)
+            await self.bus.publish(
+                event_type=event_type,
+                source="spot_ws_adapter",
+                payload=data,
+                symbol=self.symbol
+            )
+            
+            # 2. Сохраняем тик в Cold Storage (JSONL) для HVN Calculator
+            try:
+                # В Binance: m=True → покупатель был мейкером → агрессор SELL
+                #             m=False → покупатель был тейкером → агрессор BUY
+                side = "BUY" if not data.get("m") else "SELL"
+                price = float(data.get("p", 0))
+                qty = float(data.get("q", 0))
+                ts_ms = data.get("T", 0)
+                
+                tick_record = {
+                    "timestamp": float(ts_ms) / 1000.0,  # мс → секунды
+                    "price": price,
+                    "quantity": qty,
+                    "value_usdt": price * qty,
+                    "side": side
+                }
+                
+                # Дописываем одну строку в конец файла (быстрая операция append)
+                with open(self._tick_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(tick_record) + "\n")
+            except Exception as e:
+                logger.warning(f"Не удалось сохранить тик в Cold Storage: {e}")
+            
+        self._spot_trades_task = asyncio.create_task(
+            self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade)
+        )
+        
         self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
         self._health_check_task = asyncio.create_task(user_data_health_check())
         
@@ -469,16 +518,25 @@ class Platform:
         
         # 🔥 ШАГ 9.5: Корректная отмена фоновых задач
         tasks_to_cancel = []
+        
         if hasattr(self, '_ws_task') and not self._ws_task.done():
             self._ws_task.cancel()
             tasks_to_cancel.append(self._ws_task)
+            
         if hasattr(self, '_keep_alive_task') and not self._keep_alive_task.done():
             self._keep_alive_task.cancel()
             tasks_to_cancel.append(self._keep_alive_task)
+            
         if hasattr(self, '_health_check_task') and not self._health_check_task.done():
             self._health_check_task.cancel()
             tasks_to_cancel.append(self._health_check_task)
+            
+        # 🔥 НОВОЕ: Отмена спотового потока (ДО вызова gather!)
+        if hasattr(self, '_spot_trades_task') and not self._spot_trades_task.done():
+            self._spot_trades_task.cancel()
+            tasks_to_cancel.append(self._spot_trades_task)
         
+        # Теперь собираем все задачи, включая спотовую
         if tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         
