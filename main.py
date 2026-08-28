@@ -154,6 +154,14 @@ class Platform:
         self.absorption = AbsorptionStrategy(strategies_config.get('absorption', {}))
         self.breakout = BreakoutStrategy(strategies_config.get('breakout', {}))
 
+        # 🔥 13. Extensions (Safe Bootstrap)
+        from extensions.bootstrap import init_extensions_safe
+        self.extensions = init_extensions_safe(self.bus, self.symbol)
+        if self.extensions:
+            logger.info("✅ Extensions (Whale, Spoofing, HVN, Basis) initialized and wired to EventBus")
+        else:
+            logger.warning("⚠️ Extensions failed to initialize, running in Core-only mode")
+
         logger.info(f"✅ Platform initialized | symbol={self.symbol} | profile={profile}")
 
         self.json_logger.log(
@@ -310,6 +318,18 @@ class Platform:
                         },
                         symbol=self.symbol
                     )
+                    
+                    # 🔥 ДОБАВЛЕНО: Публикация сырого стакана для Spoofing Detector (Extensions)
+                    await self.bus.publish(
+                        event_type="MARKET_ORDERBOOK",
+                        source="ws_adapter",
+                        payload={
+                            "bids": bids,
+                            "asks": asks,
+                            "E": data.get('E', int(time.time() * 1000))
+                        },
+                        symbol=self.symbol
+                    )
             except Exception as e:
                 logger.error(f"Error processing depth update: {e}")
         self.ws.on("depthUpdate", on_depth_update)
@@ -373,6 +393,12 @@ class Platform:
 
                 if current_time - last_log_time >= 30:
                     logger.info(f"🔄 Price: {current_price} (from {'WS' if self.ws_price > 0 else 'REST'})")
+                    
+                    # 🔥 ДОБАВЛЕНО: Статистика работы Extensions
+                    if hasattr(self, 'extensions') and self.extensions and self.extensions.bridge:
+                        stats = self.extensions.bridge.get_stats()
+                        logger.info(f"📊 Extensions Stats: Trades={stats['trades']}, Books={stats['books']}, Unrecognized={stats['unrecognized']}")
+                        
                     last_log_time = current_time
 
                 if self.passport_manager.is_symbol_busy(self.symbol):
