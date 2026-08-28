@@ -116,10 +116,7 @@ async def test_ttl_expired_cancels_order(mock_components, mock_passport):
     await mixin._on_ttl_expired(event)
 
     # Проверяем, что ордер был отправлен на отмену
-    mock_trader.cancel_order.assert_called_once_with(
-        symbol="SOLUSDT",
-        order_id="12345"
-    )
+    mock_trader.cancel_order.assert_called_once_with("SOLUSDT", "12345")
 
     # 🔥 ИСПРАВЛЕНО: Статус должен быть CLOSED, а причина отмены — TTL_EXPIRED
     assert mock_passport.status == "CLOSED"
@@ -178,6 +175,7 @@ async def test_ttl_expired_partial_fill(mock_components, mock_passport):
     mock_passport.position_size = 2.1  # Исполнено 30% из 7.0
     mock_passport.position_entry_price = 90.0
     mock_passport.side = "short"
+    mock_passport.exit_reason = ""    
     passport_manager.get.return_value = mock_passport
     
     # Мок трейдера
@@ -204,13 +202,16 @@ async def test_ttl_expired_partial_fill(mock_components, mock_passport):
     await mixin._on_ttl_expired(event)
     
     # Проверяем, что ордер был отменен (остаток)
-    mock_trader.cancel_order.assert_called_once_with(
-        symbol="SOLUSDT",
-        order_id="12345"
-    )
+    mock_trader.cancel_order.assert_called_once_with("SOLUSDT", "12345")
     
-    # Проверяем, что статус стал OPEN (позиция остается)
-    assert mock_passport.status == "OPEN"
+    # Ядро осознанно оставляет статус PARTIALLY_FILLED: остаток позиции
+    # передаётся под управление RiskManager через событие POSITION_OPENED
+    # (см. ветку PARTIALLY_FILLED в _on_ttl_expired).
+    assert mock_passport.status == "PARTIALLY_FILLED"
+    # Факт отмены остатка зафиксирован в timeline
+    # Факт отмены остатка зафиксирован в timeline (timeline — реальный список)
+    events = [e['event'] for e in mock_passport.timeline]
+    assert "TTL_EXPIRED_PARTIAL_FILL" in events
     assert mock_passport.position_size == 2.1  # Размер сохранился
     assert mock_passport.exit_reason == ""  # Позиция открыта
     

@@ -9,7 +9,7 @@ from trading.event_handlers import EventHandlersMixin
 from trading.passport import TradePassport
 from trading.passport_manager import PassportManager
 from trading.drift_monitor import DriftMonitor
-
+from unittest.mock import AsyncMock  # в шапку файла
 
 @pytest.fixture
 def setup():
@@ -106,6 +106,9 @@ async def test_t5_signal_accepted_when_no_drift(setup):
     pm = setup['passport_manager']
 
     drift_monitor.is_drift_active = MagicMock(return_value=False)
+
+    # Ядро await'ит verifier.start_verification — обычный MagicMock это не умеет
+    handlers.verifier.start_verification = AsyncMock()
 
     signal = MagicMock()
     signal.symbol = "SOLUSDT"

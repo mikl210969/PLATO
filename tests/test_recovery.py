@@ -217,8 +217,16 @@ async def test_recovery_skips_when_passport_already_exists(mock_components, mock
     mixin = mock_components['mixin']
     passport_manager = mock_components['passport_manager']
     
-    # Настраиваем моки: паспорт уже есть
-    passport_manager.get_active_by_symbol.return_value = mock_passport
+    # Настраиваем моки: паспорт уже есть.
+    # Ядро ищет локальные позиции через get_all_active_by_symbol (список) —
+    # страхуем оба метода поиска:
+    passport_manager.get_active_by_symbol.return_value = mock_passport        # одиночный
+    passport_manager.get_all_active_by_symbol.return_value = [mock_passport]  # список для суммы
+    mock_passport.position_size = 7.0
+    mock_passport.position_entry_price = 91.3
+    mock_passport.side = "short"
+    mock_passport.symbol = "SOLUSDT"
+    mock_passport.status = "OPEN"
     
     mixin.get_trader = MagicMock(return_value=mock_trader)  # type: ignore
     

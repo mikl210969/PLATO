@@ -215,7 +215,7 @@ async def test_order_placement_exchange_error(mock_components, mock_trader, mock
     
     # Но статус должен быть FAILED
     state_manager.handle_event.assert_called_with(
-        mock_passport, "ORDER_FAILED", "Insufficient balance"
+        mock_passport, "ORDER_FAILED", {"error": "Insufficient balance"}
     )
     
     # Ордер НЕ должен был быть добавлен в паспорт
