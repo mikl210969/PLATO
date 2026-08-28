@@ -28,7 +28,7 @@ class DatabaseManager:
     def _init_db(self):
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         # 1. Таблица версионирования схемы
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS schema_version (
@@ -36,8 +36,8 @@ class DatabaseManager:
                 applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # 2. Таблица горячих метрик
+
+        # 2. Таблица горячих метрик (schema v1)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS market_metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,23 +46,40 @@ class DatabaseManager:
                 value REAL NOT NULL,
                 timestamp INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
-                metadata TEXT -- JSON-строка для доп. данных (например, режим волатильности)
+                metadata TEXT
             )
         """)
-        
-        # 3. КРИТИЧЕСКИ ВАЖНО: Составной индекс для мгновенного поиска последних метрик по символу
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_symbol_metric_time 
+            CREATE INDEX IF NOT EXISTS idx_symbol_metric_time
             ON market_metrics(symbol, metric_type, timestamp DESC)
         """)
-        
-        # Проверка версии схемы
+
+        # 3. Таблица HVN уровней (schema v2)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS hvn_levels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                volume REAL NOT NULL,
+                rank INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                metadata TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_hvn_symbol_time
+            ON hvn_levels(symbol, timestamp DESC)
+        """)
+
+        # Миграция версии (идемпотентно для старых БД v1)
         cursor.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
         row = cursor.fetchone()
-        if not row or row['version'] < 1:
-            cursor.execute("INSERT INTO schema_version (version) VALUES (1)")
+        current_version = row['version'] if row else 0
+        if current_version < 2:
+            cursor.execute("INSERT INTO schema_version (version) VALUES (2)")
             conn.commit()
-            logger.info("Схема БД инициализирована (v1)")
+            logger.info(f"Схема БД обновлена до v2 (была v{current_version})")
 
     def execute_query(self, query: str, params: tuple = ()) -> list:
         conn = self._get_connection()
