@@ -11,7 +11,7 @@
         "min_confidence": 0.3
     },
     "breakout": {
-        "enabled": true,
+        "enabled": false,
         "min_volume": 10.0,
         "min_confidence": 0.3,
         "lookback_bars": 20,

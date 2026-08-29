@@ -1,0 +1,350 @@
+# PLATO v3.0 — План реализации Order Flow Architecture
+
+**Дата создания:** 2026-08-29  
+**Текущий спринт:** Спринт 5 (Фундамент Order Flow)  
+**Цель:** Реализовать 3 стратегии (WallFade, Absorption, Breakout) на основе Spot Analysis → Futures Execution  
+
+**Архитектурный принцип:**
+- Спот = источник истины (анализ)
+- Фьючерс = инструмент исполнения
+- HVN двухуровневый: Micro (60 мин) для входа, Macro (24 ч) как фильтр
+- Типы сделок: Continuation (по тренду) и Reversal (разворот)
+
+---
+
+## 🏁 ФАЗА 1: Фундамент данных (Market Data Layer)
+
+Без этого слоя стратегии не работают вообще. Приоритет: 🔴 КРИТИЧНО.
+
+### 1.1 Спотовые данные
+- [ ] **1.1.1** Подключить спотовый стакан (`solusdt@depth@100ms`) в `adapters/binance_ws.py`
+  - Файл: `adapters/binance_ws.py` → метод `subscribe_spot_depth()`
+  - Зависимости: нет
+  - Статус: ❌ Не начато
+  
+- [ ] **1.1.2** Создать `SpotPriceProvider` — агрегатор спотовой mid-price
+  - Файл: `extensions/analytics/spot_price_provider.py` (НОВЫЙ)
+  - Зависимости: 1.1.1
+  - Статус: ❌ Не начато
+  
+- [ ] **1.1.3** Публикация `SPOT_PRICE_UPDATE` в EventBus
+  - Файл: `main.py` → обработчик спотового стакана
+  - Зависимости: 1.1.2
+  - Статус: ❌ Не начато
+
+- [ ] **1.1.4** Публикация `SPOT_ORDERBOOK_UPDATE` в EventBus
+  - Файл: `main.py` → обработчик спотового стакана
+  - Зависимости: 1.1.1
+  - Статус: ❌ Не начато
+
+### 1.2 Фьючерсные данные (уже есть, но нужно расширить)
+- [ ] **1.2.1** Подключить фьючерсные сделки (`solusdt@aggTrade`) для анализа ликвидаций
+  - Файл: `adapters/binance_ws.py` → метод `subscribe_futures_agg_trade()`
+  - Зависимости: нет
+  - Статус: ❌ Не начато
+  
+- [ ] **1.2.2** Публикация `FUTURES_TRADE` в EventBus
+  - Файл: `main.py`
+  - Зависимости: 1.2.1
+  - Статус: ❌ Не начато
+
+### 1.3 Исторические данные (свечи для ATR)
+- [ ] **1.3.1** REST-клиент для получения свечей (Binance + Bybit)
+  - Файл: `adapters/binance_rest.py` → метод `get_klines()`
+  - Зависимости: нет
+  - Статус: ❌ Не начато
+  
+- [ ] **1.3.2** Кэширование свечей в Hot Storage (SQLite)
+  - Файл: `extensions/data_layer/db_manager.py` → таблица `klines`
+  - Зависимости: 1.3.1
+  - Статус: ❌ Не начато
+
+**✅ Чекпоинт Фазы 1:** В EventBus поступают `SPOT_PRICE_UPDATE`, `SPOT_ORDERBOOK_UPDATE`, `FUTURES_TRADE`, есть доступ к свечам.
+
+---
+
+## 🏁 ФАЗА 2: Базовые аналитические модули
+
+Ядро Order Flow. Приоритет: 🔴 КРИТИЧНО.
+
+### 2.1 Delta Analysis
+- [ ] **2.1.1** Создать `DeltaAnalyzer` (cumulative delta + delta profile)
+  - Файл: `extensions/analytics/delta_analyzer.py` (НОВЫЙ)
+  - Логика: скользящее окно 30-60 минут, определение агрессии по полю `m` в aggTrade
+  - Зависимости: 1.1.1 (спотовые сделки)
+  - Статус: ❌ Не начато
+  
+- [ ] **2.1.2** Подключить `DeltaAnalyzer` к `DetectorBridge`
+  - Файл: `extensions/bridge/detector_bridge.py`
+  - Зависимости: 2.1.1
+  - Статус: ❌ Не начато
+  
+- [ ] **2.1.3** Публикация `DELTA_UPDATED` в EventBus (каждые 5 сек)
+  - Файл: `extensions/analytics/delta_analyzer.py`
+  - Зависимости: 2.1.2
+  - Статус: ❌ Не начато
+
+- [ ] **2.1.4** Delta Velocity (скорость изменения дельты) — для дивергенций
+  - Файл: `extensions/analytics/delta_analyzer.py` → метод `get_velocity()`
+  - Зависимости: 2.1.1
+  - Статус: ❌ Не начато
+
+### 2.2 Volatility (ATR)
+- [ ] **2.2.1** Реальный расчёт ATR из свечей (не заглушка 0.5)
+  - Файл: `extensions/analytics/volatility_filter.py` → метод `calculate_real_atr()`
+  - Зависимости: 1.3.1
+  - Статус: ❌ Не начато
+  
+- [ ] **2.2.2** Интеграция ATR в `MetricCache`
+  - Файл: `extensions/analytics/metric_cache.py`
+  - Зависимости: 2.2.1
+  - Статус: ❌ Не начато
+
+### 2.3 Imbalance
+- [ ] **2.3.1** Вынести `ImbalanceCalculator` из `SpoofingDetector` в отдельный модуль
+  - Файл: `extensions/analytics/imbalance_calculator.py` (НОВЫЙ)
+  - Логика: bid/ask imbalance по топ-10 уровням + эффективная глубина
+  - Зависимости: 1.1.4 (спотовый стакан)
+  - Статус: ❌ Не начато
+  
+- [ ] **2.3.2** Публикация `IMBALANCE_UPDATED` в EventBus
+  - Файл: `extensions/analytics/imbalance_calculator.py`
+  - Зависимости: 2.3.1
+  - Статус: ❌ Не начато
+
+### 2.4 HVN (уже есть, нужно расширить)
+- [ ] **2.4.1** Добавить параметр `lookback_minutes` в `HVNCalculator`
+  - Файл: `extensions/analytics/hvn_calculator.py`
+  - Зависимости: нет
+  - Статус: ❌ Не начато
+  
+- [ ] **2.4.2** Разделить на Micro-HVN (60 мин) и Macro-HVN (24 ч)
+  - Файл: `extensions/analytics/hvn_calculator.py`
+  - Зависимости: 2.4.1
+  - Статус: ❌ Не начато
+  
+- [ ] **2.4.3** Ускорить пересчёт: каждые 60 сек (не 10 мин)
+  - Файл: `extensions/bootstrap.py` → `run_background_job()`
+  - Зависимости: 2.4.2
+  - Статус: ❌ Не начато
+
+### 2.5 Улучшение существующих детекторов
+- [ ] **2.5.1** `WhaleDetector`: добавить анализ агрессии (market vs limit)
+  - Файл: `extensions/analytics/whale_detector.py`
+  - Зависимости: 2.1.1
+  - Статус: ❌ Не начато
+  
+- [ ] **2.5.2** `WhaleDetector`: `whale_aggression_score` (индекс агрессии китов)
+  - Файл: `extensions/analytics/whale_detector.py`
+  - Зависимости: 2.5.1
+  - Статус: ❌ Не начато
+  
+- [ ] **2.5.3** `SpoofingDetector`: добавить "возраст" стены (wall age)
+  - Файл: `extensions/analytics/spoofing_detector.py`
+  - Зависимости: 1.1.4
+  - Статус: ❌ Не начато
+  
+- [ ] **2.5.4** `SpoofingDetector`: явный `spoofing_score` (0-1)
+  - Файл: `extensions/analytics/spoofing_detector.py`
+  - Зависимости: 2.5.3
+  - Статус: ❌ Не начато
+
+**✅ Чекпоинт Фазы 2:** В EventBus поступают `DELTA_UPDATED`, `IMBALANCE_UPDATED`. Есть Micro/Macro HVN. ATR реальный. Детекторы обогащены.
+
+---
+
+## 🏁 ФАЗА 3: Контекст и продвинутые фильтры
+
+Логика Continuation vs Reversal. Приоритет: 🟡 ВАЖНО.
+
+### 3.1 Trend Context
+- [ ] **3.1.1** Создать `TrendContext` (тип рынка: тренд/боковик/хаос)
+  - Файл: `extensions/analytics/trend_context.py` (НОВЫЙ)
+  - Логика: VWAP + направление + волатильность
+  - Зависимости: 1.1.2, 2.2.1
+  - Статус: ❌ Не начато
+  
+- [ ] **3.1.2** Определение направления тренда (UP/DOWN/NEUTRAL)
+  - Файл: `extensions/analytics/trend_context.py`
+  - Зависимости: 3.1.1
+  - Статус: ❌ Не начато
+  
+- [ ] **3.1.3** Определение длительности тренда (через HVN и % движения)
+  - Файл: `extensions/analytics/trend_context.py`
+  - Зависимости: 3.1.1, 2.4.2
+  - Статус: ❌ Не начато
+
+### 3.2 Exhaustion Detector
+- [ ] **3.2.1** Создать `ExhaustionDetector`
+  - Файл: `extensions/analytics/exhaustion_detector.py` (НОВЫЙ)
+  - Формула: `avg_vol_30s * 2.5 * (std_30s / std_5min)`
+  - Зависимости: 1.1.1, 2.2.1
+  - Статус: ❌ Не начато
+  
+- [ ] **3.2.2** Публикация `EXHAUSTION_DETECTED` в EventBus
+  - Файл: `extensions/analytics/exhaustion_detector.py`
+  - Зависимости: 3.2.1
+  - Статус: ❌ Не начато
+
+### 3.3 Divergence Detector
+- [ ] **3.3.1** Создать `DivergenceDetector` (на базе delta velocity)
+  - Файл: `extensions/analytics/divergence_detector.py` (НОВЫЙ)
+  - Логика: сравнение скорости дельты и цены в реальном времени
+  - Зависимости: 2.1.4
+  - Статус: ❌ Не начато
+  
+- [ ] **3.3.2** Публикация `DIVERGENCE_DETECTED` в EventBus
+  - Файл: `extensions/analytics/divergence_detector.py`
+  - Зависимости: 3.3.1
+  - Статус: ❌ Не начато
+
+**✅ Чекпоинт Фазы 3:** Есть `TrendContext`, `ExhaustionDetector`, `DivergenceDetector`. Система различает Continuation и Reversal.
+
+---
+
+## 🏁 ФАЗА 4: Стратегии
+
+Три стратегии на общей базе. Приоритет: 🟡 ВАЖНО.
+
+### 4.1 Общая инфраструктура
+- [ ] **4.1.1** Создать базовый класс `BaseStrategy` (общая логика)
+  - Файл: `strategies/base_strategy.py` (НОВЫЙ)
+  - Зависимости: Фазы 1-3
+  - Статус: ❌ Не начато
+  
+- [ ] **4.1.2** Создать `ZoneIdentifier` (зоны интереса на базе HVN)
+  - Файл: `extensions/analytics/zone_identifier.py` (НОВЫЙ)
+  - Зависимости: 2.4.2, 2.1.1, 2.3.1
+  - Статус: ❌ Не начато
+  
+- [ ] **4.1.3** Создать `ConfirmationEngine` (подтверждение входа)
+  - Файл: `extensions/analytics/confirmation_engine.py` (НОВЫЙ)
+  - Зависимости: 4.1.2, Фазы 2-3
+  - Статус: ❌ Не начато
+  
+- [ ] **4.1.4** Разделение Continuation/Reversal в `ConfirmationEngine`
+  - Файл: `extensions/analytics/confirmation_engine.py`
+  - Зависимости: 3.1.1, 3.2.1, 3.3.1
+  - Статус: ❌ Не начато
+
+### 4.2 WallFade Strategy (v4)
+- [ ] **4.2.1** Переписать `WallFadeStrategy` на новой архитектуре
+  - Файл: `strategies/wall_fade.py` (обновление)
+  - Логика: вход у Micro-HVN с подтверждением дельты и китов
+  - Зависимости: 4.1.1, 4.1.2, 4.1.3
+  - Статус: ❌ Не начато
+
+### 4.3 Absorption Strategy
+- [ ] **4.3.1** Создать `AbsorptionStrategy` (v2)
+  - Файл: `strategies/absorption.py` (обновление)
+  - Логика: детект поглощения крупным игроком (цена не двигается при агрессии)
+  - Зависимости: 4.1.1, 4.1.2, 4.1.3, 2.1.1
+  - Статус: ❌ Не начато
+
+### 4.4 Breakout Strategy
+- [ ] **4.4.1** Создать `BreakoutStrategy` (v2)
+  - Файл: `strategies/breakout.py` (обновление)
+  - Логика: пробой Macro-HVN с подтверждением взрывной дельты и exhaustion
+  - Зависимости: 4.1.1, 4.1.2, 4.1.3, 3.2.1, 3.3.1
+  - Статус: ❌ Не начато
+
+### 4.5 Risk Management
+- [ ] **4.5.1** Модифицировать `AdvancedRiskService` для поддержки 3 стратегий
+  - Файл: `extensions/risk/advanced_risk_service.py`
+  - Зависимости: 4.2.1, 4.3.1, 4.4.1
+  - Статус: ❌ Не начато
+  
+- [ ] **4.5.2** Расчёт размера позиции от риска в USDT (не от %)
+  - Файл: `extensions/risk/position_sizer.py` (НОВЫЙ)
+  - Формула: `size = risk_usdt / sl_distance`
+  - Зависимости: 4.5.1
+  - Статус: ❌ Не начато
+  
+- [ ] **4.5.3** Динамический размер для Reversal (50-80% от Continuation)
+  - Файл: `extensions/risk/position_sizer.py`
+  - Зависимости: 4.5.2, 4.1.4
+  - Статус: ❌ Не начато
+
+**✅ Чекпоинт Фазы 4:** Все 3 стратегии работают. Risk management учитывает тип сделки и расстояние до стопа.
+
+---
+
+## 🏁 ФАЗА 5: Интеграция и тестирование
+
+Финальная сборка. Приоритет: 🟢 ЖЕЛАТЕЛЬНО (но обязательно перед продом).
+
+### 5.1 Тестирование
+- [ ] **5.1.1** Unit-тесты для `DeltaAnalyzer`
+  - Файл: `tests/test_delta_analyzer.py`
+  - Статус: ❌ Не начато
+  
+- [ ] **5.1.2** Unit-тесты для `TrendContext`
+  - Файл: `tests/test_trend_context.py`
+  - Статус: ❌ Не начато
+  
+- [ ] **5.1.3** Unit-тесты для `ExhaustionDetector`
+  - Файл: `tests/test_exhaustion_detector.py`
+  - Статус: ❌ Не начато
+  
+- [ ] **5.1.4** Интеграционный тест: полный цикл Spot Analysis → Futures Execution
+  - Файл: `tests/test_full_pipeline.py`
+  - Статус: ❌ Не начато
+  
+- [ ] **5.1.5** Backtest на исторических данных (JSONL)
+  - Файл: `tests/test_backtest.py`
+  - Статус: ❌ Не начато
+
+### 5.2 Мониторинг и логи
+- [ ] **5.2.1** Структурированный лог для Order Flow метрик
+  - Файл: `extensions/monitoring/order_flow_logger.py` (НОВЫЙ)
+  - Статус: ❌ Не начато
+  
+- [ ] **5.2.2** Метрики производительности (latency, throughput)
+  - Файл: `extensions/monitoring/performance_monitor.py` (НОВЫЙ)
+  - Статус: ❌ Не начато
+  
+- [ ] **5.2.3** Дашборд для отслеживания сигналов (опционально)
+  - Файл: `extensions/monitoring/dashboard.py` (НОВЫЙ)
+  - Статус: ❌ Не начато
+
+### 5.3 Документация
+- [ ] **5.3.1** Документация по каждой стратегии (логика, параметры, примеры)
+  - Файл: `DOC/STRATEGIES.md`
+  - Статус: ❌ Не начато
+  
+- [ ] **5.3.2** Документация по Order Flow архитектуре
+  - Файл: `DOC/ORDER_FLOW_ARCHITECTURE.md`
+  - Статус: ❌ Не начато
+
+**✅ Чекпоинт Фазы 5:** Система протестирована, задокументирована, готова к переходу на Bybit.
+
+---
+
+## 📊 Сводная статистика
+
+| Фаза | Задач | Выполнено | Осталось | Прогресс |
+|------|-------|-----------|----------|----------|
+| Фаза 1: Фундамент данных | 8 | 0 | 8 | 0% |
+| Фаза 2: Базовые модули | 14 | 0 | 14 | 0% |
+| Фаза 3: Контекст и фильтры | 8 | 0 | 8 | 0% |
+| Фаза 4: Стратегии | 11 | 0 | 11 | 0% |
+| Фаза 5: Тестирование | 9 | 0 | 9 | 0% |
+| **ИТОГО** | **50** | **0** | **50** | **0%** |
+
+---
+
+## 🔄 История изменений
+
+| Дата | Изменение |
+|------|-----------|
+| 2026-08-29 | Создан первоначальный план |
+
+---
+
+## 📝 Правила ведения плана
+
+1. При выполнении задачи ставим `[x]` вместо `[ ]`
+2. В таблице "Сводная статистика" обновляем цифры
+3. В "Истории изменений" фиксируем важные правки
+4. Если задача блокируется — добавляем комментарий в её описание
+5. План пересматривается в начале каждого спринта

@@ -9,8 +9,13 @@ logger = logging.getLogger(__name__)
 
 
 class AdvancedRiskService:
-    def __init__(self):
-        pass
+    def __init__(self, basis_monitor=None, volatility_filter=None):
+        """
+        :param basis_monitor: Экземпляр BasisMonitor для получения актуального спреда Spot/Futures.
+        :param volatility_filter: Экземпляр VolatilityFilter для расчета реального ATR.
+        """
+        self.basis_monitor = basis_monitor
+        self.volatility_filter = volatility_filter
 
     async def on_signal(self, event: Any):
         """Теневой обработчик SIGNAL_GENERATED."""

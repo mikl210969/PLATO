@@ -1,50 +1,87 @@
+"""Volatility Filter — расчёт реального ATR и режимов волатильности."""
 import logging
-from typing import List, Dict, Tuple
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+
 class VolatilityFilter:
-    def __init__(self, atr_period: int = 14, avg_atr_period: int = 100):
-        self.atr_period = atr_period
-        self.avg_atr_period = avg_atr_period
-
-    def calculate_atr(self, candles: List[Dict[str, float]]) -> float:
+    def __init__(self, rest_client: Optional[Any] = None):
         """
-        Рассчитывает ATR на основе списка свечей.
-        Ожидаемый формат свечи: {'high': float, 'low': float, 'close': float, 'open': float}
+        :param rest_client: Экземпляр BinanceRestClient для получения свечей.
         """
-        if len(candles) < self.atr_period + 1:
-            logger.warning(f"Недостаточно свечей для расчета ATR. Есть {len(candles)}, нужно {self.atr_period + 1}")
-            return 0.0
+        self.rest_client = rest_client
+        self._cached_atr = {}  # Кэш ATR по символам: {symbol: atr_value}
+        self._cache_ttl = 60   # Обновлять ATR не чаще чем раз в 60 секунд
+        self._last_update = {}
 
-        true_ranges = []
-        for i in range(1, len(candles)):
-            current = candles[i]
-            previous = candles[i-1]
+    async def calculate_real_atr(self, symbol: str, period: int = 14, interval: str = "1m") -> float:
+        """
+        Рассчитывает реальный ATR на основе последних свечей с Binance Spot REST API.
+        """
+        import time
+        
+        now = time.time()
+        # Возвращаем кэш, если он свежий
+        if symbol in self._cached_atr and (now - self._last_update.get(symbol, 0)) < self._cache_ttl:
+            return self._cached_atr[symbol]
+
+        if not self.rest_client:
+            logger.warning("REST client not provided. Falling back to default ATR=0.5")
+            return 0.5
+
+        # Получаем свечи (берем period + 1 для расчета первого TR)
+        klines = await self.rest_client.get_klines(symbol=symbol, interval=interval, limit=period + 1)
+        
+        if not klines or len(klines) < period + 1:
+            logger.warning(f"Недостаточно данных для расчета ATR ({symbol}). Fallback to 0.5")
+            return 0.5
+
+        # Формат Binance kline: [0]time, [1]open, [2]high, [3]low, [4]close, [5]volume, ...
+        try:
+            tr_sum = 0.0
+            prev_close = float(klines[0][4])
             
-            high_low = current['high'] - current['low']
-            high_close = abs(current['high'] - previous['close'])
-            low_close = abs(current['low'] - previous['close'])
+            for i in range(1, len(klines)):
+                high = float(klines[i][2])
+                low = float(klines[i][3])
+                close = float(klines[i][4])
+                
+                # True Range (TR)
+                tr = max(
+                    high - low,
+                    abs(high - prev_close),
+                    abs(low - prev_close)
+                )
+                tr_sum += tr
+                prev_close = close
             
-            true_range = max(high_low, high_close, low_close)
-            true_ranges.append(true_range)
+            # Average True Range (ATR)
+            atr = tr_sum / period
+            
+            # Сохраняем в кэш
+            self._cached_atr[symbol] = atr
+            self._last_update[symbol] = now
+            
+            logger.info(f"✅ Реальный ATR для {symbol} ({interval}): {atr:.4f}")
+            return atr
+            
+        except Exception as e:
+            logger.error(f"Ошибка при расчете ATR для {symbol}: {e}")
+            return 0.5
 
-        # Простое скользящее среднее для ATR (можно заменить на RMA/Wilder's Smoothing при необходимости)
-        atr = sum(true_ranges[-self.atr_period:]) / self.atr_period
-        return round(atr, 6)
-
-    def determine_volatility_regime(self, current_atr: float, avg_atr: float) -> str:
+    def get_volatility_mode(self, atr: float, current_price: float) -> str:
         """
-        Определяет режим волатильности согласно Стратегии.txt v2.0 (Модуль 1.3)
+        Определяет режим волатильности на основе ATR относительно цены.
         """
-        if avg_atr == 0:
+        if current_price <= 0:
             return "normal"
             
-        ratio = current_atr / avg_atr
+        atr_pct = (atr / current_price) * 100
         
-        if ratio > 2.5:
-            return "high"
-        elif ratio < 0.5:
+        if atr_pct < 0.3:
             return "low"
+        elif atr_pct > 1.5:
+            return "high"
         else:
             return "normal"

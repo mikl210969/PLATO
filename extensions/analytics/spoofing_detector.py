@@ -94,7 +94,8 @@ class SpoofingDetector:
         events = self._process_snapshot(snap)
 
         for e in events:  # БУФЕРИЗАЦИЯ: наружу только финальные события
-            logger.info(f"[SPOOF] {e.event_type} | {e.side} @ {e.price} | {e.detail}")
+            # 🔥 ИСПРАВЛЕНО: Переводим в DEBUG, чтобы не спамить в консоль
+            logger.debug(f"🧱 [DETECTOR] {e.event_type} | {e.side} @ {e.price:.2f} | Vol: {e.volume:.0f} | {e.detail}")
             if self._on_event:
                 self._on_event(e)
         return events
@@ -152,13 +153,18 @@ class SpoofingDetector:
     def _match(self, tracked: List[_TrackedWall], matched: List[_TrackedWall],
                price: float) -> Optional[_TrackedWall]:
         tol = self.price_tolerance_pct / 100.0
-        best, best_dist = None, None
+        
+        # 🔥 ИСПРАВЛЕНО: Типизация для Pylance (вместо None используем inf)
+        best: Optional[_TrackedWall] = None
+        best_dist: float = float('inf')
+        
         for w in tracked:
             if w in matched:
                 continue
             dist = abs(w.price - price) / w.price if w.price else 1.0
-            if dist <= tol and (best is None or dist < best_dist):
-                best, best_dist = w, dist
+            if dist <= tol and dist < best_dist:
+                best = w
+                best_dist = dist
         return best
 
     def _update_wall(self, w: _TrackedWall, price: float, volume: float,

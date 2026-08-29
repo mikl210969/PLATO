@@ -277,6 +277,50 @@ class BinanceWsAdapter:
                 logger.warning(f"⚠️ Spot WS connection lost or failed: {e}. Reconnecting in 5s...")
                 await asyncio.sleep(5)
 
+    async def subscribe_spot_depth(self, symbol: str, callback):
+        """
+        Подписка на поток спотового стакана (depth@100ms) для расчета имбаланса и поиска стен.
+        Использует отдельное публичное WS-подключение к спотовому рынку Binance.
+        """
+        import logging
+        import json
+        import asyncio
+        import websockets
+        
+        logger = logging.getLogger(__name__)
+        spot_depth_url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@depth@100ms"
+        
+        logger.info(f"🔄 Connecting to SPOT depth stream (100ms): {spot_depth_url}")
+        
+        while getattr(self, '_running', True):
+            try:
+                async with websockets.connect(spot_depth_url, ping_interval=20, ping_timeout=20) as ws:
+                    logger.info(f"✅ Spot Depth WS connected for {symbol}")
+                    async for message in ws:
+                        try:
+                            data = json.loads(message)
+                            
+                            # Нормализуем формат под наш EventBus (аналогично фьючерсам)
+                            # Binance отдает 'b' (bids) и 'a' (asks) как массивы [price, qty]
+                            normalized_data = {
+                                "e": "depthUpdate",
+                                "s": symbol.upper(),
+                                "b": data.get("b", []),  # bids
+                                "a": data.get("a", []),  # asks
+                                "E": data.get("E", int(asyncio.get_event_loop().time() * 1000)) # timestamp
+                            }
+                            
+                            # Вызываем переданный callback
+                            if callback:
+                                await callback("SPOT_ORDERBOOK_UPDATE", normalized_data)
+                                
+                        except Exception as e:
+                            logger.error(f"Error processing spot depth update: {e}")
+                            
+            except Exception as e:
+                logger.warning(f"⚠️ Spot Depth WS connection lost or failed: {e}. Reconnecting in 3s...")
+                await asyncio.sleep(3)
+
     async def close(self):
         """Корректное закрытие соединения."""
         self._running = False

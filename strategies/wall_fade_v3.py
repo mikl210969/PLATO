@@ -1,4 +1,4 @@
-"""WallFade Strategy v3 — С интеграцией Confidence Score от детекторов."""
+"""WallFade Strategy v3 — С интеграцией Confidence Score от детекторов и HVN-якорем."""
 import logging
 import time
 from dataclasses import dataclass
@@ -29,14 +29,12 @@ class WallFadeStrategyV3:
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
+        # В продакшене используем нормальный кулдаун (например, 30 сек)
         self.cooldown_sec = config.get('cooldown_sec', 30.0)
         
-        # 🔥 НОВОЕ: Хранилище недавних событий от детекторов (последние 30 секунд)
+        # Хранилище недавних событий от детекторов (последние 30 секунд)
         self._recent_detector_events: List[Dict[str, Any]] = []
         self._events_window_sec = 30.0
-        
-        # Подписка на EventBus для событий детекторов
-        # (будет вызвана из main.py после инициализации)
         self._event_bus = None
 
     def subscribe_to_events(self, event_bus):
@@ -89,31 +87,31 @@ class WallFadeStrategyV3:
             if event_price <= 0:
                 continue
             
-            # Проверяем, было ли событие рядом с ценой входа
             price_diff_pct = abs(entry_price - event_price) / entry_price
             if price_diff_pct > price_tolerance_pct:
                 continue  # Событие слишком далеко
             
             event_type = event.get("type", "")
             
-            # 🔥 Логика из Стратегии.txt (Модуль 1.5)
             if event_type == "WHALE_CLUSTER":
                 cluster_size = event.get("cluster_size", 1)
-                # +60% за кластер, но не более 100%
                 boost += min(0.60, 0.20 * cluster_size)
             elif event_type in ("WHALE_BUY", "WHALE_SELL"):
-                boost += 0.30  # +30% за одиночного кита
+                boost += 0.30
             elif event_type == "WALL_CONFIRMED":
-                boost += 0.25  # +25% за подтвержденную стену
+                boost += 0.25
         
-        return min(boost, 1.0)  # Максимальный бонус 100%
+        return min(boost, 1.0)
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
-        """Генерирует обогащенный сигнал с динамическим Confidence Score."""
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
         orderbook = context.get('orderbook', {'bids': [], 'asks': []})
+        hvn_micro = context.get('hvn_micro', [])
+        hvn_macro = context.get('hvn_macro', [])
+        atr = self.atr_value
         
+        # Базовые проверки
         if current_price <= 0 or not orderbook.get('bids') or not orderbook.get('asks'):
             return None
 
@@ -121,8 +119,22 @@ class WallFadeStrategyV3:
         if now - self._last_signal_time < self.cooldown_sec:
             return None
 
-        # 1. Поиск края стены (Edge Price)
+        # ========================================================================
+        # 1. MACRO HVN FILTER (Глобальная защита)
+        # ========================================================================
+        for macro_hvn in hvn_macro:
+            hvn_price = macro_hvn['price']
+            distance_pct = abs(current_price - hvn_price) / current_price
+            
+            if distance_pct < 0.005 and macro_hvn['strength'] > 15.0:
+                logger.debug(f"🛡️ [WallFadeV3] Отклонено: близко к Macro HVN @ {hvn_price:.2f} (dist: {distance_pct*100:.2f}%)")
+                return None
+
+        # ========================================================================
+        # 2. ПОИСК ТОЧКИ ВХОДА И ЯКОРЯ ДЛЯ SL (Micro HVN)
+        # ========================================================================
         bids = orderbook.get('bids', [])
+        
         if len(bids) >= 5:
             avg_vol = sum(float(q) for p, q in bids[:10]) / min(10, len(bids))
             edge_price = current_price
@@ -135,30 +147,80 @@ class WallFadeStrategyV3:
             entry_price = round(current_price, 2)
             edge_price = round(edge_price, 2)
             
-            if abs(entry_price - edge_price) / entry_price < 0.005:
-                # 2. Расчет R и RR
-                atr = self.atr_value
-                sl1 = edge_price - (atr * 0.3)
+            distance_pct = abs(entry_price - edge_price) / entry_price
+            
+            if distance_pct < 0.005:
+                sl_anchor_price = edge_price - (atr * 0.5)
+                best_hvn = None
+                
+                for micro_hvn in hvn_micro:
+                    hvn_price = micro_hvn['price']
+                    if hvn_price < entry_price:
+                        distance = entry_price - hvn_price
+                        if distance <= (atr * 1.5):
+                            if best_hvn is None or (entry_price - hvn_price) < (entry_price - best_hvn['price']):
+                                best_hvn = micro_hvn
+                
+                if best_hvn:
+                    sl_anchor_price = best_hvn['price']
+                    logger.info(f"🎯 [WallFadeV3] SL привязан к Micro HVN @ {sl_anchor_price:.2f} (Strength: {best_hvn['strength']:.1f}%)")
+                else:
+                    logger.info(f"⚠️ [WallFadeV3] Micro HVN не найден рядом, fallback SL @ {sl_anchor_price:.2f}")
+
+                sl1 = round(sl_anchor_price - (atr * 0.2), 2) 
                 r_value = abs(entry_price - sl1)
                 
-                tp1 = entry_price + (2.0 * r_value)
+                tp1 = round(entry_price + (2.0 * r_value), 2)
                 rr_ratio = (tp1 - entry_price) / r_value if r_value > 0 else 0.0
 
-                # 3.  НОВОЕ: Расчет Confidence Score с бонусом от детекторов
-                base_confidence = 0.50  # База
-                base_confidence += 0.25  # +25% за реальную стену
-                if rr_ratio >= 2.0:
-                    base_confidence += 0.10  # +10% за хороший R:R
+                # ========================================================================
+                # 3. ОЦЕНКА ТИПА СДЕЛКИ: Continuation vs Reversal (TrendContext)
+                # ========================================================================
+                trend_data = context.get('trend', {})
+                trend_state = trend_data.get('state', 'RANGING')
                 
-                # Бонус от детекторов
+                # Пока стратегия настроена на short, логика универсальна
+                is_short = True 
+                
+                if is_short and trend_data.get('is_continuation_for_short'):
+                    trade_type = "CONTINUATION (Short in Downtrend)"
+                    trend_bonus = 0.15  # +15% к уверенности за торговлю по тренду
+                    logger.info(f"📈 [WallFadeV3] CONTINUATION: Short в нисходящем тренде ({trend_state})")
+                    
+                elif is_short and trend_data.get('is_reversal_for_short'):
+                    trade_type = "REVERSAL (Short in Uptrend)"
+                    trend_bonus = -0.10 # -10% штраф за торговлю против тренда
+                    logger.info(f"🛡️ [WallFadeV3] REVERSAL: Short против восходящего тренда ({trend_state}). Требуется сильный детектор!")
+                    
+                else:
+                    trade_type = f"NEUTRAL ({trend_state})"
+                    trend_bonus = 0.0
+                    logger.info(f"⚖️ [WallFadeV3] NEUTRAL: Рынок во флэте ({trend_state})")
+
+                # ========================================================================
+                # 4. РАСЧЕТ CONFIDENCE SCORE
+                # ========================================================================
+                base_confidence = 0.50
+                base_confidence += 0.25  # Бонус за наличие стены
+                
+                # ✅ ВОТ ЭТА СТРОКА (нужна!): бонус за хорошее соотношение R:R
+                if rr_ratio >= 2.0:
+                    base_confidence += 0.10
+                
+                # Применяем бонус/штраф тренда
+                base_confidence += trend_bonus
+                
+                # Бонус от детекторов (Киты, подтвержденные стены)
                 detector_boost = self._calculate_confidence_boost(entry_price)
+                
+                # 🔥 КРИТИЧЕСКОЕ ПРАВИЛО: Для Reversal требуем минимум 30% буста от детекторов
+                if "REVERSAL" in trade_type and detector_boost < 0.30:
+                    logger.debug(f"🚫 [WallFadeV3] Отклонено: Reversal без достаточного подтверждения детекторов (boost={detector_boost:.2f})")
+                    return None
+
                 final_confidence = min(base_confidence + detector_boost, 1.0)
                 
-                if detector_boost > 0:
-                    logger.info(
-                        f"📈 Confidence boost: +{detector_boost*100:.0f}% from detectors "
-                        f"(base={base_confidence:.2f} → final={final_confidence:.2f})"
-                    )
+                logger.info(f"🎯 [WallFadeV3] Trade Type: {trade_type} | Base: {base_confidence:.2f} | Detector Boost: +{detector_boost:.2f} | Final: {final_confidence:.2f}")
                 
                 self._last_signal_time = now
                 

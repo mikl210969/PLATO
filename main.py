@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PLAT_WALLS_NEW — Торговая платформа (чистая версия).
+PLAT_WALLS_NEW — Торговая платформа (чистая версия, рефакторинг v3.1).
 """
 
 import asyncio
@@ -9,6 +9,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Optional, Dict, List, Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -30,7 +31,7 @@ from trading.lifecycle_manager import LifecycleManager
 from trading.risk_manager import RiskManager
 from trading.order_verifier import OrderVerifier
 
-from strategies.wall_fade import WallFadeStrategy
+from strategies.wall_fade_v3 import WallFadeStrategyV3
 from strategies.absorption import AbsorptionStrategy
 from strategies.breakout import BreakoutStrategy
 
@@ -67,7 +68,7 @@ class Platform:
         self.passport_manager = PassportManager()
         self.passport_repository = PassportRepository()
 
-        # 4. REST и WS клиенты
+        # 4. REST и WS клиенты (сначала, так как нужны для AnalyticsHub)
         self.rest = BinanceRestClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -80,10 +81,17 @@ class Platform:
         self.ws.set_json_logger(self.json_logger)
         self.router = ChannelRouter(self.ws, self.rest)
 
-        # 5. StateManager
+        # 🔥 НОВОЕ: 5. Analytics Hub (Инкапсулирует SpotPrice, Volatility, Delta, Imbalance)
+        from core.analytics_hub import AnalyticsHub
+        self.analytics = AnalyticsHub(self.bus, self.symbol, self.rest)
+        
+        # Для обратной совместимости со старым кодом
+        self.volatility_filter = self.analytics.volatility 
+
+        # 6. StateManager
         self.state_manager = StateManager(self.passport_manager)
 
-        # 6. Оркестратор
+        # 7. Оркестратор
         self.orchestrator = Orchestrator(
             config=self.config,
             event_bus=self.bus,
@@ -94,7 +102,7 @@ class Platform:
         )
         logger.info("✅ Orchestrator initialized")
 
-        # 7. Трейдер
+        # 8. Трейдер
         self.trader = Trader(
             symbol=self.symbol,
             rest_client=self.rest,
@@ -104,7 +112,7 @@ class Platform:
         )
         self.orchestrator.register_trader(self.symbol, self.trader)
 
-        # 8. LifecycleManager
+        # 9. LifecycleManager
         self.lifecycle_manager = LifecycleManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
@@ -113,7 +121,7 @@ class Platform:
         )
         logger.info("✅ LifecycleManager initialized")
 
-        # 9. RiskManager
+        # 10. RiskManager
         self.risk_manager = RiskManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
@@ -124,7 +132,7 @@ class Platform:
         self.orchestrator.set_risk_manager(self.risk_manager)
         logger.info("✅ RiskManager initialized and set in Orchestrator")
 
-        # 10. OrderVerifier
+        # 11. OrderVerifier
         self.verifier = OrderVerifier(
             rest_client=self.rest,
             event_bus=self.bus,
@@ -133,7 +141,7 @@ class Platform:
         )
         logger.info("✅ OrderVerifier initialized")
 
-        # 11. DriftMonitor
+        # 12. DriftMonitor
         from trading.drift_monitor import DriftMonitor
         self.drift_monitor = DriftMonitor(
             rest_client=self.rest,
@@ -148,23 +156,19 @@ class Platform:
         self.orchestrator.set_verifier(self.verifier)
         logger.info("✅ DriftMonitor and OrderVerifier set in Orchestrator")
 
-        # 12. Стратегии (Обогащенная версия v3)
+        # 13. Стратегии
         strategies_config = self.config.get('strategies', {})
-        from strategies.wall_fade_v3 import WallFadeStrategyV3
         
-        default_atr = self.config.get('trading', {}).get('atr_value', 0.5)
         self.wall_fade = WallFadeStrategyV3(
             strategies_config.get('wall_fade', {}), 
-            atr_value=default_atr
+            atr_value=0.5 # Будет перезаписано реальным ATR при старте
         )
-        
-        #  НОВОЕ: Подключаем стратегию к EventBus для получения событий детекторов
         self.wall_fade.subscribe_to_events(self.bus)
         
         self.absorption = AbsorptionStrategy(strategies_config.get('absorption', {}))
         self.breakout = BreakoutStrategy(strategies_config.get('breakout', {}))
 
-        # 🔥 13. Extensions (Safe Bootstrap)
+        # 14. Extensions (Safe Bootstrap)
         from extensions.bootstrap import init_extensions_safe
         self.extensions = init_extensions_safe(self.bus, self.symbol)
         if self.extensions:
@@ -172,9 +176,12 @@ class Platform:
         else:
             logger.warning("⚠️ Extensions failed to initialize, running in Core-only mode")
 
-        # 14. Shadow Advanced Risk Evaluator
+        # 15. Shadow Advanced Risk Evaluator
         from extensions.risk.advanced_risk_service import AdvancedRiskService
-        self.shadow_risk = AdvancedRiskService()
+        self.shadow_risk = AdvancedRiskService(
+            basis_monitor=self.extensions.basis if (hasattr(self, 'extensions') and self.extensions) else None,
+            volatility_filter=self.volatility_filter
+        )
         
         async def evaluate_shadow_signal(event):
             logger.info("[SHADOW DEBUG] Событие SIGNAL_GENERATED перехвачено!")
@@ -267,17 +274,14 @@ class Platform:
         # ===== Обработчик принудительного реконнекта WS =====
         async def on_ws_reconnect_forced(event: Event):
             logger.warning(f"⚠️ WS reconnect forced for passport {event.payload.get('passport_id')}")
-            
             if hasattr(self.ws, 'close'):
                 await self.ws.close()
 
         self.bus.subscribe("WS_RECONNECT_FORCED", on_ws_reconnect_forced)
 
         # ===== Подписка на события WS → Шина =====
-
         async def on_order_update(data):
             self._last_user_data_ts = time.time()            
-            
             order_data = data.get('o', data)
             
             client_order_id = str(order_data.get('c') or order_data.get('clientOrderId') or order_data.get('client_order_id') or '')
@@ -334,7 +338,6 @@ class Platform:
                         symbol=self.symbol
                     )
                     
-                    # 🔥 ДОБАВЛЕНО: Публикация сырого стакана для Spoofing Detector (Extensions)
                     await self.bus.publish(
                         event_type="MARKET_ORDERBOOK",
                         source="ws_adapter",
@@ -371,54 +374,55 @@ class Platform:
                     logger.error(f"Health check error: {e}")
                     await asyncio.sleep(1)
 
-        # 🔥 ШАГ 9.5: Сохраняем ссылки на фоновые задачи
-        self._ws_task = asyncio.create_task(self.ws.run())
-        
-        # 🔥 НОВОЕ: Определяем callback для спотовых сделок и запускаем задачу
+        # 🔥 СПОТОВЫЕ ПОТОКИ ДАННЫХ (ИСТОЧНИК ИСТИНЫ)
         import json
-        from pathlib import Path
         
-        # Готовим директорию для Cold Storage
         self._cold_storage_dir = Path("data/cold_storage")
         self._cold_storage_dir.mkdir(parents=True, exist_ok=True)
         self._tick_file = self._cold_storage_dir / f"{self.symbol}_trades.jsonl"
 
         async def on_spot_trade(event_type: str, data: dict):
-            # 1. Отправляем в EventBus для детекторов (Whale/Spoofing)
             await self.bus.publish(
                 event_type=event_type,
                 source="spot_ws_adapter",
                 payload=data,
                 symbol=self.symbol
             )
-            
-            # 2. Сохраняем тик в Cold Storage (JSONL) для HVN Calculator
             try:
-                # В Binance: m=True → покупатель был мейкером → агрессор SELL
-                #             m=False → покупатель был тейкером → агрессор BUY
                 side = "BUY" if not data.get("m") else "SELL"
                 price = float(data.get("p", 0))
                 qty = float(data.get("q", 0))
                 ts_ms = data.get("T", 0)
-                
                 tick_record = {
-                    "timestamp": float(ts_ms) / 1000.0,  # мс → секунды
+                    "timestamp": float(ts_ms) / 1000.0,
                     "price": price,
                     "quantity": qty,
                     "value_usdt": price * qty,
                     "side": side
                 }
-                
-                # Дописываем одну строку в конец файла (быстрая операция append)
                 with open(self._tick_file, "a", encoding="utf-8") as f:
                     f.write(json.dumps(tick_record) + "\n")
             except Exception as e:
                 logger.warning(f"Не удалось сохранить тик в Cold Storage: {e}")
-            
+
+        async def on_spot_depth(event_type: str, data: dict):
+            await self.bus.publish(
+                event_type=event_type,
+                source="spot_ws_adapter",
+                payload=data,
+                symbol=self.symbol
+            )
+
+        # Запускаем спотовые задачи
         self._spot_trades_task = asyncio.create_task(
             self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade)
         )
+        self._spot_depth_task = asyncio.create_task(
+            self.ws.subscribe_spot_depth(self.symbol, on_spot_depth)
+        )
         
+        # Остальные фоновые задачи
+        self._ws_task = asyncio.create_task(self.ws.run())
         self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
         self._health_check_task = asyncio.create_task(user_data_health_check())
         
@@ -428,6 +432,16 @@ class Platform:
         logger.info("🔄 [STARTUP] Performing exchange state recovery (blocking)...")
         await self.orchestrator.perform_startup_recovery(self.symbol)
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
+
+        # 🔥 Однократный расчет реального ATR при старте главного цикла
+        if not getattr(self, '_atr_fetched', False):
+            try:
+                real_atr = await self.volatility_filter.calculate_real_atr(self.symbol, period=14, interval="1m")
+                logger.info(f"🎯 [STARTUP] Реальный ATR для {self.symbol} (1m): {real_atr:.4f}")
+                self.wall_fade.atr_value = real_atr
+                self._atr_fetched = True
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось рассчитать реальный ATR при старте: {e}. Использую fallback.")
 
         # ===== Основной цикл =====
         last_log_time = 0
@@ -452,24 +466,43 @@ class Platform:
                     await self.rest.get_position(self.symbol)
                     last_position_check_time = current_time
 
-                if current_time - last_log_time >= 30:
-                    logger.info(f"🔄 Price: {current_price} (from {'WS' if self.ws_price > 0 else 'REST'})")
-                    
-                    # 🔥 ДОБАВЛЕНО: Статистика работы Extensions
+                if current_time - last_log_time >= 60: # Увеличим интервал до 60 сек
+                    logger.debug(f"🔄 Price: {current_price} (from {'WS' if self.ws_price > 0 else 'REST'})")
                     if hasattr(self, 'extensions') and self.extensions and self.extensions.bridge:
                         stats = self.extensions.bridge.get_stats()
-                        logger.info(f"📊 Extensions Stats: Trades={stats['trades']}, Books={stats['books']}, Unrecognized={stats['unrecognized']}")
-                        
+                        logger.debug(f"📊 Extensions Stats: Trades={stats['trades']}, Books={stats['books']}, Unrecognized={stats['unrecognized']}")
                     last_log_time = current_time
 
                 if self.passport_manager.is_symbol_busy(self.symbol):
                     await asyncio.sleep(2)
                     continue
 
+                # ====================================================================
+                # ПОДГОТОВКА КОНТЕКСТА ДЛЯ СТРАТЕГИЙ
+                # ====================================================================
+                
+                # 1. Получаем актуальную спотовую цену
+                spot_price = self.analytics.spot_price.get_current_price()
+                
+                # 2. Получаем HVN уровни (Micro и Macro) из Extensions
+                hvn_micro = []
+                hvn_macro = []
+                if hasattr(self, 'extensions') and self.extensions and self.extensions.hvn:
+                    # Берем топ-3 уровня для каждого таймфрейма
+                    hvn_micro = self.extensions.hvn.calculate_hvn(self.symbol, lookback_minutes=60)[:3]
+                    hvn_macro = self.extensions.hvn.calculate_hvn(self.symbol, lookback_minutes=1440)[:3]
+
+                # 3. Формируем контекст
                 context = {
                     'symbol': self.symbol,
-                    'current_price': current_price,
-                    'orderbook': self.ws_orderbook,
+                    'current_price': current_price,           # Фьючерсная цена (для исполнения)
+                    'spot_price': spot_price,                 # Сповая цена (источник истины)
+                    'orderbook': self.ws_orderbook,           # Фьючерсный стакан
+                    'hvn_micro': hvn_micro,                   # Micro HVN (для якоря SL)
+                    'hvn_macro': hvn_macro,                   # Macro HVN (для фильтрации)
+                    'delta': self.analytics.delta.get_metrics(),
+                    'imbalance': self.analytics.imbalance.get_metrics(),
+                    'trend': self.analytics.trend.get_context() # 🔥 НОВОЕ: Контекст тренда
                 }
 
                 signals = await self._generate_signals(context)
@@ -516,7 +549,6 @@ class Platform:
     async def stop(self):
         self._running = False
         
-        # 🔥 ШАГ 9.5: Корректная отмена фоновых задач
         tasks_to_cancel = []
         
         if hasattr(self, '_ws_task') and not self._ws_task.done():
@@ -531,12 +563,14 @@ class Platform:
             self._health_check_task.cancel()
             tasks_to_cancel.append(self._health_check_task)
             
-        # 🔥 НОВОЕ: Отмена спотового потока (ДО вызова gather!)
         if hasattr(self, '_spot_trades_task') and not self._spot_trades_task.done():
             self._spot_trades_task.cancel()
             tasks_to_cancel.append(self._spot_trades_task)
+
+        if hasattr(self, '_spot_depth_task') and not self._spot_depth_task.done():
+            self._spot_depth_task.cancel()
+            tasks_to_cancel.append(self._spot_depth_task)            
         
-        # Теперь собираем все задачи, включая спотовую
         if tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         
@@ -593,7 +627,6 @@ async def main():
         print("✅ Платформа полностью остановлена.")
 
 
-# 🔥 КРИТИЧЕСКИЙ БЛОК: без него платформа не запустится!
 if __name__ == "__main__":
     try:
         asyncio.run(main())

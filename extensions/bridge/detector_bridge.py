@@ -133,7 +133,7 @@ class DetectorBridge:
             try:
                 # 🔥 ЯРКИЙ ЛОГ ДЛЯ КЛЮЧЕВЫХ СОБЫТИЙ
                 if e.event_type in ("WHALE_BUY", "WHALE_SELL", "WHALE_CLUSTER"):
-                    print(f"🐋 [DETECTOR] {e.event_type} | Цена: {e.price} | Объём: {e.value_usdt:.0f} USDT | Cluster: {e.cluster_size}")
+                    logger.debug(f"🐋 [DETECTOR] {e.event_type} | Цена: {e.price} | Объём: {e.value_usdt:.0f} USDT | Cluster: {e.cluster_size}")
                 elif e.event_type in ("WALL_DETECTED", "WALL_CONFIRMED", "SPOOFING_CONFIRMED", "REPOSITIONING"):
                     print(f"🧱 [DETECTOR] {e.event_type} | {e.side} @ {e.price} | Vol: {e.volume:.0f} | {e.detail}")
                 
