@@ -1,20 +1,9 @@
 {
     "wall_fade": {
         "enabled": true,
+        "cooldown_sec": 30,
         "min_wall_volume": 20.0,
         "min_confidence": 0.3,
         "price_distance_pct": 0.5
-    },
-    "absorption": {
-        "enabled": false,
-        "min_wall_volume": 5.0,
-        "min_confidence": 0.3
-    },
-    "breakout": {
-        "enabled": false,
-        "min_volume": 10.0,
-        "min_confidence": 0.3,
-        "lookback_bars": 20,
-        "breakout_threshold": 0.5
     }
 }

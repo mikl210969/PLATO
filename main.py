@@ -32,8 +32,8 @@ from trading.risk_manager import RiskManager
 from trading.order_verifier import OrderVerifier
 
 from strategies.wall_fade_v3 import WallFadeStrategyV3
-from strategies.absorption import AbsorptionStrategy
-from strategies.breakout import BreakoutStrategy
+from strategies.absorption_v2 import AbsorptionStrategyV2  # <-- Эта строка должна быть
+
 
 logger = get_logger(__name__)
 
@@ -81,7 +81,7 @@ class Platform:
         self.ws.set_json_logger(self.json_logger)
         self.router = ChannelRouter(self.ws, self.rest)
 
-        # 🔥 НОВОЕ: 5. Analytics Hub (Инкапсулирует SpotPrice, Volatility, Delta, Imbalance)
+        # 🔥 НОВОЕ: 5. Analytics Hub (Инкапсулирует SpotPrice, Volatility, Delta, Imbalance, Trend, Absorption)
         from core.analytics_hub import AnalyticsHub
         self.analytics = AnalyticsHub(self.bus, self.symbol, self.rest)
         
@@ -161,12 +161,16 @@ class Platform:
         
         self.wall_fade = WallFadeStrategyV3(
             strategies_config.get('wall_fade', {}), 
-            atr_value=0.5 # Будет перезаписано реальным ATR при старте
+            atr_value=0.5
         )
         self.wall_fade.subscribe_to_events(self.bus)
-        
-        self.absorption = AbsorptionStrategy(strategies_config.get('absorption', {}))
-        self.breakout = BreakoutStrategy(strategies_config.get('breakout', {}))
+
+        # 🔥 НОВОЕ: Стратегия поглощения
+        self.absorption = AbsorptionStrategyV2(
+            strategies_config.get('absorption', {}),
+            atr_value=0.5
+        )
+        self.absorption.subscribe_to_events(self.bus)
 
         # 14. Extensions (Safe Bootstrap)
         from extensions.bootstrap import init_extensions_safe
@@ -194,7 +198,7 @@ class Platform:
 
     async def _generate_signals(self, context: dict):
         signals = []
-        for strategy in [self.wall_fade, self.absorption, self.breakout]:
+        for strategy in [self.wall_fade, self.absorption]: # <-- Здесь должны быть обе стратегии
             signal = strategy.generate_signal(context)
             if signal:
                 signals.append(signal)

@@ -59,9 +59,20 @@ class DeltaAnalyzer:
             logger.error(f"Error processing trade for delta: {e}")
 
     def get_metrics(self) -> dict:
-        """Возвращает текущие метрики дельты для использования стратегиями."""
+        """Возвращает текущие метрики дельты, включая velocity (скорость накопления)."""
+        # Рассчитываем velocity: дельта за последние 3 секунды
+        now = time.time()
+        velocity_window = 3.0  # 3 секунды
+        velocity_cutoff = now - velocity_window
+        
+        delta_velocity = 0.0
+        for ts, delta, _ in self.trades:
+            if ts >= velocity_cutoff:
+                delta_velocity += delta
+        
         return {
             "cumulative_delta": self.cumulative_delta,
+            "delta_velocity": delta_velocity,  # 🔥 НОВОЕ: скорость накопления за 3 сек
             "delta_profile": dict(self.delta_per_price_level),
             "trade_count": len(self.trades)
         }

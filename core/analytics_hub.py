@@ -30,17 +30,23 @@ class AnalyticsHub:
         from extensions.analytics.trend_context import TrendContext
         self.trend = TrendContext(event_bus, symbol, lookback_minutes=15, threshold_pct=0.5)
         
-        logger.info(f"✅ AnalyticsHub initialized for {symbol} (Spot, Volatility, Delta, Imbalance, Trend)")
-
-    def get_all_metrics(self) -> dict:
-        """Возвращает сводку всех метрик для стратегий и логирования."""
-        return {
-            "spot_price": self.spot_price.get_current_price(),
-            "atr": self.volatility._cached_atr.get(self.symbol, 0.5),
-            "delta": self.delta.get_metrics(),
-            "imbalance": self.imbalance.get_metrics(),
-            "trend": self.trend.get_context() # 🔥 НОВОЕ
-        }
+        # 6. Absorption Detector (Поглощение: агрессия без движения цены)
+        from extensions.analytics.absorption_detector import AbsorptionDetector
+        self.absorption = AbsorptionDetector(
+            event_bus=event_bus,
+            symbol=symbol,
+            delta_analyzer=self.delta,
+            imbalance_calculator=self.imbalance,
+            velocity_threshold=5000.0,
+            stagnation_pct=0.0005,
+            imbalance_threshold=0.3,
+            cooldown_sec=30.0
+        )
+        
+        logger.info(f"✅ AnalyticsHub initialized for {symbol} (Spot, Volatility, Delta, Imbalance, Trend, Absorption)")
+        
+        # 🔥 ДОБАВИТЬ ЭТУ СТРОКУ ДЛЯ ПРОВЕРКИ:
+        print("🚨 [ПРЯМОЙ PRINT] AnalyticsHub и AbsorptionDetector УСПЕШНО инициализированы!")
 
     async def _on_market_trade_for_delta(self, event: Any):
         """Проксирование событий спотовых сделок в DeltaAnalyzer."""
@@ -50,3 +56,13 @@ class AnalyticsHub:
         except Exception as e:
             logger.error(f"Error in AnalyticsHub delta processing: {e}")
 
+    def get_all_metrics(self) -> dict:
+        """Возвращает сводку всех метрик для стратегий и логирования."""
+        return {
+            "spot_price": self.spot_price.get_current_price(),
+            "atr": self.volatility._cached_atr.get(self.symbol, 0.5),
+            "delta": self.delta.get_metrics(),
+            "imbalance": self.imbalance.get_metrics(),
+            "trend": self.trend.get_context(),
+            "absorption": "ready"
+        }
