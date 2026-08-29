@@ -1,7 +1,7 @@
 {
   "passport_id": "PASS_20260829_214725_0ac9a0",
   "symbol": "SOLUSDT",
-  "status": "OPEN",
+  "status": "CLOSED",
   "signal_id": "AbsorptionV2_SOLUSDT_1788040045",
   "strategy": "AbsorptionV2",
   "side": "short",
@@ -10,7 +10,7 @@
   "sl_price": 105.19,
   "tp1_price": 104.69,
   "tp2_price": 104.44,
-  "position_size": 7.0,
+  "position_size": 0.0,
   "position_entry_price": 0.0,
   "orders": [
     {
@@ -24,8 +24,8 @@
     }
   ],
   "created_at": "2026-08-29T21:47:25.058393+00:00",
-  "updated_at": "2026-08-29T21:47:28.629877+00:00",
-  "closed_at": null,
+  "updated_at": "2026-08-29T22:47:25.871622+00:00",
+  "closed_at": "2026-08-29T22:47:25.871622+00:00",
   "timeline": [
     {
       "timestamp": "2026-08-29T21:47:25.341364+00:00",
@@ -36,9 +36,14 @@
       "timestamp": "2026-08-29T21:47:28.629877+00:00",
       "event": "STATUS: OPEN",
       "details": "Order filled"
+    },
+    {
+      "timestamp": "2026-08-29T22:47:25.871622+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "SL_HIT"
     }
   ],
-  "exit_reason": "",
+  "exit_reason": "SL_HIT",
   "exit_price": 0.0,
   "gross_pnl": 0.0,
   "commission": 0.0,

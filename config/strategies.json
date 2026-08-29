@@ -5,5 +5,17 @@
         "min_wall_volume": 20.0,
         "min_confidence": 0.3,
         "price_distance_pct": 0.5
+    },
+    "absorption": {
+        "enabled": true,
+        "cooldown_sec": 60
+    },
+    "breakout": {
+        "enabled": true,
+        "cooldown_sec": 60,
+        "liquidity_void_threshold": 5000.0,
+        "max_attempts": 2,
+        "timeout_sec": 5.0,
+        "price_offset": 0.01
     }
 }

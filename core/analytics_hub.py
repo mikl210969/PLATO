@@ -43,8 +43,19 @@ class AnalyticsHub:
             cooldown_sec=30.0
         )
         
-        logger.info(f"✅ AnalyticsHub initialized for {symbol} (Spot, Volatility, Delta, Imbalance, Trend, Absorption)")
+        # 7. Breakout Detector (Пробой: поедание стены)
+        from extensions.analytics.breakout_detector import BreakoutDetector
+        self.breakout = BreakoutDetector(
+            event_bus=event_bus,
+            symbol=symbol,
+            consumption_threshold_pct=60.0,
+            min_consumption_rate_pct=5.0,
+            refill_threshold_pct=50.0,
+            cooldown_sec=1800.0
+        )
         
+        logger.info(f"✅ AnalyticsHub initialized for {symbol} (Spot, Volatility, Delta, Imbalance, Trend, Absorption, Breakout)")
+        print("🚨 [ПРЯМОЙ PRINT] AnalyticsHub: BreakoutDetector УСПЕШНО инициализирован!")        
         # 🔥 ДОБАВИТЬ ЭТУ СТРОКУ ДЛЯ ПРОВЕРКИ:
         print("🚨 [ПРЯМОЙ PRINT] AnalyticsHub и AbsorptionDetector УСПЕШНО инициализированы!")
 

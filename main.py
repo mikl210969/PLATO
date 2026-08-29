@@ -32,7 +32,8 @@ from trading.risk_manager import RiskManager
 from trading.order_verifier import OrderVerifier
 
 from strategies.wall_fade_v3 import WallFadeStrategyV3
-from strategies.absorption_v2 import AbsorptionStrategyV2  # <-- Эта строка должна быть
+from strategies.absorption_v2 import AbsorptionStrategyV2
+from strategies.breakout_v1 import BreakoutStrategyV1  # 🔥 НОВОЕ
 
 
 logger = get_logger(__name__)
@@ -172,6 +173,13 @@ class Platform:
         )
         self.absorption.subscribe_to_events(self.bus)
 
+        # 🔥 НОВОЕ: Стратегия пробоя
+        self.breakout = BreakoutStrategyV1(
+            strategies_config.get('breakout', {}),
+            atr_value=0.5
+        )
+        self.breakout.subscribe_to_events(self.bus)        
+
         # 14. Extensions (Safe Bootstrap)
         from extensions.bootstrap import init_extensions_safe
         self.extensions = init_extensions_safe(self.bus, self.symbol)
@@ -198,7 +206,7 @@ class Platform:
 
     async def _generate_signals(self, context: dict):
         signals = []
-        for strategy in [self.wall_fade, self.absorption]: # <-- Здесь должны быть обе стратегии
+        for strategy in [self.wall_fade, self.absorption, self.breakout]:
             signal = strategy.generate_signal(context)
             if signal:
                 signals.append(signal)

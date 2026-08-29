@@ -7,6 +7,8 @@ from typing import Optional, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 
+from dataclasses import dataclass, field
+
 @dataclass
 class EnrichedSignal:
     """Сигнал с полными данными для Advanced Risk."""
@@ -22,6 +24,10 @@ class EnrichedSignal:
     atr: float
     volatility_mode: str
     basis: float
+    
+    # 🔥 НОВОЕ: Параметры гибридного исполнения (обратно совместимые)
+    order_type: str = "limit"  # "limit" или "market"
+    execution_params: dict = field(default_factory=dict)
 
 
 class WallFadeStrategyV3:
