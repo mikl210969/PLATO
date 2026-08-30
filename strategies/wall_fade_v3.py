@@ -1,13 +1,11 @@
-"""WallFade Strategy v3 — С интеграцией Confidence Score от детекторов и HVN-якорем."""
+"""WallFade Strategy v3 — С интеграцией Confidence Score от детекторов, HVN-якорем и BTC-фильтром."""
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
-
-from dataclasses import dataclass, field
 
 @dataclass
 class EnrichedSignal:
@@ -25,7 +23,7 @@ class EnrichedSignal:
     volatility_mode: str
     basis: float
     
-    # 🔥 НОВОЕ: Параметры гибридного исполнения (обратно совместимые)
+    # 🔥 Параметры гибридного исполнения (обратно совместимые)
     order_type: str = "limit"  # "limit" или "market"
     execution_params: dict = field(default_factory=dict)
 
@@ -42,16 +40,27 @@ class WallFadeStrategyV3:
         self._recent_detector_events: List[Dict[str, Any]] = []
         self._events_window_sec = 30.0
         self._event_bus = None
+        
+        # 🔥 НОВОЕ: Состояние тренда BTC (по умолчанию FLAT)
+        self.btc_trend = "FLAT"
 
     def subscribe_to_events(self, event_bus):
         """Подписка на события детекторов."""
         self._event_bus = event_bus
-        event_bus.subscribe("WHALE_BUY", self._on_whale_event)
-        event_bus.subscribe("WHALE_SELL", self._on_whale_event)
-        event_bus.subscribe("WHALE_CLUSTER", self._on_whale_event)
-        event_bus.subscribe("WALL_DETECTED", self._on_wall_event)
-        event_bus.subscribe("WALL_CONFIRMED", self._on_wall_event)
-        logger.info("✅ WallFadeV3 subscribed to detector events")
+        self._event_bus.subscribe("WHALE_BUY", self._on_whale_event)
+        self._event_bus.subscribe("WHALE_SELL", self._on_whale_event)
+        self._event_bus.subscribe("WHALE_CLUSTER", self._on_whale_event)
+        self._event_bus.subscribe("WALL_DETECTED", self._on_wall_event)
+        self._event_bus.subscribe("WALL_CONFIRMED", self._on_wall_event)
+        
+        # 🔥 НОВОЕ: Подписка на контекст BTC
+        self._event_bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
+        
+        logger.info("✅ WallFadeV3 subscribed to detector events & BTC_CONTEXT_UPDATED")
+
+    async def _on_btc_context_updated(self, event):
+        """Обновляет локальное состояние тренда BTC при поступлении события."""
+        self.btc_trend = event.payload.get("trend", "FLAT")
 
     async def _on_whale_event(self, event):
         """Обработчик событий от WhaleDetector."""
@@ -187,6 +196,7 @@ class WallFadeStrategyV3:
                 
                 # Пока стратегия настроена на short, логика универсальна
                 is_short = True 
+                signal_side = "short"
                 
                 if is_short and trend_data.get('is_continuation_for_short'):
                     trade_type = "CONTINUATION (Short in Downtrend)"
@@ -209,7 +219,7 @@ class WallFadeStrategyV3:
                 base_confidence = 0.50
                 base_confidence += 0.25  # Бонус за наличие стены
                 
-                # ✅ ВОТ ЭТА СТРОКА (нужна!): бонус за хорошее соотношение R:R
+                # ✅ Бонус за хорошее соотношение R:R
                 if rr_ratio >= 2.0:
                     base_confidence += 0.10
                 
@@ -228,12 +238,20 @@ class WallFadeStrategyV3:
                 
                 logger.info(f"🎯 [WallFadeV3] Trade Type: {trade_type} | Base: {base_confidence:.2f} | Detector Boost: +{detector_boost:.2f} | Final: {final_confidence:.2f}")
                 
+                # ========================================================================
+                # 🔥 ЭТАП 3: СВЕТОФОР (BTC Correlation Filter)
+                # Блокируем сигналы, идущие против сильного тренда BTC
+                # ========================================================================
+                if signal_side == 'short' and self.btc_trend == 'UP':
+                    logger.info(f"🚦 [BTC FILTER] WallFade SHORT сигнал отклонен. BTC тренд: {self.btc_trend}")
+                    return None
+
                 self._last_signal_time = now
                 
                 return EnrichedSignal(
                     signal_id=f"WallFadeV3_{symbol}_{int(now)}",
                     symbol=symbol,
-                    side="short",
+                    side=signal_side,
                     entry_price=entry_price,
                     strategy="WallFadeV3",
                     confidence=final_confidence,

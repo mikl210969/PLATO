@@ -21,14 +21,23 @@ class AbsorptionStrategyV2:
         self._last_absorption_event: Optional[Dict[str, Any]] = None
         self._event_valid_for_sec = 5.0  # Сигнал актуален только 5 секунд после события
         
+        # 🔥 НОВОЕ: Состояние тренда BTC (по умолчанию FLAT)
+        self.btc_trend = "FLAT"        
         self._event_bus = None
 
     def subscribe_to_events(self, event_bus):
         """Подписка на события детектора поглощения."""
         self._event_bus = event_bus
-        event_bus.subscribe("ABSORPTION_DETECTED", self._on_absorption_event)
-        # Можно оставить logger.info, он будет писать в файл логов, даже если не всегда виден в консоли
-        logger.info("✅ AbsorptionStrategyV2 subscribed to ABSORPTION_DETECTED")
+        self._event_bus.subscribe("ABSORPTION_DETECTED", self._on_absorption_event)
+        
+        # 🔥 ИСПРАВЛЕНО: используем self._event_bus вместо self.bus (была опечатка)
+        self._event_bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
+        
+        logger.info("✅ AbsorptionStrategyV2 subscribed to ABSORPTION_DETECTED & BTC_CONTEXT_UPDATED")
+
+    async def _on_btc_context_updated(self, event):
+        """Обновляет локальное состояние тренда BTC при поступлении события."""
+        self.btc_trend = event.payload.get("trend", "FLAT")
 
     async def _on_absorption_event(self, event):
         """Сохраняем событие, когда детектор его находит."""
@@ -85,6 +94,18 @@ class AbsorptionStrategyV2:
             return None
 
         # ========================================================================
+        # 🔥 ЭТАП 3: СВЕТОФОР (BTC Correlation Filter)
+        # Блокируем сигналы, идущие против сильного тренда BTC
+        # ========================================================================
+        if signal_side == 'long' and self.btc_trend == 'DOWN':
+            logger.info(f"🚦 [BTC FILTER] Absorption LONG сигнал отклонен. BTC тренд: {self.btc_trend}")
+            return None
+            
+        if signal_side == 'short' and self.btc_trend == 'UP':
+            logger.info(f"🚦 [BTC FILTER] Absorption SHORT сигнал отклонен. BTC тренд: {self.btc_trend}")
+            return None
+
+        # ========================================================================
         # РАСЧЕТ УРОВНЕЙ (Entry, SL, TP) на основе ATR
         # ========================================================================
         entry_price = round(current_price, 2)
@@ -121,7 +142,7 @@ class AbsorptionStrategyV2:
         
         self._last_signal_time = now
         
-        logger.info(f"🚀 [AbsorptionStrat] SIGNAL GENERATED: {signal_side.upper()} | Entry: {entry_price} | SL: {sl_price} | TP1: {tp1_price} | Conf: {final_confidence:.2f}")
+        logger.info(f"🚀 [AbsorptionStrat] SIGNAL GENERATED: {signal_side.upper()} | Entry: {entry_price} | SL: {sl_price} | TP1: {tp1_price} | Conf: {final_confidence:.2f} | BTC_Trend: {self.btc_trend}")
 
         return EnrichedSignal(
             signal_id=f"AbsorptionV2_{symbol}_{int(now)}",

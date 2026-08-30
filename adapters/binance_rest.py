@@ -528,6 +528,24 @@ class BinanceRestClient:
             print(f"⚠️ [REST] Failed to get order status: {e}")
             return None
 
+    async def get_exchange_info(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Получить информацию о торговых правилах биржи.
+        Если symbol указан, запрашиваем только его (это намного быстрее и исключает таймауты).
+        """
+        params = {}
+        if symbol:
+            params['symbol'] = symbol.upper()
+            
+        try:
+            # Передаем params, чтобы Binance вернул данные только по нужной паре
+            result = await self._request('GET', '/fapi/v1/exchangeInfo', params, signed=False)
+            return result
+        except Exception as e:
+            error_details = str(e) if str(e) else repr(e)
+            self.logger.error(f"⚠️ [REST] Failed to get exchange info: {error_details}")
+            return {}
+
     async def get_klines(self, symbol: str, interval: str = "1m", limit: int = 100) -> list:
         """
         Получение исторических свечей с Binance Spot REST API.

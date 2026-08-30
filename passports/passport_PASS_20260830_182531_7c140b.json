@@ -1,0 +1,31 @@
+{
+  "passport_id": "PASS_20260830_182531_7c140b",
+  "symbol": "SOLUSDT",
+  "status": "FAILED",
+  "signal_id": "AbsorptionV2_SOLUSDT_1788114331",
+  "strategy": "AbsorptionV2",
+  "side": "short",
+  "entry_price": 106.38,
+  "confidence": 0.85,
+  "sl_price": 106.63,
+  "tp1_price": 106.13,
+  "tp2_price": 105.88,
+  "position_size": 0.0,
+  "position_entry_price": 0.0,
+  "orders": [],
+  "created_at": "2026-08-30T18:25:31.754266+00:00",
+  "updated_at": "2026-08-30T18:26:33.523844+00:00",
+  "closed_at": null,
+  "timeline": [
+    {
+      "timestamp": "2026-08-30T18:26:33.523844+00:00",
+      "event": "STATUS: FAILED",
+      "details": ""
+    }
+  ],
+  "exit_reason": "",
+  "exit_price": 0.0,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "net_pnl": 0.0
+}

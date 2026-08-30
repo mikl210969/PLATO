@@ -33,8 +33,10 @@ from trading.order_verifier import OrderVerifier
 
 from strategies.wall_fade_v3 import WallFadeStrategyV3
 from strategies.absorption_v2 import AbsorptionStrategyV2
-from strategies.breakout_v1 import BreakoutStrategyV1  # 🔥 НОВОЕ
+from strategies.breakout_v1 import BreakoutStrategyV1
+from extensions.analytics.btc_context_monitor import BtcContextMonitor  # 🔥 НОВОЕ
 
+from extensions.risk.position_sizer import PositionSizer
 
 logger = get_logger(__name__)
 
@@ -69,7 +71,7 @@ class Platform:
         self.passport_manager = PassportManager()
         self.passport_repository = PassportRepository()
 
-        # 4. REST и WS клиенты (сначала, так как нужны для AnalyticsHub)
+        # 4. REST и WS клиенты
         self.rest = BinanceRestClient(
             api_key=api_key,
             api_secret=api_secret,
@@ -82,28 +84,34 @@ class Platform:
         self.ws.set_json_logger(self.json_logger)
         self.router = ChannelRouter(self.ws, self.rest)
 
-        # 🔥 НОВОЕ: 5. Analytics Hub (Инкапсулирует SpotPrice, Volatility, Delta, Imbalance, Trend, Absorption)
+        # 5. Analytics Hub
         from core.analytics_hub import AnalyticsHub
         self.analytics = AnalyticsHub(self.bus, self.symbol, self.rest)
-        
-        # Для обратной совместимости со старым кодом
         self.volatility_filter = self.analytics.volatility 
 
         # 6. StateManager
         self.state_manager = StateManager(self.passport_manager)
 
-        # 7. Оркестратор
+        # ========================================================================
+        # 🔥 7. НОВОЕ: PositionSizer (Создаем ПЕРЕД Orchestrator)
+        # ========================================================================
+        from extensions.risk.position_sizer import PositionSizer
+        self.position_sizer = PositionSizer(rest_client=self.rest)
+        logger.info("✅ PositionSizer initialized")
+
+        # 8. Оркестратор (теперь безопасно получает self.position_sizer)
         self.orchestrator = Orchestrator(
             config=self.config,
             event_bus=self.bus,
             passport_manager=self.passport_manager,
             passport_repository=self.passport_repository,
             state_manager=self.state_manager,
-            json_logger=self.json_logger
+            json_logger=self.json_logger,
+            position_sizer=self.position_sizer  # ✅ Передаем сайзер
         )
         logger.info("✅ Orchestrator initialized")
 
-        # 8. Трейдер
+        # 9. Трейдер
         self.trader = Trader(
             symbol=self.symbol,
             rest_client=self.rest,
@@ -113,7 +121,7 @@ class Platform:
         )
         self.orchestrator.register_trader(self.symbol, self.trader)
 
-        # 9. LifecycleManager
+        # 10. LifecycleManager
         self.lifecycle_manager = LifecycleManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
@@ -122,7 +130,7 @@ class Platform:
         )
         logger.info("✅ LifecycleManager initialized")
 
-        # 10. RiskManager
+        # 11. RiskManager
         self.risk_manager = RiskManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
@@ -133,16 +141,18 @@ class Platform:
         self.orchestrator.set_risk_manager(self.risk_manager)
         logger.info("✅ RiskManager initialized and set in Orchestrator")
 
-        # 11. OrderVerifier
+        # 12. OrderVerifier
         self.verifier = OrderVerifier(
             rest_client=self.rest,
             event_bus=self.bus,
-            poll_interval=3.0,
+            poll_interval=5.0,
             max_attempts=20
         )
         logger.info("✅ OrderVerifier initialized")
 
-        # 12. DriftMonitor
+        # ========================================================================
+        # 🔥 13. НОВОЕ: DriftMonitor (ВОССТАНОВЛЕНО: создаем ПЕРЕД передачей в Orchestrator)
+        # ========================================================================
         from trading.drift_monitor import DriftMonitor
         self.drift_monitor = DriftMonitor(
             rest_client=self.rest,
@@ -157,30 +167,39 @@ class Platform:
         self.orchestrator.set_verifier(self.verifier)
         logger.info("✅ DriftMonitor and OrderVerifier set in Orchestrator")
 
-        # 13. Стратегии
+        # 14. Стратегии
         strategies_config = self.config.get('strategies', {})
         
-        self.wall_fade = WallFadeStrategyV3(
-            strategies_config.get('wall_fade', {}), 
-            atr_value=0.5
-        )
+        self.wall_fade = WallFadeStrategyV3(strategies_config.get('wall_fade', {}), atr_value=0.5)
         self.wall_fade.subscribe_to_events(self.bus)
 
-        # 🔥 НОВОЕ: Стратегия поглощения
-        self.absorption = AbsorptionStrategyV2(
-            strategies_config.get('absorption', {}),
-            atr_value=0.5
-        )
+        self.absorption = AbsorptionStrategyV2(strategies_config.get('absorption', {}), atr_value=0.5)
         self.absorption.subscribe_to_events(self.bus)
 
-        # 🔥 НОВОЕ: Стратегия пробоя
-        self.breakout = BreakoutStrategyV1(
-            strategies_config.get('breakout', {}),
-            atr_value=0.5
-        )
+        self.breakout = BreakoutStrategyV1(strategies_config.get('breakout', {}), atr_value=0.5)
         self.breakout.subscribe_to_events(self.bus)        
 
-        # 14. Extensions (Safe Bootstrap)
+        # ========================================================================
+        # 🔥 15. НОВОЕ: BTC Context Monitor
+        # ========================================================================
+        from extensions.analytics.btc_context_monitor import BtcContextMonitor
+        self.btc_monitor = BtcContextMonitor(
+            event_bus=self.bus,
+            window_seconds=300,
+            publish_interval=5.0
+        )
+        
+        # Подписчик для логирования BTC-контекста в консоль
+        async def log_btc_context(event):
+            payload = event.payload
+            logger.info(
+                f"📊 [BTC CONTEXT] Trend: {payload.get('trend'):<5} | "
+                f"Delta: {payload.get('delta_strength'):>8} | "
+                f"Price: {payload.get('current_price')}"
+            )
+        self.bus.subscribe("BTC_CONTEXT_UPDATED", log_btc_context)
+
+        # 16. Extensions (Safe Bootstrap)
         from extensions.bootstrap import init_extensions_safe
         self.extensions = init_extensions_safe(self.bus, self.symbol)
         if self.extensions:
@@ -188,7 +207,7 @@ class Platform:
         else:
             logger.warning("⚠️ Extensions failed to initialize, running in Core-only mode")
 
-        # 15. Shadow Advanced Risk Evaluator
+        # 17. Shadow Advanced Risk Evaluator
         from extensions.risk.advanced_risk_service import AdvancedRiskService
         self.shadow_risk = AdvancedRiskService(
             basis_monitor=self.extensions.basis if (hasattr(self, 'extensions') and self.extensions) else None,
@@ -362,10 +381,26 @@ class Platform:
                     )
             except Exception as e:
                 logger.error(f"Error processing depth update: {e}")
+
         self.ws.on("depthUpdate", on_depth_update)
+
+        # ========================================================================
+        # 🔥 НОВОЕ: МОСТИК для событий BTC в EventBus (чтобы BtcContextMonitor их видел)
+        # ========================================================================
+        async def on_btc_agg_trade(data):
+            await self.bus.publish(
+                event_type="BTC_AGG_TRADE",
+                source="ws_adapter",
+                payload=data,
+                symbol="BTCUSDT"
+            )
+        self.ws.on("BTC_AGG_TRADE", on_btc_agg_trade)
 
         await self.ws.subscribe_user_data(listen_key)
         logger.info(f"✅ User data stream subscribed: {listen_key[:10]}...")
+
+        # 🔥 НОВОЕ: Подписка на потоки BTC для контекстного анализа
+        await self.ws.subscribe_btc_streams()
 
         # ===== Фоновые задачи =====
         async def user_data_health_check():
@@ -555,6 +590,10 @@ class Platform:
 
     async def run(self):
         logger.info("🚀 Starting platform...")
+        
+        # 🔥 НОВОЕ: Запуск BTC монитора
+        await self.btc_monitor.start()
+        
         await self.orchestrator.start()
         await self._main_loop()
 
@@ -588,6 +627,12 @@ class Platform:
         
         await self.orchestrator.stop()
 
+        if hasattr(self, 'btc_monitor'):
+            try:
+                await self.btc_monitor.stop()
+            except Exception as e:
+                logger.error(f"Error stopping BtcContextMonitor: {e}")
+                
         if hasattr(self, 'drift_monitor'):
             try:
                 await self.drift_monitor.stop()

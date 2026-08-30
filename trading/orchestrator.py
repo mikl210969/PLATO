@@ -1,28 +1,36 @@
 import asyncio
 from typing import Dict, Any, Optional
+
 from .event_handlers import EventHandlersMixin
 from .monitor import MonitorMixin
 from .recovery import RecoveryMixin
-from .position_monitor import PositionMonitor  # 🔥 Добавляем импорт
+from .position_monitor import PositionMonitor
+# 🔥 НОВОЕ: Импортируем PositionSizer для корректной типизации
+from extensions.risk.position_sizer import PositionSizer
+
 
 class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMonitor):
     """Главный оркестратор платформы. Координирует модули через миксины."""
 
     def __init__(
-        self, 
-        config: Dict[str, Any], 
-        event_bus, 
-        passport_manager, 
-        passport_repository,  
-        state_manager, 
-        json_logger
+        self,
+        config: Dict[str, Any],
+        event_bus,
+        passport_manager,
+        passport_repository,
+        state_manager,
+        json_logger=None,
+        position_sizer: Optional[PositionSizer] = None
     ):
         self.config = config
         self.bus = event_bus
         self.passport_manager = passport_manager
-        self.repository = passport_repository  
+        self.repository = passport_repository
         self.state_manager = state_manager
         self.json_logger = json_logger
+        
+        # 🔥 ИСПРАВЛЕНИЕ: Явно указываем тип Optional, чтобы Pylance разрешил присвоение None
+        self.position_sizer: Optional[PositionSizer] = position_sizer 
         
         # Менеджеры (будут установлены из main.py)
         self.risk_manager = None
@@ -34,7 +42,7 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
         # 🔥 Инициализация всех миксинов
         EventHandlersMixin.__init__(self)
         MonitorMixin.__init__(self)
-        PositionMonitor.__init__(self)  # 🔥 Добавляем инициализацию PositionMonitor
+        PositionMonitor.__init__(self)
         
         self._subscribe_to_events()
 

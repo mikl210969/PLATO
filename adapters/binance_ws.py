@@ -24,9 +24,7 @@ class BinanceWsAdapter:
         self._on_reconnect: Optional[Callable[[], Awaitable[None]]] = None
         
         # 🔥 Ключевой элемент стабильности: очередь сообщений. 
-        # maxsize=1000 предотвращает утечку памяти, если обработка вдруг встанет.
         self._message_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
-        
         self.logger = get_logger(__name__)
 
     def set_json_logger(self, json_logger):
@@ -40,7 +38,6 @@ class BinanceWsAdapter:
         """Подключиться к WebSocket с повторными попытками."""
         for attempt in range(retries):
             try:
-                # Безопасно закрываем старый сокет, если он "висит"
                 if self._ws is not None:
                     try:
                         await self._ws.close()
@@ -49,7 +46,6 @@ class BinanceWsAdapter:
                 
                 self.logger.info(f"Connecting to {self.base_url} (attempt {attempt+1}/{retries})")
                 
-                # 🔥 Явные таймауты. Библиотека websockets сама шлет protocol ping каждые 20с.
                 self._ws = await websockets.connect(
                     self.base_url,
                     ping_interval=20,
@@ -62,7 +58,6 @@ class BinanceWsAdapter:
                 self._healthy = True
                 self.logger.info("✅ WebSocket connected")
                 
-                # 🔥 Вызываем колбэк переподписки ПОСЛЕ успешного установления соединения
                 if self._on_reconnect:
                     await self._on_reconnect()
                 return
@@ -99,15 +94,24 @@ class BinanceWsAdapter:
             self.logger.warning(f"Failed to subscribe to depth: {e}")
             self._connected = False
 
-    async def run(self):
-        """
-        Запускает два независимых цикла: 
-        1. Чтение из сети (Producer) - всегда быстрый.
-        2. Обработка сообщений (Consumer) - может быть медленным, это безопасно.
-        """
-        self._running = True
+    async def subscribe_btc_streams(self):
+        """Подписка на агрегированные сделки и стакан BTCUSDT для контекстного анализа."""
+        if not self._connected or self._ws is None:
+            self.logger.warning("Cannot subscribe to BTC: WebSocket not connected")
+            return
         
-        # 🔥 Запускаем обработчик в отдельной фоновой задаче
+        streams = ["btcusdt@aggTrade", "btcusdt@depth@100ms"]
+        msg = {"method": "SUBSCRIBE", "params": streams, "id": id(self) + 99}
+        
+        try:
+            await self._ws.send(json.dumps(msg))
+            self.logger.info("✅ Subscribed to BTCUSDT streams (aggTrade, depth@100ms)")
+        except Exception as e:
+            self.logger.warning(f"Failed to subscribe to BTC streams: {e}")
+            self._connected = False
+
+    async def run(self):
+        self._running = True
         processor_task = asyncio.create_task(self._process_queue())
         
         try:
@@ -118,7 +122,6 @@ class BinanceWsAdapter:
                     continue
 
                 try:
-                    # 🔥 ЧТЕНИЕ: Это ВСЕГДА быстро (< 1мс). Сетевой стек свободен для Ping/Pong.
                     message = await asyncio.wait_for(self._ws.recv(), timeout=30.0)
                     await self._message_queue.put(message)
                     self._healthy = True
@@ -140,10 +143,9 @@ class BinanceWsAdapter:
                     
         finally:
             self._running = False
-            processor_task.cancel() # Останавливаем обработчик при выходе
+            processor_task.cancel()
 
     async def _process_queue(self):
-        """Обрабатывает сообщения из очереди. Может быть медленным, это безопасно."""
         while self._running:
             try:
                 message = await self._message_queue.get()
@@ -156,102 +158,66 @@ class BinanceWsAdapter:
                 self.logger.error(f"Error processing message from queue: {e}")
 
     async def _handle_message(self, data: Dict):
-        """Логика обработки (теперь она гарантированно не блокирует сеть)."""
+        """Логика обработки с маршрутизацией по символам."""
         event_type = data.get('e', 'UNKNOWN')
+        symbol = data.get('s', '')
 
         # 🔥 1. ФИЛЬТР ШУМА
         if event_type == 'UNKNOWN' or ('id' in data and 'result' in data):
             return
 
-        # 🔥 2. УСЕЧЕНИЕ PAYLOAD для логирования
+        # 🔥 2. МАРШРУТИЗАЦИЯ ПО СИМВОЛАМ И СОБЫТИЯМ
+        if event_type == 'aggTrade':
+            if symbol == 'BTCUSDT':
+                await self._route_event('BTC_AGG_TRADE', data)
+                
+        elif event_type == 'depthUpdate':
+            if symbol == 'BTCUSDT':
+                await self._route_event('BTC_DEPTH_UPDATE', data)
+            else:
+                await self._route_event('depthUpdate', data)
+
+        elif event_type == 'ORDER_TRADE_UPDATE':
+            await self._route_event('ORDER_TRADE_UPDATE', data)
+
+        elif event_type == 'ACCOUNT_UPDATE':
+            await self._route_event('ACCOUNT_UPDATE', data)
+
+        elif event_type == 'listenKeyExpired':
+            await self._route_event('listenKeyExpired', data)
+
+    async def _route_event(self, event_type: str, data: Dict):
+        """Вспомогательный метод для логирования и вызова хендлера."""
         log_data = data
         if event_type == 'ORDER_TRADE_UPDATE' and 'o' in data:
             o = data['o']
             log_data = {
-                "symbol": o.get('s'),
-                "client_order_id": o.get('c'),
-                "side": o.get('S'),
-                "type": o.get('o'),
-                "status": o.get('X'),
-                "quantity": o.get('q'),
-                "price": o.get('ap') or o.get('p'),
-                "position_side": o.get('ps')
+                "symbol": o.get('s'), "client_order_id": o.get('c'), "status": o.get('X')
             }
 
-        # 🔥 3. Логируем в JSON
-        if self._json_logger and event_type in ['ORDER_TRADE_UPDATE', 'ACCOUNT_UPDATE', 'listenKeyExpired', 'depthUpdate']:
+        if self._json_logger and event_type in ['ORDER_TRADE_UPDATE', 'ACCOUNT_UPDATE', 'listenKeyExpired', 'depthUpdate', 'BTC_DEPTH_UPDATE', 'BTC_AGG_TRADE']:
             self._json_logger.log(module="ws", event=event_type, data=log_data, level="DEBUG")
 
-        # 🔥 4. Вывод в терминал
-        important_events = ['ORDER_TRADE_UPDATE', 'ACCOUNT_UPDATE']
-        if event_type in important_events:
-            extra_info = ""
-            if event_type == 'ORDER_TRADE_UPDATE' and 'o' in data:
-                extra_info = f" | {data['o'].get('c')} | {data['o'].get('X')}"
-            print(f"📥 [WS_EVENT] {event_type}{extra_info}")
+        if event_type in ['ORDER_TRADE_UPDATE', 'ACCOUNT_UPDATE']:
+            extra = f" | {data['o'].get('c')} | {data['o'].get('X')}" if 'o' in data else ""
+            print(f"📥 [WS_EVENT] {event_type}{extra}")
 
-        # ===== МАРШРУТИЗАЦИЯ =====
-        if event_type == 'ORDER_TRADE_UPDATE':
-            order_data = data.get('o', {})
-            payload = {
-                'order_id': order_data.get('i'),
-                'client_order_id': order_data.get('c'),
-                'symbol': order_data.get('s'),
-                'side': order_data.get('S'),
-                'status': order_data.get('X'),
-                'price': float(order_data.get('p', 0) or order_data.get('ap', 0)),
-                'quantity': float(order_data.get('q', 0)),
-                'executed_qty': float(order_data.get('z', 0)),
-                'update_time': data.get('E', 0),
-                'dedup_key': f"OTU:{order_data.get('i')}:{order_data.get('X')}:{order_data.get('z')}:{data.get('E', 0)}",
-            }
-            handler = self._handlers.get('ORDER_TRADE_UPDATE')
-            if handler:
-                await handler(payload)
-
-        elif event_type == 'ACCOUNT_UPDATE':
-            account_data = data.get('a', {})
-            positions = account_data.get('P', [])
-            for pos in positions:
-                payload = {
-                    'symbol': pos.get('s'),
-                    'size': float(pos.get('pa', 0)),
-                    'entry_price': float(pos.get('ep', 0)),
-                    'unrealized_pnl': float(pos.get('up', 0))
-                }
-                handler = self._handlers.get('ACCOUNT_UPDATE')
-                if handler:
-                    await handler(payload)
-
-        elif event_type == 'depthUpdate':
-            handler = self._handlers.get('depthUpdate')
-            if handler:
+        handler = self._handlers.get(event_type)
+        if handler:
+            try:
                 await handler(data)
+            except Exception as e:
+                self.logger.error(f"Error in handler for {event_type}: {e}")
 
     def is_healthy(self) -> bool:
-        """Вернуть статус здоровья WS."""
         return self._healthy and self._connected
 
-    # ========================================================================
-    # НОВЫЙ МЕТОД: Подписка на спотовые сделки (Spot AggTrades)
-    # ========================================================================
     async def subscribe_spot_agg_trade(self, symbol: str, callback):
-        """
-        Подписка на поток спотовых сделок (aggTrade) для Whale/Spoofing детекторов.
-        Использует отдельное публичное WS-подключение к спотовому рынку Binance.
-        """
         import logging
-        import json
-        import asyncio
-        import websockets
-        
-        # Локальный логгер, чтобы не зависеть от импортов в начале файла
         logger = logging.getLogger(__name__)
         spot_url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@aggTrade"
-        
         logger.info(f"🔄 Connecting to SPOT aggTrade stream: {spot_url}")
         
-        # Цикл с автоматическим переподключением
         while getattr(self, '_running', True):
             try:
                 async with websockets.connect(spot_url, ping_interval=20, ping_timeout=20) as ws:
@@ -259,37 +225,22 @@ class BinanceWsAdapter:
                     async for message in ws:
                         try:
                             data = json.loads(message)
-                            # Нормализуем формат под наш DetectorBridge
                             normalized_data = {
-                                "e": "aggTrade",
-                                "s": data.get("s"),
-                                "p": data.get("p"),
-                                "q": data.get("q"),
-                                "m": data.get("m"),  # m=True значит продавец был мейкером (агрессор - BUY)
-                                "T": data.get("T")
+                                "e": "aggTrade", "s": data.get("s"), "p": data.get("p"),
+                                "q": data.get("q"), "m": data.get("m"), "T": data.get("T")
                             }
-                            # Вызываем переданный callback (аналогично тому, как работает self.on в main.py)
                             if callback:
                                 await callback("MARKET_TRADE", normalized_data)
                         except Exception as e:
                             logger.error(f"Error processing spot trade: {e}")
             except Exception as e:
-                logger.warning(f"⚠️ Spot WS connection lost or failed: {e}. Reconnecting in 5s...")
+                logger.warning(f"⚠️ Spot WS connection lost. Reconnecting in 5s...")
                 await asyncio.sleep(5)
 
     async def subscribe_spot_depth(self, symbol: str, callback):
-        """
-        Подписка на поток спотового стакана (depth@100ms) для расчета имбаланса и поиска стен.
-        Использует отдельное публичное WS-подключение к спотовому рынку Binance.
-        """
         import logging
-        import json
-        import asyncio
-        import websockets
-        
         logger = logging.getLogger(__name__)
         spot_depth_url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@depth@100ms"
-        
         logger.info(f"🔄 Connecting to SPOT depth stream (100ms): {spot_depth_url}")
         
         while getattr(self, '_running', True):
@@ -299,30 +250,20 @@ class BinanceWsAdapter:
                     async for message in ws:
                         try:
                             data = json.loads(message)
-                            
-                            # Нормализуем формат под наш EventBus (аналогично фьючерсам)
-                            # Binance отдает 'b' (bids) и 'a' (asks) как массивы [price, qty]
                             normalized_data = {
-                                "e": "depthUpdate",
-                                "s": symbol.upper(),
-                                "b": data.get("b", []),  # bids
-                                "a": data.get("a", []),  # asks
-                                "E": data.get("E", int(asyncio.get_event_loop().time() * 1000)) # timestamp
+                                "e": "depthUpdate", "s": symbol.upper(),
+                                "b": data.get("b", []), "a": data.get("a", []),
+                                "E": data.get("E", int(asyncio.get_event_loop().time() * 1000))
                             }
-                            
-                            # Вызываем переданный callback
                             if callback:
                                 await callback("SPOT_ORDERBOOK_UPDATE", normalized_data)
-                                
                         except Exception as e:
                             logger.error(f"Error processing spot depth update: {e}")
-                            
             except Exception as e:
-                logger.warning(f"⚠️ Spot Depth WS connection lost or failed: {e}. Reconnecting in 3s...")
+                logger.warning(f"⚠️ Spot Depth WS connection lost. Reconnecting in 3s...")
                 await asyncio.sleep(3)
 
     async def close(self):
-        """Корректное закрытие соединения."""
         self._running = False
         if self._ws is not None:
             try:

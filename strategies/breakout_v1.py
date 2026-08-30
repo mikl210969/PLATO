@@ -28,13 +28,24 @@ class BreakoutStrategyV1:
         self._last_breakout_event: Optional[Dict[str, Any]] = None
         self._event_valid_for_sec = 10.0  # Сигнал актуален 10 секунд
         
+        # 🔥 НОВОЕ: Состояние тренда BTC (по умолчанию FLAT)
+        self.btc_trend = "FLAT"
+        
         self._event_bus = None
 
     def subscribe_to_events(self, event_bus):
         """Подписка на события детектора пробоя."""
         self._event_bus = event_bus
-        event_bus.subscribe("BREAKOUT_OPPORTUNITY", self._on_breakout_event)
-        logger.info("✅ BreakoutStrategyV1 subscribed to BREAKOUT_OPPORTUNITY")
+        self._event_bus.subscribe("BREAKOUT_OPPORTUNITY", self._on_breakout_event)
+        
+        # 🔥 НОВОЕ: Подписка на контекст BTC
+        self._event_bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
+        
+        logger.info("✅ BreakoutStrategyV1 subscribed to BREAKOUT_OPPORTUNITY & BTC_CONTEXT_UPDATED")
+
+    async def _on_btc_context_updated(self, event):
+        """Обновляет локальное состояние тренда BTC при поступлении события."""
+        self.btc_trend = event.payload.get("trend", "FLAT")
 
     async def _on_breakout_event(self, event):
         """Сохраняем событие, когда детектор находит возможность пробоя."""
@@ -123,6 +134,18 @@ class BreakoutStrategyV1:
             return None
 
         # ========================================================================
+        # 🔥 ЭТАП 3: СВЕТОФОР (BTC Correlation Filter)
+        # Блокируем сигналы, идущие против сильного тренда BTC
+        # ========================================================================
+        if signal_side == 'long' and self.btc_trend == 'DOWN':
+            logger.info(f"🚦 [BTC FILTER] Breakout LONG сигнал отклонен. BTC тренд: {self.btc_trend}")
+            return None
+            
+        if signal_side == 'short' and self.btc_trend == 'UP':
+            logger.info(f"🚦 [BTC FILTER] Breakout SHORT сигнал отклонен. BTC тренд: {self.btc_trend}")
+            return None
+
+        # ========================================================================
         # 3. АНАЛИЗ ЛИКВИДНОСТИ ЗА СТЕНОЙ
         # ========================================================================
         liquidity_behind_wall = self._analyze_liquidity_behind_wall(
@@ -208,7 +231,7 @@ class BreakoutStrategyV1:
             f"🚀 [BreakoutStrat] SIGNAL: {signal_side.upper()} | "
             f"Entry: {entry_price} | SL: {sl_price} | TP1: {tp1_price} | "
             f"R:R: {rr_ratio:.1f} | Conf: {final_confidence:.2f} | "
-            f"Order: {order_type.upper()} | Type: {trade_type}"
+            f"Order: {order_type.upper()} | Type: {trade_type} | BTC: {self.btc_trend}"
         )
 
         return EnrichedSignal(
