@@ -66,7 +66,8 @@ class DriftMonitor:
         Проверить дрейф для одного символа.
         Сравнивает:
         1. Позиция на бирже vs локальный активный паспорт
-        2. Открытые ордера на бирже vs локальные ордера в нетерминальных статусах
+        2. 🔥 НОВОЕ: Принудительное восстановление при потерянном WS-событии FILLED
+        3. Открытые ордера на бирже vs локальные ордера в нетерминальных статусах
         """
         try:
             # Получаем данные с биржи
@@ -83,7 +84,7 @@ class DriftMonitor:
             if local_passport:
                 local_position_size = abs(local_passport.position_size or 0.0)
             
-            # Проверка 1: Расхождение позиции
+            # Проверка 1: Расхождение позиции (позиция есть, паспорта нет)
             if exchange_position_size > 0.01 and not local_passport:
                 self.logger.warning(
                     f"⚠️ [DRIFT_DETECTED] Position on exchange ({exchange_position_size}) "
@@ -95,6 +96,7 @@ class DriftMonitor:
                 })
                 return
             
+            # Проверка 1.1: Расхождение позиции (паспорт есть, позиции нет)
             if local_passport and exchange_position_size < 0.01 and local_position_size > 0.01:
                 self.logger.warning(
                     f"⚠️ [DRIFT_DETECTED] Local passport ({local_position_size}) "
@@ -106,7 +108,44 @@ class DriftMonitor:
                 })
                 return
             
-            # Проверка 2: Локальные ордера в нетерминальных статусах должны быть на бирже
+            # ========================================================================
+            # 🔥 ПРОВЕРКА 2: Принудительное восстановление (Force Sync)
+            # Сценарий: Ордер исполнился, но событие WebSocket было потеряно (обрыв связи).
+            # Признак: Паспорт существует, статус ORDER_SENT, НО на бирже уже есть позиция > 0.
+            # ========================================================================
+            if local_passport and local_passport.status == 'ORDER_SENT' and exchange_position_size > 0.01:
+                self.logger.warning(
+                    f"⚠️ [DRIFT_RECOVERY] Позиция открыта на бирже ({exchange_position_size}), "
+                    f"но паспорт {local_passport.passport_id} застрял в ORDER_SENT. Принудительная синхронизация!"
+                )
+                
+                # 1. Обновляем статус и размер позиции локально
+                local_passport.status = "OPEN"
+                local_passport.position_size = exchange_position_size
+                # Используем entry_price как цену входа, если точная цена исполнения пока неизвестна
+                local_passport.position_entry_price = local_passport.entry_price 
+                
+                # Сохраняем изменения
+                self.passport_manager.update(local_passport)
+                
+                # 2. Публикуем событие, чтобы RiskManager НЕМЕДЛЕННО выставил защиту (SL/TP)
+                await self.bus.publish(
+                    event_type="POSITION_OPENED",
+                    source="drift_monitor_recovery",
+                    payload={
+                        "passport_id": local_passport.passport_id,
+                        "symbol": symbol,
+                        "side": local_passport.side,
+                        "entry_price": local_passport.position_entry_price,
+                        "position_size": exchange_position_size
+                    },
+                    symbol=symbol
+                )
+                
+                self.logger.info(f"✅ [DRIFT_RECOVERY] Паспорт {local_passport.passport_id} успешно синхронизирован и защищен!")
+                return  # Выходим, так как проблема решена, дальнейшие проверки не нужны
+
+            # Проверка 3: Локальные ордера в нетерминальных статусах должны быть на бирже
             if local_passport and local_passport.status in ('ORDER_SENT', 'ORDER_ACK', 'LIMIT_ON_BOOK'):
                 local_order_id = None
                 if local_passport.orders:
