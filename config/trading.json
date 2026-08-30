@@ -1,5 +1,5 @@
 {
-  "risk_per_trade_usdt": 5.0,  
+  "risk_per_trade_usdt": 3.0,  
   "lot_size": 7.0,              
   "entry_order_type": "limit",
   "ttl_seconds": 300,
