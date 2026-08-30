@@ -63,11 +63,13 @@ class Trader:
         Возвращает результат.
         """
         try:
-            # 🔥 ФИКС BINANCE: client_order_id должен быть <= 35 символов. Обрезаем, если нужно.
-            if client_order_id:
-                client_order_id = client_order_id[:35]
-            else:
+            # 🔥 ЖЕСТКАЯ ЗАЩИТА: Проверяем, что ID не пустой и не состоит из одних пробелов
+            if not client_order_id or not client_order_id.strip():
+                # Если ID битый (например, " "), генерируем надежный fallback из passport_id
                 client_order_id = f"ORD_{passport_id}"[:35]
+            else:
+                # Очищаем от пробелов по краям и обрезаем до 35 символов (лимит Binance)
+                client_order_id = client_order_id.strip()[:35]
             
             # Определяем сторону ордера
             order_side = OrderSide.SELL.value if side == 'short' else OrderSide.BUY.value
@@ -75,13 +77,13 @@ class Trader:
             # Hedge Mode: явная сторона позиции, либо вывод из стороны ордера (для входа)
             effective_position_side = position_side or ('SHORT' if side == 'short' else 'LONG')
 
+            # Явное объявление типа для Pylance
+            result: Optional[Dict[str, Any]] = None
+
             if order_type == 'market':
                 result = await self.rest.create_market_order(
-                    symbol=symbol,
-                    side=order_side,
-                    quantity=quantity,
-                    new_client_order_id=client_order_id,
-                    reduce_only=reduce_only,
+                    symbol=symbol, side=order_side, quantity=quantity,
+                    new_client_order_id=client_order_id, reduce_only=reduce_only,
                     position_side=effective_position_side
                 )
             elif order_type == 'limit':
@@ -93,12 +95,8 @@ class Trader:
                         'error': 'Limit price is required for limit order'
                     }
                 result = await self.rest.create_limit_order(
-                    symbol=symbol,
-                    side=order_side,
-                    price=limit_price,
-                    quantity=quantity,
-                    new_client_order_id=client_order_id,
-                    reduce_only=reduce_only,
+                    symbol=symbol, side=order_side, price=limit_price, quantity=quantity,
+                    new_client_order_id=client_order_id, reduce_only=reduce_only,
                     position_side=effective_position_side
                 )
             elif order_type == 'stop_market':
@@ -110,12 +108,8 @@ class Trader:
                         'error': 'Stop price is required for stop_market order'
                     }
                 result = await self.rest.create_stop_market_order(
-                    symbol=symbol,
-                    side=order_side,
-                    stop_price=stop_price,
-                    quantity=quantity,
-                    new_client_order_id=client_order_id,
-                    reduce_only=reduce_only
+                    symbol=symbol, side=order_side, stop_price=stop_price, quantity=quantity,
+                    new_client_order_id=client_order_id, reduce_only=reduce_only
                 )
             elif order_type == 'stop_limit':
                 if stop_price is None or stop_price <= 0 or limit_price is None or limit_price <= 0:
@@ -126,13 +120,8 @@ class Trader:
                         'error': 'Stop and Limit prices are required for stop_limit order'
                     }
                 result = await self.rest.create_stop_limit_order(
-                    symbol=symbol,
-                    side=order_side,
-                    stop_price=stop_price,
-                    limit_price=limit_price,
-                    quantity=quantity,
-                    new_client_order_id=client_order_id,
-                    reduce_only=reduce_only
+                    symbol=symbol, side=order_side, stop_price=stop_price, limit_price=limit_price,
+                    quantity=quantity, new_client_order_id=client_order_id, reduce_only=reduce_only
                 )
             else:
                 return {
@@ -142,7 +131,18 @@ class Trader:
                     'error': f'Unknown order type: {order_type}'
                 }
 
-            # Проверяем результат
+            # 🔥 ИСПРАВЛЕНИЕ ДЛЯ PYLANCE (Early Return):
+            # Если результат пустой или не словарь, сразу выходим.
+            # После этой проверки Pylance будет точно знать, что result - это dict.
+            if not result or not isinstance(result, dict):
+                return {
+                    'success': False, 'order_id': None, 'client_order_id': None,
+                    'status': 'FAILED', 'order_type': order_type.upper(), 'quantity': 0,
+                    'symbol': symbol, 'passport_id': passport_id,
+                    'error': f'Invalid or empty response from REST client: {result}'
+                }
+
+            # Теперь Pylance не будет ругаться на .get()
             if result.get('success'):
                 return {
                     'success': True,
@@ -151,8 +151,7 @@ class Trader:
                     'status': result.get('status', 'NEW'),
                     'order_type': order_type.upper(),
                     'quantity': quantity,
-                    'symbol': symbol,
-                    'passport_id': passport_id,
+                    'symbol': symbol, 'passport_id': passport_id,
                     'error': None
                 }
             else:
@@ -162,6 +161,7 @@ class Trader:
                     'symbol': symbol, 'passport_id': passport_id,
                     'error': result.get('error', 'Unknown error')
                 }
+                
         except Exception as e:
             return {
                 'success': False, 'order_id': None, 'client_order_id': None,
@@ -186,7 +186,11 @@ class Trader:
         if position_side is None:
             try:
                 position = await self.rest.get_position(symbol)
-                size = float(position.get('size', 0) or 0)
+                # 🔥 ИСПРАВЛЕНИЕ ДЛЯ PYLANCE: Проверяем, что position не None
+                if position and isinstance(position, dict):
+                    size = float(position.get('size', 0) or 0)
+                else:
+                    size = 0.0
                 position_side = 'SHORT' if size < 0 else 'LONG'
             except Exception:
                 position_side = 'LONG'
@@ -207,24 +211,33 @@ class Trader:
                 position_side=position_side
             )
             
-            if result.get('success'):
-                return {
-                    'success': True,
-                    'order_id': result.get('order_id'),
-                    'client_order_id': result.get('client_order_id'),
-                    'status': result.get('status', 'NEW'),
-                    'quantity': quantity,
-                    'symbol': symbol,
-                    'exit_reason': exit_reason,
-                    'exit_price': exit_price or result.get('price', 0),
-                    'error': None
-                }
+            # 🔥 ЗАЩИТА ОТ PYLANCE: Проверяем result
+            if result and isinstance(result, dict):
+                if result.get('success'):
+                    return {
+                        'success': True,
+                        'order_id': result.get('order_id'),
+                        'client_order_id': result.get('client_order_id'),
+                        'status': result.get('status', 'NEW'),
+                        'quantity': quantity,
+                        'symbol': symbol,
+                        'exit_reason': exit_reason,
+                        'exit_price': exit_price or result.get('price', 0),
+                        'error': None
+                    }
+                else:
+                    return {
+                        'success': False, 'order_id': None, 'client_order_id': None,
+                        'status': 'FAILED', 'quantity': 0, 'symbol': symbol,
+                        'exit_reason': exit_reason, 'exit_price': 0,
+                        'error': result.get('error', 'Unknown error')
+                    }
             else:
                 return {
                     'success': False, 'order_id': None, 'client_order_id': None,
                     'status': 'FAILED', 'quantity': 0, 'symbol': symbol,
                     'exit_reason': exit_reason, 'exit_price': 0,
-                    'error': result.get('error', 'Unknown error')
+                    'error': f'Invalid response from REST client: {result}'
                 }
         except Exception as e:
             return {

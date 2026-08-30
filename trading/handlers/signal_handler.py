@@ -52,6 +52,25 @@ class SignalHandlerMixin:
             "subscriptions": ["SIGNAL_GENERATED", "ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "POSITION_CLOSED", "SYNC_REQUEST", "TTL_EXPIRED"]
         })
 
+    def _generate_rich_client_order_id(self, symbol: str, strategy: str, passport_id: str) -> str:
+        """
+        Генерирует богатый client_order_id с мета-данными (символ, стратегия, паспорт, время).
+        Формат: {SYMBOL}_{STRATEGY}_{PASSPORT_SHORT}_{TIMESTAMP}
+        Максимум 35 символов (лимит Binance).
+        """
+        # Берем первые 4 символа символа (например, "SOL" из "SOLUSDT")
+        short_symbol = symbol[:4]
+        
+        # Берем первые 10 символов стратегии (например, "Absorption" из "AbsorptionV2")
+        short_strategy = strategy[:10]
+        
+        # Берем последние 8 символов passport_id (например, "1ff4a4" из "PASS_20260829_225901_1ff4a4")
+        short_passport_id = passport_id.split('_')[-1] if '_' in passport_id else passport_id[-8:]
+        
+        # Генерируем ID и жестко обрезаем до 35 символов
+        rich_id = f"{short_symbol}_{short_strategy}_{short_passport_id}_{int(time.time())}"
+        return rich_id[:35]
+
     async def _on_signal(self, event):
         self._log("signal_received", {"event": event.type})
         payload = event.payload
@@ -101,11 +120,30 @@ class SignalHandlerMixin:
         quantity = self.config.get('trading', {}).get('lot_size', 7.0)
         order_type = self.config.get('trading', {}).get('entry_order_type', 'market')
         
-        self._log("sending_order", {"symbol": signal.symbol, "side": signal.side, "quantity": quantity, "order_type": order_type, "limit_price": signal.entry_price if order_type == 'limit' else None})
+        # 🔥 ГЕНЕРАЦИЯ БОГАТОГО client_order_id (строго до 35 символов для Binance)
+        # Пример результата: "SOL_Absorption_1ff4a4_1788044341" (35 символов)
+        rich_client_order_id = self._generate_rich_client_order_id(
+            symbol=signal.symbol,
+            strategy=signal.strategy,
+            passport_id=passport.passport_id
+        )
+        
+        self._log("sending_order", {
+            "symbol": signal.symbol, 
+            "side": signal.side, 
+            "quantity": quantity, 
+            "order_type": order_type, 
+            "limit_price": signal.entry_price if order_type == 'limit' else None,
+            "client_order_id": rich_client_order_id
+        })
 
         result = await trader.execute_order(
-            symbol=signal.symbol, side=signal.side, quantity=quantity, order_type=order_type,
-            client_order_id=signal.signal_id, passport_id=passport.passport_id,
+            symbol=signal.symbol, 
+            side=signal.side, 
+            quantity=quantity, 
+            order_type=order_type,
+            client_order_id=rich_client_order_id,  # 🔥 Передаем богатый ID
+            passport_id=passport.passport_id,
             limit_price=signal.entry_price if order_type == 'limit' else None
         )
 
@@ -116,17 +154,41 @@ class SignalHandlerMixin:
             self.repository.save(passport)
 
             if hasattr(self, 'verifier'):
-                await self.verifier.start_verification(passport_id=passport.passport_id, order_id=str(result.get('order_id', '')), symbol=signal.symbol, client_order_id=signal.signal_id)
+                await self.verifier.start_verification(
+                    passport_id=passport.passport_id, 
+                    order_id=str(result.get('order_id', '')), 
+                    symbol=signal.symbol, 
+                    client_order_id=rich_client_order_id  # 🔥 Передаем богатый ID
+                )
                 self._log("verifier_started_on_send", {"passport_id": passport.passport_id, "order_id": result.get('order_id')})
             
-            passport.add_order({"order_id": result.get('order_id'), "client_order_id": result.get('client_order_id'), "status": result.get('status', 'NEW'), "type": result.get('order_type', 'MARKET'), "side": signal.side, "price": signal.entry_price, "quantity": result.get('quantity', 0)})
+            passport.add_order({
+                "order_id": result.get('order_id'), 
+                "client_order_id": rich_client_order_id,  # 🔥 Сохраняем богатый ID
+                "status": result.get('status', 'NEW'), 
+                "type": result.get('order_type', 'MARKET'), 
+                "side": signal.side, 
+                "price": signal.entry_price, 
+                "quantity": result.get('quantity', 0)
+            })
             self.repository.save(passport)
 
             print(f"🔥 [DEBUG TTL] Конфиг order_type: '{order_type}' (тип: {type(order_type)})")
             if str(order_type).lower() == 'limit':
                 print(f"🔥 [DEBUG TTL] Пытаемся опубликовать PASSPORT_CREATED для {passport.passport_id}")
-                await self.bus.publish(event_type="PASSPORT_CREATED", source="orchestrator", payload={"passport_id": passport.passport_id, "order_type": str(order_type).lower()}, symbol=signal.symbol)
-                print(f"✅ [DEBUG TTL] PASSPORT_CREATED успешно опубликован!")
+                
+                # 🔥 Передаем богатый client_order_id в LifecycleManager
+                await self.bus.publish(
+                    event_type="PASSPORT_CREATED", 
+                    source="orchestrator", 
+                    payload={
+                        "passport_id": passport.passport_id, 
+                        "order_type": str(order_type).lower(),
+                        "client_order_id": rich_client_order_id  # 🔥 Богатый ID
+                    }, 
+                    symbol=signal.symbol
+                )
+                print(f"✅ [DEBUG TTL] PASSPORT_CREATED успешно опубликован! client_order_id: {rich_client_order_id}")
             else:
                 print(f"⚠️ [DEBUG TTL] Пропускаем публикацию PASSPORT_CREATED, так как order_type = '{order_type}' (ожидался 'limit')")
         else:
