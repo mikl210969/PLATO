@@ -51,7 +51,7 @@ class RecoveryManager:
     async def recover(self) -> Dict[str, Any]:
         """
         Основной метод восстановления.
-        Возвращает статистику восстановления.
+        🔥 ИСПРАВЛЕНО: теперь проверяем и CLOSED-паспорта на предмет сиротских позиций.
         """
         self._log("recovery_started", {})
 
@@ -77,20 +77,11 @@ class RecoveryManager:
         for passport in passports:
             self.passport_manager.update(passport)
 
-        # 3. Получаем активные паспорта
+        # 3. Активные паспорта
         active_passports = self.passport_manager.get_active()
         stats["active_passports"] = len(active_passports)
 
-        if not active_passports:
-            self._log("no_active_passports", {})
-            return stats
-
-        self._log("active_passports_found", {
-            "count": len(active_passports),
-            "ids": [p.passport_id for p in active_passports]
-        })
-
-        # 4. Синхронизируем каждый активный паспорт с биржей
+        # 4. Синхронизируем активные паспорта (даже если их нет — не выходим раньше времени!)
         for passport in active_passports:
             try:
                 corrected = await self._sync_passport(passport)
@@ -100,6 +91,42 @@ class RecoveryManager:
             except Exception as e:
                 stats["errors"] += 1
                 self._log("sync_error", {
+                    "passport_id": passport.passport_id,
+                    "error": str(e)
+                })
+
+        # ========================================================================
+        # 🔥 5. НОВОЕ: ПОИСК СИРОТ
+        # Для каждого символа, где НЕТ активного паспорта, берём ПОСЛЕДНИЙ закрытый
+        # паспорт и прогоняем через _sync_passport. Если на бирже жива позиция —
+        # сработает Случай D и паспорт будет повторно открыт (усыновление сироты).
+        # ========================================================================
+        active_symbols = {p.symbol for p in active_passports}
+
+        latest_closed: Dict[str, TradePassport] = {}
+        for p in passports:
+            if p.status == PassportStatus.CLOSED.value and p.symbol not in active_symbols:
+                current = latest_closed.get(p.symbol)
+                if current is None or (p.updated_at or "") > (current.updated_at or ""):
+                    latest_closed[p.symbol] = p
+
+        for symbol, passport in latest_closed.items():
+            try:
+                self._log("orphan_check", {
+                    "symbol": symbol,
+                    "passport_id": passport.passport_id
+                })
+                corrected = await self._sync_passport(passport)
+                if corrected:
+                    stats["corrected"] += 1
+                    self._log("orphan_adopted", {
+                        "symbol": symbol,
+                        "passport_id": passport.passport_id
+                    })
+                stats["synced"] += 1
+            except Exception as e:
+                stats["errors"] += 1
+                self._log("orphan_sync_error", {
                     "passport_id": passport.passport_id,
                     "error": str(e)
                 })

@@ -1,0 +1,64 @@
+{
+  "passport_id": "PASS_20260831_134646_aebf8a",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "WallFadeV3_SOLUSDT_1788184006",
+  "strategy": "WallFadeV3",
+  "side": "short",
+  "entry_price": 102.73,
+  "confidence": 0.9,
+  "sl_price": 102.73,
+  "tp1_price": 102.48,
+  "tp2_price": 102.23,
+  "position_size": 3.5,
+  "position_entry_price": 0.0,
+  "orders": [
+    {
+      "order_id": 4192340372,
+      "client_order_id": "SOLU_WallFadeV3_aebf8a_1788184036",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 102.73,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-08-31T13:46:46.341166+00:00",
+  "updated_at": "2026-08-31T13:47:52.638146+00:00",
+  "closed_at": "2026-08-31T13:52:18.393877+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-08-31T13:47:17.004676+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-08-31T13:47:27.716835+00:00",
+      "event": "STATUS: OPEN",
+      "details": "Order filled"
+    },
+    {
+      "timestamp": "2026-08-31T13:47:52.614993+00:00",
+      "event": "SL_MOVED_TO_BREAKEVEN",
+      "details": {
+        "price": 102.73,
+        "reason": "TP1_HIT"
+      }
+    },
+    {
+      "timestamp": "2026-08-31T13:47:52.638146+00:00",
+      "event": "STATUS: PARTIAL_CLOSE",
+      "details": "Partial close: 3.5"
+    },
+    {
+      "timestamp": "2026-08-31T13:52:18.393877+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "Limit order canceled after TTL. Order ID: 4192340372"
+    }
+  ],
+  "exit_reason": "TTL_EXPIRED",
+  "exit_price": 0.0,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "net_pnl": 0.0
+}

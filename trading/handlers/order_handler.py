@@ -168,34 +168,132 @@ class OrderHandlerMixin:
         self._log("ttl_expired_handler_started", {"passport_id": passport_id, "symbol": symbol, "order_id": order_id})
 
         passport = self.passport_manager.get(passport_id)
-        if not passport: return
-        trader = self.get_trader(symbol)
-        if not trader: return
-
-        if passport.status == "OPEN":
-            self._log("ttl_skip_fully_filled", {"passport_id": passport_id, "status": passport.status})
+        if not passport:
             return
-        elif passport.status == "PARTIALLY_FILLED":
-            cancel_result = await trader.cancel_order(symbol, order_id)
-            if cancel_result.get('success') or cancel_result.get('code') == -2011:
-                passport.timeline.append({"timestamp": datetime.now(timezone.utc).isoformat(), "event": "TTL_EXPIRED_PARTIAL_FILL", "details": f"TTL expired. Position size: {passport.position_size}"})
+        trader = self.get_trader(symbol)
+        if not trader:
+            return
+
+        # ====================================================================
+        # 🔥 РЕКОНСИЛИАЦИЯ С БИРЖЕЙ: перед ЛЮБЫМ решением спрашиваем реальную позицию
+        # ====================================================================
+        exchange_size = 0.0
+        try:
+            pos = await trader.get_position_from_exchange(symbol)
+            exchange_size = abs(float(pos.get('size', 0) or 0)) if pos else 0.0
+        except Exception as e:
+            self._log("ttl_reconciliation_fetch_failed", {"passport_id": passport_id, "error": str(e)})
+
+        local_size = abs(float(passport.position_size or 0))
+        has_live_position = exchange_size > 0.001 or local_size > 0.001
+
+        # ====================================================================
+        # 🔥 СЛУЧАЙ 1: позиция жива → паспорт НЕ закрываем ни при каком статусе
+        # ====================================================================
+        if passport.status in ("OPEN", "PARTIAL_CLOSE", "PARTIALLY_FILLED") or has_live_position:
+            self._log("ttl_skip_position_open", {
+                "passport_id": passport_id,
+                "status": passport.status,
+                "exchange_size": exchange_size,
+                "local_size": local_size,
+            })
+
+            # Best-effort отменяем висящий остаток входного ордера, позицию оставляем под защитой
+            try:
+                await trader.cancel_order(symbol, order_id)
+            except Exception as e:
+                self._log("ttl_cancel_residual_failed", {"passport_id": passport_id, "error": str(e)})
+
+            # Возвращаем паспорт в OPEN, если он застрял в промежуточном статусе
+            if passport.status != "OPEN":
+                passport.status = "OPEN"
+                passport.timeline.append({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "event": "TTL_KEEP_OPEN",
+                    "details": f"TTL expired, but live position detected (exchange={exchange_size}). Passport kept OPEN."
+                })
                 self.repository.save(passport)
-                await self.bus.publish(event_type="POSITION_OPENED", source="lifecycle_manager", payload={"passport_id": passport_id, "symbol": symbol, "side": passport.side, "entry_price": passport.position_entry_price, "position_size": passport.position_size}, symbol=symbol)
+
+            # RiskManager восстановит/удержит guard на позиции
+            await self.bus.publish(
+                event_type="POSITION_OPENED",
+                source="lifecycle_manager",
+                payload={
+                    "passport_id": passport_id,
+                    "symbol": symbol,
+                    "side": passport.side,
+                    "entry_price": passport.position_entry_price,
+                    "position_size": local_size or exchange_size,
+                },
+                symbol=symbol
+            )
+            return
+
+        # ====================================================================
+        # 🔥 СЛУЧАЙ 2: позиции нет нигде → безопасно отменяем и закрываем
+        # ====================================================================
+        cancel_result = await trader.cancel_order(symbol, order_id)
+        if cancel_result.get('success') or cancel_result.get('code') == -2011:
+            await self._close_passport_after_ttl(passport, symbol, order_id)
         else:
-            cancel_result = await trader.cancel_order(symbol, order_id)
-            if cancel_result.get('success') or cancel_result.get('code') == -2011:
-                await self._close_passport_after_ttl(passport, symbol, order_id)
-            else:
-                self._log("ttl_cancel_failed", {"passport_id": passport_id, "error": cancel_result})
+            self._log("ttl_cancel_failed", {"passport_id": passport_id, "error": cancel_result})
 
     async def _close_passport_after_ttl(self, passport, symbol, order_id):
+        # ====================================================================
+        # 🔥 ФИНАЛЬНАЯ ПРЕДОХРАНКА: никогда не закрываем паспорт при живой позиции
+        # ====================================================================
+        try:
+            trader = self.get_trader(symbol)
+            if trader:
+                pos = await trader.get_position_from_exchange(symbol)
+                exchange_size = abs(float(pos.get('size', 0) or 0)) if pos else 0.0
+                if exchange_size > 0.001:
+                    self._log("ttl_close_aborted_position_alive", {
+                        "passport_id": passport.passport_id,
+                        "exchange_size": exchange_size,
+                    })
+                    passport.status = "OPEN"
+                    passport.timeline.append({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "event": "TTL_CLOSE_ABORTED",
+                        "details": f"Passport close aborted: live position {exchange_size} on exchange."
+                    })
+                    self.repository.save(passport)
+                    await self.bus.publish(
+                        event_type="POSITION_OPENED",
+                        source="lifecycle_manager",
+                        payload={
+                            "passport_id": passport.passport_id,
+                            "symbol": symbol,
+                            "side": passport.side,
+                            "entry_price": passport.position_entry_price,
+                            "position_size": exchange_size,
+                        },
+                        symbol=symbol
+                    )
+                    return
+        except Exception as e:
+            self._log("ttl_close_reconciliation_error", {
+                "passport_id": passport.passport_id,
+                "error": str(e)
+            })
+
+        # Позиции нет — закрываем паспорт как раньше
         passport.status = "CLOSED"
         passport.exit_reason = "TTL_EXPIRED"
         passport.closed_at = datetime.now(timezone.utc).isoformat()
-        passport.timeline.append({"timestamp": datetime.now(timezone.utc).isoformat(), "event": "STATUS: CLOSED", "details": f"Limit order canceled after TTL. Order ID: {order_id}"})
+        passport.timeline.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": "STATUS: CLOSED",
+            "details": f"Limit order canceled after TTL. Order ID: {order_id}"
+        })
         self.repository.save(passport)
-        await self.bus.publish(event_type="POSITION_CLOSED", source="lifecycle_manager", payload={"passport_id": passport.passport_id, "symbol": symbol, "exit_reason": "TTL_EXPIRED", "gross_pnl": 0.0}, symbol=symbol)
-
+        await self.bus.publish(
+            event_type="POSITION_CLOSED",
+            source="lifecycle_manager",
+            payload={"passport_id": passport.passport_id, "symbol": symbol, "exit_reason": "TTL_EXPIRED", "gross_pnl": 0.0},
+            symbol=symbol
+        )
     def _calculate_pnl(self, passport, exit_price: float, quantity: float) -> float:
         if not passport.position_entry_price or passport.position_entry_price == 0: return 0.0
         return (passport.position_entry_price - exit_price) * quantity if passport.side == 'short' else (exit_price - passport.position_entry_price) * quantity
