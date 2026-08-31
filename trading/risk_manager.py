@@ -149,43 +149,56 @@ class RiskManager:
     # ============================================================
 
     async def _on_account_update(self, event: Event):
-        payload = event.payload
-        symbol = payload.get('symbol')
-        if not symbol:
+        payload = event.payload or {}
+
+        # 🔥 Поддерживаем оба формата:
+        # 1) плоский {"symbol": ..., "size": ...}
+        # 2) сырой Binance: {"a": {"P": [{"s": ..., "pa": ...}]}}
+        updates = []
+        if payload.get('symbol') and 'size' in payload:
+            updates.append((payload['symbol'], abs(float(payload.get('size', 0) or 0))))
+        else:
+            account = payload.get('a', {}) or {}
+            for pos in (account.get('P', []) or []):
+                sym = pos.get('s')
+                if not sym:
+                    continue
+                updates.append((sym, abs(float(pos.get('pa', 0) or 0))))
+
+        if not updates:
             return
 
-        size = abs(float(payload.get('size', 0)))
+        for symbol, size in updates:
+            for passport_id in list(self._guards.keys()):
+                guard = self._guards[passport_id]
+                if guard['symbol'] != symbol:
+                    continue
 
-        for passport_id in list(self._guards.keys()):
-            guard = self._guards[passport_id]
-            if guard['symbol'] != symbol:
-                continue
+                if size < 0.01:
+                    # Позиция закрыта — защита не нужна
+                    self._guards.pop(passport_id, None)
+                    self._log("guard_removed_zero_position", {
+                        "passport_id": passport_id,
+                        "symbol": symbol
+                    })
+                    continue
 
-            if size < 0.01:
-                # Позиция закрыта — защита не нужна
-                self._guards.pop(passport_id, None)
-                self._log("guard_removed_zero_position", {
-                    "passport_id": passport_id,
-                    "symbol": symbol
-                })
-                continue
-
-            # Синхронизация остатка и флага TP1 из реального размера
-            guard['remaining'] = size
-            if guard['lot'] > 0 and size < guard['lot'] * 0.99 and not guard['tp1_done']:
-                guard['tp1_done'] = True
-                passport = self.passport_manager.get(passport_id)
-                if passport:
-                    be = passport.position_entry_price or passport.entry_price
-                    guard['sl_price'] = be
-                    passport.sl_price = be
-                    passport.add_timeline_event('SL_MOVED_TO_BREAKEVEN', {'price': be, 'reason': 'ACCOUNT_UPDATE_SYNC'})
-                    self.passport_manager.update(passport)
-                self._log("tp1_derived_from_exchange", {
-                    "passport_id": passport_id,
-                    "remaining": size,
-                    "sl_breakeven": be
-                })
+                # Синхронизация остатка и флага TP1 из реального размера
+                guard['remaining'] = size
+                if guard['lot'] > 0 and size < guard['lot'] * 0.99 and not guard['tp1_done']:
+                    guard['tp1_done'] = True
+                    passport = self.passport_manager.get(passport_id)
+                    if passport:
+                        be = passport.position_entry_price or passport.entry_price
+                        guard['sl_price'] = be
+                        passport.sl_price = be
+                        passport.add_timeline_event('SL_MOVED_TO_BREAKEVEN', {'price': be, 'reason': 'ACCOUNT_UPDATE_SYNC'})
+                        self.passport_manager.update(passport)
+                    self._log("tp1_derived_from_exchange", {
+                        "passport_id": passport_id,
+                        "remaining": size,
+                        "sl_breakeven": be
+                    })
 
     async def _on_position_closed(self, event: Event):
         payload = event.payload
@@ -272,7 +285,7 @@ class RiskManager:
             hit = price <= guard['tp2_price'] if is_short else price >= guard['tp2_price']
             if hit:
                 guard['tp2_done'] = True
-                qty = round(guard['remaining'], 2)
+                qty = await self._full_close_qty(passport, guard)
                 if qty >= 0.1:
                     ok = await self._close_market(passport, guard, qty, 'TP2_HIT')
                     if ok:
@@ -290,7 +303,7 @@ class RiskManager:
             hit = price >= guard['sl_price'] if is_short else price <= guard['sl_price']
             if hit:
                 guard['sl_done'] = True
-                qty = round(guard['remaining'], 2)
+                qty = await self._full_close_qty(passport, guard)
                 if qty >= 0.1:
                     ok = await self._close_market(passport, guard, qty, 'SL_HIT')
                     if ok:
@@ -352,6 +365,28 @@ class RiskManager:
         # только после реального исполнения на бирже.
         
         return bool(result.get('success'))
+
+    async def _full_close_qty(self, passport: TradePassport, guard: Dict) -> float:
+        """🔥 Количество для ПОЛНОГО закрытия: РЕАЛЬНЫЙ остаток с биржи.
+        Защищает от сирот: даже если guard/паспорт врут, закрываем фактическую позицию."""
+        qty = round(float(guard['remaining']), 2)
+        try:
+            pos = await self.trader.get_position_from_exchange(passport.symbol)
+            if pos:
+                real = abs(float(pos.get('size', 0) or 0))
+                if real > 0.001 and abs(real - qty) > 0.001:
+                    self._log("close_qty_reconciled", {
+                        "passport_id": passport.passport_id,
+                        "guard_remaining": qty,
+                        "exchange_size": real,
+                    })
+                    qty = round(real, 2)
+        except Exception as e:
+            self._log("close_qty_reconcile_failed", {
+                "passport_id": passport.passport_id,
+                "error": str(e)
+            })
+        return qty
 
     # ============================================================
     # ОТМЕНА ОРДЕРОВ (только входные лимитки; история сохраняется)

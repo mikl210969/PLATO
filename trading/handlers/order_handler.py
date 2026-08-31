@@ -71,6 +71,8 @@ class OrderHandlerMixin:
             self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': executed_qty})
             if executed_qty > 0:
                 passport.position_size = executed_qty
+                # 🔥 Сверяем фактический размер с биржей (защита от чанков)
+                await self._reconcile_position_from_exchange(passport, symbol)                
                 passport.position_entry_price = avg_price if avg_price > 0.0 else passport.entry_price
                 await self.bus.publish(event_type="POSITION_OPENED", source="orchestrator", payload={
                     "passport_id": passport.passport_id, "symbol": passport.symbol, "side": passport.side,
@@ -138,6 +140,8 @@ class OrderHandlerMixin:
             old_size = passport.position_size
             if abs(executed_qty - old_size) > 0.001:
                 passport.position_size = executed_qty
+                # 🔥 Сверяем фактический размер с биржей (защита от чанков)
+                await self._reconcile_position_from_exchange(passport, passport.symbol)                
                 if avg_price > 0: passport.position_entry_price = avg_price
                 self.repository.save(passport)
                 self._log("volume_reconciled", {"passport_id": passport.passport_id, "old_size": old_size, "new_size": executed_qty, "source": source})
@@ -294,6 +298,41 @@ class OrderHandlerMixin:
             payload={"passport_id": passport.passport_id, "symbol": symbol, "exit_reason": "TTL_EXPIRED", "gross_pnl": 0.0},
             symbol=symbol
         )
+
+    async def _reconcile_position_from_exchange(self, passport, symbol: str):
+        """🔥 Сверка размера и цены входа паспорта с РЕАЛЬНОЙ позицией на бирже."""
+        try:
+            trader = self.get_trader(symbol)
+            if not trader:
+                return
+            pos = await trader.get_position_from_exchange(symbol)
+            if not pos:
+                return
+            exchange_size = abs(float(pos.get('size', 0) or 0))
+            exchange_entry = float(pos.get('entry_price', 0) or 0)
+
+            if exchange_size > 0.001:
+                old_size = float(passport.position_size or 0)
+                if abs(exchange_size - old_size) > 0.001:
+                    passport.position_size = exchange_size
+                    self._log("position_size_reconciled", {
+                        "passport_id": passport.passport_id,
+                        "old_size": old_size,
+                        "new_size": exchange_size,
+                    })
+                if exchange_entry > 0 and abs(exchange_entry - float(passport.position_entry_price or 0)) > 1e-9:
+                    passport.position_entry_price = exchange_entry
+                    self._log("entry_price_reconciled", {
+                        "passport_id": passport.passport_id,
+                        "new_entry": exchange_entry,
+                    })
+                self.repository.save(passport)
+        except Exception as e:
+            self._log("position_reconcile_failed", {
+                "passport_id": passport.passport_id,
+                "error": str(e)
+            })
+
     def _calculate_pnl(self, passport, exit_price: float, quantity: float) -> float:
         if not passport.position_entry_price or passport.position_entry_price == 0: return 0.0
         return (passport.position_entry_price - exit_price) * quantity if passport.side == 'short' else (exit_price - passport.position_entry_price) * quantity
