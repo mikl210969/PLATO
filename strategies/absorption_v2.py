@@ -21,7 +21,7 @@ class AbsorptionStrategyV2:
         self._last_absorption_event: Optional[Dict[str, Any]] = None
         self._event_valid_for_sec = 5.0  # Сигнал актуален только 5 секунд после события
         
-        # 🔥 НОВОЕ: Состояние тренда BTC (по умолчанию FLAT)
+        # 🔥 Фоллбэк: Состояние тренда BTC (если контекст из main.py еще не пришел)
         self.btc_trend = "FLAT"        
         self._event_bus = None
 
@@ -30,13 +30,13 @@ class AbsorptionStrategyV2:
         self._event_bus = event_bus
         self._event_bus.subscribe("ABSORPTION_DETECTED", self._on_absorption_event)
         
-        # 🔥 ИСПРАВЛЕНО: используем self._event_bus вместо self.bus (была опечатка)
+        # Подписка на BTC контекст (как фоллбэк, основной источник теперь - словарь context)
         self._event_bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
         
         logger.info("✅ AbsorptionStrategyV2 subscribed to ABSORPTION_DETECTED & BTC_CONTEXT_UPDATED")
 
     async def _on_btc_context_updated(self, event):
-        """Обновляет локальное состояние тренда BTC при поступлении события."""
+        """Обновляет локальное состояние тренда BTC при поступлении события (фоллбэк)."""
         self.btc_trend = event.payload.get("trend", "FLAT")
 
     async def _on_absorption_event(self, event):
@@ -82,8 +82,6 @@ class AbsorptionStrategyV2:
         # ========================================================================
         # ОПРЕДЕЛЕНИЕ НАПРАВЛЕНИЯ СДЕЛКИ
         # ========================================================================
-        # BULLISH поглощение (продавцы бьют в bid-стену) -> СИГНАЛ НА LONG
-        # BEARISH поглощение (покупатели бьют в ask-стену) -> СИГНАЛ НА SHORT
         if absorption_side == "BULLISH":
             signal_side = "long"
             logger.info(f"🟢 [AbsorptionStrat] BULLISH Absorption detected! Preparing LONG signal.")
@@ -94,24 +92,60 @@ class AbsorptionStrategyV2:
             return None
 
         # ========================================================================
-        # 🔥 ЭТАП 3: СВЕТОФОР (BTC Correlation Filter)
-        # Блокируем сигналы, идущие против сильного тренда BTC
+        # 🔥 УРОВЕНЬ 4: Динамическая корректировка Confidence (Delta Context)
+        # Используем данные, переданные из main.py, с фоллбэком на self.btc_trend
         # ========================================================================
-        if signal_side == 'long' and self.btc_trend == 'DOWN':
-            logger.info(f"🚦 [BTC FILTER] Absorption LONG сигнал отклонен. BTC тренд: {self.btc_trend}")
-            return None
+        btc_context = context.get('btc_delta_context', {})
+        sol_context = context.get('sol_delta_context', {})
+        
+        # Берем тренд из контекста, если его там нет (первый запуск), берем из фоллбэка
+        btc_trend = btc_context.get('trend', self.btc_trend)
+        sol_delta = sol_context.get('delta_strength', 0.0)
+        
+        # Базовая уверенность за сам факт поглощения
+        base_confidence = 0.65 
+        
+        # 1. Оценка влияния макротренда BTC
+        if signal_side == 'long' and btc_trend == 'DOWN':
+            base_confidence *= 0.5  # Режем уверенность вдвое
+            logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: попытка LONG при DOWN тренде BTC")
+        elif signal_side == 'short' and btc_trend == 'UP':
+            base_confidence *= 0.5
+            logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: попытка SHORT при UP тренде BTC")
             
-        if signal_side == 'short' and self.btc_trend == 'UP':
-            logger.info(f"🚦 [BTC FILTER] Absorption SHORT сигнал отклонен. BTC тренд: {self.btc_trend}")
+        # 2. Оценка влияния дельты самого SOL (дополнительный фильтр)
+        # Если мы хотим лонг, а дельта SOL резко отрицательная (продавцы агрессивно давят)
+        if signal_side == 'long' and sol_delta < -30.0:
+            base_confidence *= 0.7
+            logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: отрицательная дельта SOL ({sol_delta}) при LONG")
+            
+        # Если мы хотим шорт, а дельта SOL резко положительная (покупатели агрессивно давят)
+        elif signal_side == 'short' and sol_delta > 30.0:
+            base_confidence *= 0.7
+            logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: положительная дельта SOL ({sol_delta}) при SHORT")
+
+        # 3. Бонусы за силу самого события поглощения
+        if abs(event["delta_velocity"]) > 10000.0:
+            base_confidence += 0.10
+            
+        if abs(event["imbalance"]) > 0.4:
+            base_confidence += 0.10
+            
+        # Ограничиваем максимум 1.0
+        final_confidence = min(base_confidence, 1.0)
+        
+        # 🔥 ЖЕСТКИЙ ПОРОГ: Если после всех штрафов уверенность слишком низкая, отменяем сделку
+        if final_confidence < 0.50:
+            logger.info(f"🚫 [AbsorptionV2] Сигнал ОТКЛОНЕН: итоговый confidence {final_confidence:.2f} ниже порога 0.50 (BTC: {btc_trend}, SOL Delta: {sol_delta})")
             return None
+        # ========================================================================
 
         # ========================================================================
         # РАСЧЕТ УРОВНЕЙ (Entry, SL, TP) на основе ATR
         # ========================================================================
         entry_price = round(current_price, 2)
         
-        # Для поглощения стоп ставим чуть за уровень, где происходило поглощение
-        # с небольшим буфером ATR
+        # Для поглощения стоп ставим чуть за уровень, где происходило поглощение, с буфером ATR
         if signal_side == "long":
             sl_price = round(event_price - (atr * 0.3), 2)
         else: # short
@@ -124,25 +158,9 @@ class AbsorptionStrategyV2:
         tp1_price = round(entry_price + (2.0 * r_value) if signal_side == "long" else entry_price - (2.0 * r_value), 2)
         rr_ratio = 2.0 # Мы жестко целимся в R:R 2.0
 
-        # ========================================================================
-        # РАСЧЕТ CONFIDENCE
-        # ========================================================================
-        # Поглощение само по себе сильный сигнал. Даем высокий базовый confidence.
-        base_confidence = 0.65 
-        
-        # Если дельта была огромной, повышаем уверенность
-        if abs(event["delta_velocity"]) > 10000.0:
-            base_confidence += 0.10
-            
-        # Если имбаланс стакана подтверждает стену, повышаем уверенность
-        if abs(event["imbalance"]) > 0.4:
-            base_confidence += 0.10
-            
-        final_confidence = min(base_confidence, 1.0)
-        
         self._last_signal_time = now
         
-        logger.info(f"🚀 [AbsorptionStrat] SIGNAL GENERATED: {signal_side.upper()} | Entry: {entry_price} | SL: {sl_price} | TP1: {tp1_price} | Conf: {final_confidence:.2f} | BTC_Trend: {self.btc_trend}")
+        logger.info(f"🚀 [AbsorptionStrat] SIGNAL CONFIRMED: {signal_side.upper()} | Entry: {entry_price} | SL: {sl_price} | TP1: {tp1_price} | Conf: {final_confidence:.2f} | BTC: {btc_trend} | SOL_Delta: {sol_delta}")
 
         return EnrichedSignal(
             signal_id=f"AbsorptionV2_{symbol}_{int(now)}",

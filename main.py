@@ -34,9 +34,9 @@ from trading.order_verifier import OrderVerifier
 from strategies.wall_fade_v3 import WallFadeStrategyV3
 from strategies.absorption_v2 import AbsorptionStrategyV2
 from strategies.breakout_v1 import BreakoutStrategyV1
-from extensions.analytics.btc_context_monitor import BtcContextMonitor  # 🔥 НОВОЕ
 
 from extensions.risk.position_sizer import PositionSizer
+from extensions.analytics.monitor_factory import MonitorFactory  # 🔥 НОВОЕ: Фабрика мониторов
 
 logger = get_logger(__name__)
 
@@ -78,8 +78,10 @@ class Platform:
             base_url=exchange_config.get('rest_base_url', 'https://testnet.binancefuture.com')
         )
 
+        # 🔥 НОВОЕ: Передаем event_bus в адаптер для нормализации событий
         self.ws = BinanceWsAdapter(
-            base_url=exchange_config.get('ws_base_url', 'wss://stream.binancefuture.com/ws')
+            base_url=exchange_config.get('ws_base_url', 'wss://stream.binancefuture.com/ws'),
+            event_bus=self.bus
         )
         self.ws.set_json_logger(self.json_logger)
         self.router = ChannelRouter(self.ws, self.rest)
@@ -92,19 +94,15 @@ class Platform:
         # 6. StateManager
         self.state_manager = StateManager(self.passport_manager)
 
-        # 🔥 7. НОВОЕ: PositionSizer (Создаем ПЕРЕД Orchestrator)
-        from extensions.risk.position_sizer import PositionSizer
-        
-        # Читаем лимит из конфига (по умолчанию 5.0)
+        # 7. PositionSizer (Создаем ПЕРЕД Orchestrator)
         max_pos_size = self.config.get('risk', {}).get('max_position_size', 5.0)
-        
         self.position_sizer = PositionSizer(
             rest_client=self.rest, 
-            max_position_size=max_pos_size  # ← ЭТО КРИТИЧЕСКИ ВАЖНО
+            max_position_size=max_pos_size
         )
         logger.info(f"✅ PositionSizer initialized | Max Size Cap: {max_pos_size}")
 
-        # 8. Оркестратор (теперь безопасно получает self.position_sizer)
+        # 8. Оркестратор
         self.orchestrator = Orchestrator(
             config=self.config,
             event_bus=self.bus,
@@ -112,7 +110,7 @@ class Platform:
             passport_repository=self.passport_repository,
             state_manager=self.state_manager,
             json_logger=self.json_logger,
-            position_sizer=self.position_sizer  # ✅ Передаем сайзер
+            position_sizer=self.position_sizer
         )
         logger.info("✅ Orchestrator initialized")
 
@@ -155,9 +153,7 @@ class Platform:
         )
         logger.info("✅ OrderVerifier initialized")
 
-        # ========================================================================
-        # 🔥 13. НОВОЕ: DriftMonitor (ВОССТАНОВЛЕНО: создаем ПЕРЕД передачей в Orchestrator)
-        # ========================================================================
+        # 13. DriftMonitor
         from trading.drift_monitor import DriftMonitor
         self.drift_monitor = DriftMonitor(
             rest_client=self.rest,
@@ -167,7 +163,6 @@ class Platform:
         )
         logger.info("✅ DriftMonitor initialized")
 
-        # Передаём DriftMonitor и OrderVerifier в Orchestrator
         self.orchestrator.set_drift_monitor(self.drift_monitor)
         self.orchestrator.set_verifier(self.verifier)
         logger.info("✅ DriftMonitor and OrderVerifier set in Orchestrator")
@@ -185,24 +180,48 @@ class Platform:
         self.breakout.subscribe_to_events(self.bus)        
 
         # ========================================================================
-        # 🔥 15. НОВОЕ: BTC Context Monitor
+        # 🔥 15. НОВОЕ: DeltaMonitor Factory (Универсальный мониторинг + Дивергенции)
         # ========================================================================
-        from extensions.analytics.btc_context_monitor import BtcContextMonitor
-        self.btc_monitor = BtcContextMonitor(
-            event_bus=self.bus,
-            window_seconds=300,
-            publish_interval=5.0
-        )
+        self.monitored_symbols = ["BTCUSDT", "SOLUSDT"] 
         
-        # Подписчик для логирования BTC-контекста в консоль
-        async def log_btc_context(event):
+        self.delta_monitors = MonitorFactory.create_delta_monitors(
+            symbols=self.monitored_symbols, 
+            event_bus=self.bus, 
+            timeframe_sec=300  # 5 минут
+        )
+        # 🔥 Хранилище последних контекстов дельты для передачи в стратегии
+        self.delta_contexts = {
+            "BTCUSDT": {"trend": "FLAT", "delta_strength": 0.0, "current_price": 0.0},
+            "SOLUSDT": {"trend": "FLAT", "delta_strength": 0.0, "current_price": 0.0}
+        }        
+        # Подписчик для логирования и сохранения контекста
+        async def update_and_log_delta_context(event):
             payload = event.payload
-            logger.info(
-                f"📊 [BTC CONTEXT] Trend: {payload.get('trend'):<5} | "
-                f"Delta: {payload.get('delta_strength'):>8} | "
-                f"Price: {payload.get('current_price')}"
-            )
-        self.bus.subscribe("BTC_CONTEXT_UPDATED", log_btc_context)
+            symbol = getattr(event, 'symbol', 'UNKNOWN')
+            
+            # Сохраняем актуальное состояние в платформу
+            if symbol in self.delta_contexts:
+                self.delta_contexts[symbol] = {
+                    "trend": payload.get('trend', 'FLAT'),
+                    "delta_strength": payload.get('delta_strength', 0.0),
+                    "current_price": payload.get('current_price', 0.0)
+                }
+            
+            # Логируем
+            if "CONTEXT" in event.type or event.type == "BTC_CONTEXT_UPDATED":
+                logger.info(
+                    f"📊 [DELTA_CTX {symbol}] Trend: {payload.get('trend'):<5} | "
+                    f"Delta: {payload.get('delta_strength'):>8} | "
+                    f"Price: {payload.get('current_price')}"
+                )
+            elif event.type == "DIVERGENCE_DETECTED":
+                logger.warning(f"🚨 [DIVERGENCE {symbol}] ОБНАРУЖЕНА ДИВЕРГЕНЦИЯ: {payload.get('type')} @ {payload.get('price')}")
+
+        self.bus.subscribe("BTC_CONTEXT_UPDATED", update_and_log_delta_context)
+        self.bus.subscribe("CONTEXT_UPDATED_SOLUSDT", update_and_log_delta_context)
+        self.bus.subscribe("DIVERGENCE_DETECTED", update_and_log_delta_context)
+        
+        logger.info(f"✅ DeltaMonitor Factory initialized for {self.monitored_symbols}")
 
         # 16. Extensions (Safe Bootstrap)
         from extensions.bootstrap import init_extensions_safe
@@ -249,7 +268,6 @@ class Platform:
         self._last_user_data_ts = time.time()
         self._last_price_update_ts = time.time()
 
-        # ===== Обработчик переподключения WS =====
         async def on_ws_reconnect():
             if getattr(self, '_is_reconnecting', False):
                 return
@@ -279,23 +297,15 @@ class Platform:
                     except Exception as e:
                         error_details = repr(e) or str(e) or "Unknown empty error"
                         logger.error(f"❌ Refresh listen key attempt {attempt + 1}/3 failed: {error_details}")
-                        logger.debug(f"Traceback details:\n{traceback.format_exc()}")
-                        
-                        try:
-                            await self.rest.reset_session()
-                        except Exception:
-                            pass
                         if attempt < 2:
                             await asyncio.sleep(0.5 * (attempt + 1))
 
                 if not refreshed:
                     logger.critical("❌ CRITICAL: listen key not refreshed after 3 attempts")
             except asyncio.CancelledError:
-                logger.warning("⚠️ Reconnect handler cancelled")
                 return
             except Exception as e:
                 logger.error(f"❌ Reconnect handler error: {e}")
-                logger.debug(f"Traceback:\n{traceback.format_exc()}")
             finally:
                 self._is_reconnecting = False
 
@@ -307,7 +317,6 @@ class Platform:
                     symbol=self.symbol
                 )
 
-        # ===== Обработчик принудительного реконнекта WS =====
         async def on_ws_reconnect_forced(event: Event):
             logger.warning(f"⚠️ WS reconnect forced for passport {event.payload.get('passport_id')}")
             if hasattr(self.ws, 'close'):
@@ -315,15 +324,12 @@ class Platform:
 
         self.bus.subscribe("WS_RECONNECT_FORCED", on_ws_reconnect_forced)
 
-        # ===== Подписка на события WS → Шина =====
         async def on_order_update(data):
             self._last_user_data_ts = time.time()            
             order_data = data.get('o', data)
-            
             client_order_id = str(order_data.get('c') or order_data.get('clientOrderId') or order_data.get('client_order_id') or '')
             order_status = str(order_data.get('X') or order_data.get('status') or '')
             symbol = str(order_data.get('s') or order_data.get('symbol') or '')
-            
             executed_qty = float(order_data.get('z') or order_data.get('executedQty') or order_data.get('executed_qty') or 0.0)
             avg_price = float(order_data.get('ap') or order_data.get('avgPrice') or order_data.get('price') or 0.0)
             
@@ -366,22 +372,14 @@ class Platform:
                     await self.bus.publish(
                         event_type="PRICE_UPDATE",
                         source="main",
-                        payload={
-                            'symbol': self.symbol,
-                            'price': self.ws_price,
-                            'ts': time.time(),
-                        },
+                        payload={'symbol': self.symbol, 'price': self.ws_price, 'ts': time.time()},
                         symbol=self.symbol
                     )
                     
                     await self.bus.publish(
                         event_type="MARKET_ORDERBOOK",
                         source="ws_adapter",
-                        payload={
-                            "bids": bids,
-                            "asks": asks,
-                            "E": data.get('E', int(time.time() * 1000))
-                        },
+                        payload={"bids": bids, "asks": asks, "E": data.get('E', int(time.time() * 1000))},
                         symbol=self.symbol
                     )
             except Exception as e:
@@ -389,9 +387,6 @@ class Platform:
 
         self.ws.on("depthUpdate", on_depth_update)
 
-        # ========================================================================
-        # 🔥 НОВОЕ: МОСТИК для событий BTC в EventBus (чтобы BtcContextMonitor их видел)
-        # ========================================================================
         async def on_btc_agg_trade(data):
             await self.bus.publish(
                 event_type="BTC_AGG_TRADE",
@@ -403,11 +398,8 @@ class Platform:
 
         await self.ws.subscribe_user_data(listen_key)
         logger.info(f"✅ User data stream subscribed: {listen_key[:10]}...")
-
-        # 🔥 НОВОЕ: Подписка на потоки BTC для контекстного анализа
         await self.ws.subscribe_btc_streams()
 
-        # ===== Фоновые задачи =====
         async def user_data_health_check():
             while getattr(self, '_running', True):
                 try:
@@ -420,26 +412,35 @@ class Platform:
                         self._last_price_update_ts = time.time()
                         await on_ws_reconnect()
                 except asyncio.CancelledError:
-                    logger.debug("Health check cancelled")
                     break
                 except Exception as e:
                     logger.error(f"Health check error: {e}")
                     await asyncio.sleep(1)
 
-        # 🔥 СПОТОВЫЕ ПОТОКИ ДАННЫХ (ИСТОЧНИК ИСТИНЫ)
         import json
-        
         self._cold_storage_dir = Path("data/cold_storage")
         self._cold_storage_dir.mkdir(parents=True, exist_ok=True)
         self._tick_file = self._cold_storage_dir / f"{self.symbol}_trades.jsonl"
 
         async def on_spot_trade(event_type: str, data: dict):
+            # 🔥 МАЯЧОК: Проверяем, доходят ли данные со спота
+            logger.info(f"📥 [SPOT TRADE] Получен тик: {data.get('s')} цена={data.get('p')} кол-во={data.get('q')}")
+            
+            normalized_payload = {
+                "price": float(data.get("p", 0)),
+                "qty": float(data.get("q", 0)),
+                "is_buyer_maker": bool(data.get("m", False)),
+                "timestamp": data.get("T", 0)
+            }
+            
             await self.bus.publish(
-                event_type=event_type,
+                event_type=f"TRADE_NORMALIZED_{self.symbol}",
                 source="spot_ws_adapter",
-                payload=data,
+                payload=normalized_payload,
                 symbol=self.symbol
             )
+            
+            # Сохранение в Cold Storage (оставляем как было)
             try:
                 side = "BUY" if not data.get("m") else "SELL"
                 price = float(data.get("p", 0))
@@ -458,22 +459,11 @@ class Platform:
                 logger.warning(f"Не удалось сохранить тик в Cold Storage: {e}")
 
         async def on_spot_depth(event_type: str, data: dict):
-            await self.bus.publish(
-                event_type=event_type,
-                source="spot_ws_adapter",
-                payload=data,
-                symbol=self.symbol
-            )
+            await self.bus.publish(event_type=event_type, source="spot_ws_adapter", payload=data, symbol=self.symbol)
 
-        # Запускаем спотовые задачи
-        self._spot_trades_task = asyncio.create_task(
-            self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade)
-        )
-        self._spot_depth_task = asyncio.create_task(
-            self.ws.subscribe_spot_depth(self.symbol, on_spot_depth)
-        )
+        self._spot_trades_task = asyncio.create_task(self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade))
+        self._spot_depth_task = asyncio.create_task(self.ws.subscribe_spot_depth(self.symbol, on_spot_depth))
         
-        # Остальные фоновые задачи
         self._ws_task = asyncio.create_task(self.ws.run())
         self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
         self._health_check_task = asyncio.create_task(user_data_health_check())
@@ -485,7 +475,6 @@ class Platform:
         await self.orchestrator.perform_startup_recovery(self.symbol)
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
 
-        # 🔥 Однократный расчет реального ATR при старте главного цикла
         if not getattr(self, '_atr_fetched', False):
             try:
                 real_atr = await self.volatility_filter.calculate_real_atr(self.symbol, period=14, interval="1m")
@@ -495,7 +484,6 @@ class Platform:
             except Exception as e:
                 logger.warning(f"⚠️ Не удалось рассчитать реальный ATR при старте: {e}. Использую fallback.")
 
-        # ===== Основной цикл =====
         last_log_time = 0
         last_position_check_time = 0
 
@@ -518,43 +506,35 @@ class Platform:
                     await self.rest.get_position(self.symbol)
                     last_position_check_time = current_time
 
-                if current_time - last_log_time >= 60: # Увеличим интервал до 60 сек
+                if current_time - last_log_time >= 60:
                     logger.debug(f"🔄 Price: {current_price} (from {'WS' if self.ws_price > 0 else 'REST'})")
-                    if hasattr(self, 'extensions') and self.extensions and self.extensions.bridge:
-                        stats = self.extensions.bridge.get_stats()
-                        logger.debug(f"📊 Extensions Stats: Trades={stats['trades']}, Books={stats['books']}, Unrecognized={stats['unrecognized']}")
                     last_log_time = current_time
 
                 if self.passport_manager.is_symbol_busy(self.symbol):
                     await asyncio.sleep(2)
                     continue
 
-                # ====================================================================
-                # ПОДГОТОВКА КОНТЕКСТА ДЛЯ СТРАТЕГИЙ
-                # ====================================================================
-                
-                # 1. Получаем актуальную спотовую цену
                 spot_price = self.analytics.spot_price.get_current_price()
-                
-                # 2. Получаем HVN уровни (Micro и Macro) из Extensions
                 hvn_micro = []
                 hvn_macro = []
                 if hasattr(self, 'extensions') and self.extensions and self.extensions.hvn:
-                    # Берем топ-3 уровня для каждого таймфрейма
                     hvn_micro = self.extensions.hvn.calculate_hvn(self.symbol, lookback_minutes=60)[:3]
                     hvn_macro = self.extensions.hvn.calculate_hvn(self.symbol, lookback_minutes=1440)[:3]
 
                 # 3. Формируем контекст
                 context = {
                     'symbol': self.symbol,
-                    'current_price': current_price,           # Фьючерсная цена (для исполнения)
-                    'spot_price': spot_price,                 # Сповая цена (источник истины)
-                    'orderbook': self.ws_orderbook,           # Фьючерсный стакан
-                    'hvn_micro': hvn_micro,                   # Micro HVN (для якоря SL)
-                    'hvn_macro': hvn_macro,                   # Macro HVN (для фильтрации)
+                    'current_price': current_price,
+                    'spot_price': spot_price,
+                    'orderbook': self.ws_orderbook,
+                    'hvn_micro': hvn_micro,
+                    'hvn_macro': hvn_macro,
                     'delta': self.analytics.delta.get_metrics(),
                     'imbalance': self.analytics.imbalance.get_metrics(),
-                    'trend': self.analytics.trend.get_context() # 🔥 НОВОЕ: Контекст тренда
+                    'trend': self.analytics.trend.get_context(),
+                    # 🔥 НОВОЕ: Передаем макро-контекст от DeltaMonitor
+                    'btc_delta_context': self.delta_contexts.get("BTCUSDT", {}),
+                    'sol_delta_context': self.delta_contexts.get("SOLUSDT", {})
                 }
 
                 signals = await self._generate_signals(context)
@@ -575,7 +555,6 @@ class Platform:
                 await asyncio.sleep(2)
 
             except asyncio.CancelledError:
-                logger.warning("⚠️ Main loop received CancelledError, continuing...")
                 await asyncio.sleep(1)
                 continue
             except Exception as e:
@@ -596,8 +575,8 @@ class Platform:
     async def run(self):
         logger.info("🚀 Starting platform...")
         
-        # 🔥 НОВОЕ: Запуск BTC монитора
-        await self.btc_monitor.start()
+        # 🔥 НОВОЕ: Запуск всех мониторов через Фабрику
+        await MonitorFactory.start_all(self.delta_monitors)
         
         await self.orchestrator.start()
         await self._main_loop()
@@ -606,23 +585,18 @@ class Platform:
         self._running = False
         
         tasks_to_cancel = []
-        
         if hasattr(self, '_ws_task') and not self._ws_task.done():
             self._ws_task.cancel()
             tasks_to_cancel.append(self._ws_task)
-            
         if hasattr(self, '_keep_alive_task') and not self._keep_alive_task.done():
             self._keep_alive_task.cancel()
             tasks_to_cancel.append(self._keep_alive_task)
-            
         if hasattr(self, '_health_check_task') and not self._health_check_task.done():
             self._health_check_task.cancel()
             tasks_to_cancel.append(self._health_check_task)
-            
         if hasattr(self, '_spot_trades_task') and not self._spot_trades_task.done():
             self._spot_trades_task.cancel()
             tasks_to_cancel.append(self._spot_trades_task)
-
         if hasattr(self, '_spot_depth_task') and not self._spot_depth_task.done():
             self._spot_depth_task.cancel()
             tasks_to_cancel.append(self._spot_depth_task)            
@@ -632,11 +606,8 @@ class Platform:
         
         await self.orchestrator.stop()
 
-        if hasattr(self, 'btc_monitor'):
-            try:
-                await self.btc_monitor.stop()
-            except Exception as e:
-                logger.error(f"Error stopping BtcContextMonitor: {e}")
+        # 🔥 НОВОЕ: Остановка всех мониторов через Фабрику
+        await MonitorFactory.stop_all(self.delta_monitors)
                 
         if hasattr(self, 'drift_monitor'):
             try:
@@ -674,11 +645,6 @@ async def main():
         print("\n⏹️ Остановка по команде пользователя (Ctrl+C)")
     except asyncio.CancelledError:
         print("\n⚠️ ВНИМАНИЕ: Главный цикл был принудительно отменён!")
-        print("   Возможные причины:")
-        print("   - Каскадная отмена из-за необработанного исключения в фоновой задаче")
-        print("   - Внешний сигнал (SIGTERM/SIGINT)")
-        print("   - ОС убила процесс (OOM killer)")
-        print("\n   🔍 ТРАССИРОВКА ОШИБКИ:")
         traceback.print_exc()
     except Exception as e:
         print(f"\n💥 КРИТИЧЕСКАЯ НЕПРЕДВИДЕННАЯ ОШИБКА: {e}")

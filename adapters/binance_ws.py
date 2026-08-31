@@ -13,8 +13,9 @@ from core.logger import get_logger
 class BinanceWsAdapter:
     """WebSocket клиент для Binance."""
 
-    def __init__(self, base_url: str = "wss://stream.binancefuture.com/ws"):
+    def __init__(self, base_url: str = "wss://stream.binancefuture.com/ws", event_bus=None):
         self.base_url = base_url
+        self.event_bus = event_bus  # 🔥 НОВОЕ: Шина событий для нормализации (готовность к Bybit)
         self._ws = None
         self._running = False
         self._connected = False
@@ -166,7 +167,25 @@ class BinanceWsAdapter:
         if event_type == 'UNKNOWN' or ('id' in data and 'result' in data):
             return
 
-        # 🔥 2. МАРШРУТИЗАЦИЯ ПО СИМВОЛАМ И СОБЫТИЯМ
+        # 🔥 2. НОРМАЛИЗАЦИЯ ДЛЯ DELTA MONITOR (Готовность к Bybit)
+        if event_type == 'aggTrade' and self.event_bus:
+            normalized_payload = {
+                "price": float(data.get('p', 0)),
+                "qty": float(data.get('q', 0)),
+                "is_buyer_maker": bool(data.get('m', False)), # False = покупка (дельта +), True = продажа (дельта -)
+                "timestamp": data.get('T', 0)
+            }
+            # Публикуем асинхронно, чтобы не блокировать очередь
+            asyncio.create_task(
+                self.event_bus.publish(
+                    event_type=f"TRADE_NORMALIZED_{symbol}",
+                    source="binance_ws",
+                    payload=normalized_payload,
+                    symbol=symbol
+                )
+            )
+
+        # 🔥 3. МАРШРУТИЗАЦИЯ ПО СИМВОЛАМ И СОБЫТИЯМ (для обратной совместимости)
         if event_type == 'aggTrade':
             if symbol == 'BTCUSDT':
                 await self._route_event('BTC_AGG_TRADE', data)
