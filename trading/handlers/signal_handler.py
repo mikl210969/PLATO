@@ -143,6 +143,15 @@ class SignalHandlerMixin:
             quantity = safe_quantity
         # ========================================================================
 
+        # 🔥 НОВОЕ: Добавляем информацию о расчете размера позиции в паспорт
+        passport.sizing_info = {
+            "target_risk_usdt": risk_usdt,
+            "sl_distance": round(abs(signal.entry_price - sl_price), 4),
+            "final_quantity": quantity,
+            "max_size_cap": self.position_sizer.max_position_size if self.position_sizer else None,
+            "fallback_used": self.position_sizer is None
+        }
+
         order_type = self.config.get('trading', {}).get('entry_order_type', 'market')
         
         # Генерация богатого client_order_id
@@ -161,8 +170,11 @@ class SignalHandlerMixin:
             "risk_usdt": risk_usdt
         })
 
+        # 🔥 ГРОМКИЙ ПРИНТ: Точная проверка того, что летит на биржу
+        print(f"🚀 [ПЕРЕД ОТПРАВКОЙ] Символ: {signal.symbol} | Количество (quantity): {quantity} | Цена: {signal.entry_price}")
+        
         result = await trader.execute_order(
-            symbol=signal.symbol, 
+            symbol=signal.symbol,  
             side=signal.side, 
             quantity=quantity, 
             order_type=order_type,

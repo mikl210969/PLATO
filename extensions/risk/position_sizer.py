@@ -1,6 +1,5 @@
 """
-PositionSizer — динамический расчет размера позиции на основе риска в USDT.
-Включает Fallback-механизм на случай сбоев API биржи.
+PositionSizer — динамический расчет размера позиции с защитой от Margin Call.
 """
 import logging
 from decimal import Decimal
@@ -10,12 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 class PositionSizer:
-    def __init__(self, rest_client):
+    def __init__(self, rest_client, max_position_size: float = 5.0):
         self.rest = rest_client
+        self.max_position_size = max_position_size  # 🔥 Жесткий лимит объема позиции
         self._exchange_info_cache: Dict[str, Dict[str, Any]] = {}
         
-        # 🔥 FALLBACK: Безопасные значения по умолчанию для основных пар.
-        # Используются, если API биржи недоступен или возвращает ошибку.
+        # 🔥 FALLBACK: Безопасные значения по умолчанию для основных пар
         self._fallback_info = {
             "SOLUSDT": {"step_size": 0.1, "min_qty": 0.1, "min_notional": 5.0},
             "BTCUSDT": {"step_size": 0.001, "min_qty": 0.001, "min_notional": 5.0},
@@ -108,10 +107,18 @@ class PositionSizer:
         # 1. Базовый расчет: сколько монет купить/продать, чтобы потерять ровно risk_usdt при срабатывании SL
         raw_qty = risk_usdt / risk_distance
 
-        # 2. Округление вниз до step_size (чтобы биржа не отклонила ордер)
+        # 2. 🔥 ПРЕДОХРАНИТЕЛЬ: Обрезаем, если превышает лимит маржи (max_position_size)
+        if raw_qty > self.max_position_size:
+            logger.info(
+                f"🛡️ [PositionSizer] Расчетный лот ({raw_qty:.2f}) превышает лимит ({self.max_position_size}). "
+                f"Обрезаем до безопасного максимума."
+            )
+            raw_qty = self.max_position_size
+
+        # 3. Округление вниз до step_size (чтобы биржа не отклонила ордер)
         safe_qty = self._round_down(raw_qty, symbol_info['step_size'])
 
-        # 3. Проверка минимального количества монет
+        # 4. Проверка минимального количества монет
         if safe_qty < symbol_info['min_qty']:
             logger.warning(
                 f"🚫 [PositionSizer] Сигнал отклонен: расчетный лот ({safe_qty}) меньше минимального ({symbol_info['min_qty']}) "
@@ -119,7 +126,7 @@ class PositionSizer:
             )
             return None
 
-        # 4. Проверка минимальной стоимости ордера (notional value)
+        # 5. Проверка минимальной стоимости ордера (notional value)
         order_value = safe_qty * entry_price
         if order_value < symbol_info['min_notional']:
             logger.warning(
@@ -128,9 +135,11 @@ class PositionSizer:
             )
             return None
 
+        # Считаем реальный риск после всех проверок и обрезки
+        actual_risk = safe_qty * risk_distance
         logger.info(
-            f"✅ [PositionSizer] Расчет для {symbol}: Риск={risk_usdt}$, Дистанция SL={risk_distance:.4f}$, "
-            f"Итоговый лот={safe_qty} (Стоимость: {order_value:.2f}$)"
+            f"✅ [PositionSizer] {symbol} | Лот: {safe_qty} | Риск: {actual_risk:.2f}$ "
+            f"(из запрошенных {risk_usdt}$) | Цена: {entry_price}"
         )
         
         return safe_qty

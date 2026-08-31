@@ -92,12 +92,17 @@ class Platform:
         # 6. StateManager
         self.state_manager = StateManager(self.passport_manager)
 
-        # ========================================================================
         # 🔥 7. НОВОЕ: PositionSizer (Создаем ПЕРЕД Orchestrator)
-        # ========================================================================
         from extensions.risk.position_sizer import PositionSizer
-        self.position_sizer = PositionSizer(rest_client=self.rest)
-        logger.info("✅ PositionSizer initialized")
+        
+        # Читаем лимит из конфига (по умолчанию 5.0)
+        max_pos_size = self.config.get('risk', {}).get('max_position_size', 5.0)
+        
+        self.position_sizer = PositionSizer(
+            rest_client=self.rest, 
+            max_position_size=max_pos_size  # ← ЭТО КРИТИЧЕСКИ ВАЖНО
+        )
+        logger.info(f"✅ PositionSizer initialized | Max Size Cap: {max_pos_size}")
 
         # 8. Оркестратор (теперь безопасно получает self.position_sizer)
         self.orchestrator = Orchestrator(
