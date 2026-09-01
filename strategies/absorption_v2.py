@@ -61,18 +61,6 @@ class AbsorptionStrategyV2:
         }
         logger.info(f"🚨 [AbsorptionV2] Запомнена дивергенция: {self._last_divergence['type']} @ {self._last_divergence['price']:.2f}")
 
-    async def _on_absorption_event(self, event):
-        """Сохраняем событие, когда детектор его находит."""
-        payload = getattr(event, "payload", {})
-        self._last_absorption_event = {
-            "side": payload.get("side"),          # "BULLISH" или "BEARISH"
-            "price": payload.get("price", 0.0),
-            "delta_velocity": payload.get("delta_velocity", 0.0),
-            "imbalance": payload.get("imbalance", 0.0),
-            "timestamp": time.time()
-        }
-        logger.info(f"🧠 [AbsorptionStrat] Получено событие: {self._last_absorption_event['side']} @ {self._last_absorption_event['price']:.2f}")
-
     async def _on_atr_updated(self, event):
         """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
         payload = getattr(event, 'payload', {})
@@ -85,6 +73,18 @@ class AbsorptionStrategyV2:
             old_atr = self.atr_value
             self.atr_value = new_atr
             logger.info(f"📊 [absorption_v2] ATR обновлён: {old_atr:.4f} → {new_atr:.4f}")
+
+    async def _on_absorption_event(self, event):
+        """Сохраняем событие, когда детектор его находит."""
+        payload = getattr(event, "payload", {})
+        self._last_absorption_event = {
+            "side": payload.get("side"),          # "BULLISH" или "BEARISH"
+            "price": payload.get("price", 0.0),
+            "delta_velocity": payload.get("delta_velocity", 0.0),
+            "imbalance": payload.get("imbalance", 0.0),
+            "timestamp": time.time()
+        }
+        logger.info(f"🧠 [AbsorptionStrat] Получено событие: {self._last_absorption_event['side']} @ {self._last_absorption_event['price']:.2f}")
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
         """Генерирует сигнал, если недавно было событие поглощения."""

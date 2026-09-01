@@ -56,18 +56,6 @@ class BreakoutStrategyV1:
         }
         logger.info(f"🚨 [BreakoutV1] Запомнена дивергенция: {self._last_divergence['type']} @ {self._last_divergence['price']:.2f}")
 
-    async def _on_breakout_event(self, event):
-        payload = getattr(event, "payload", {})
-        self._last_breakout_event = {
-            "wall_price": payload.get("wall_price", 0.0),
-            "side": payload.get("side", "BID"),
-            "consumption_pct": payload.get("consumption_pct", 0.0),
-            "consumption_rate_pct": payload.get("consumption_rate_pct", 0.0),
-            "initial_volume": payload.get("initial_volume", 0.0),
-            "current_volume": payload.get("current_volume", 0.0),
-            "timestamp": time.time()
-        }
-
     async def _on_atr_updated(self, event):
         """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
         payload = getattr(event, 'payload', {})
@@ -80,6 +68,18 @@ class BreakoutStrategyV1:
             old_atr = self.atr_value
             self.atr_value = new_atr
             logger.info(f"📊 [breakout_v1] ATR обновлён: {old_atr:.4f} → {new_atr:.4f}")
+
+    async def _on_breakout_event(self, event):
+        payload = getattr(event, "payload", {})
+        self._last_breakout_event = {
+            "wall_price": payload.get("wall_price", 0.0),
+            "side": payload.get("side", "BID"),
+            "consumption_pct": payload.get("consumption_pct", 0.0),
+            "consumption_rate_pct": payload.get("consumption_rate_pct", 0.0),
+            "initial_volume": payload.get("initial_volume", 0.0),
+            "current_volume": payload.get("current_volume", 0.0),
+            "timestamp": time.time()
+        }
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
         symbol = context.get('symbol', 'SOLUSDT')

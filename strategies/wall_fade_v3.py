@@ -78,6 +78,19 @@ class WallFadeStrategyV3:
         }
         logger.info(f"🚨 [WallFadeV3] Запомнена дивергенция: {self._last_divergence['type']} @ {self._last_divergence['price']:.2f}")
 
+    async def _on_atr_updated(self, event):
+        """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
+        payload = getattr(event, 'payload', {})
+        symbol = payload.get('symbol', '')
+        new_atr = payload.get('atr', 0.0)
+        
+        # Обновляем только если символ совпадает
+        # (стратегия может работать с несколькими символами)
+        if new_atr > 0:
+            old_atr = self.atr_value
+            self.atr_value = new_atr
+            logger.info(f"📊 [WallFadeV3] ATR обновлён: {old_atr:.4f} → {new_atr:.4f}")
+
     async def _on_whale_event(self, event):
         payload = getattr(event, "payload", {})
         self._recent_detector_events.append({
@@ -96,19 +109,6 @@ class WallFadeStrategyV3:
             "volume": payload.get("volume", 0.0),
             "timestamp": time.time()
         })
-
-    async def _on_atr_updated(self, event):
-        """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
-        payload = getattr(event, 'payload', {})
-        symbol = payload.get('symbol', '')
-        new_atr = payload.get('atr', 0.0)
-        
-        # Обновляем только если символ совпадает
-        # (стратегия может работать с несколькими символами)
-        if new_atr > 0:
-            old_atr = self.atr_value
-            self.atr_value = new_atr
-            logger.info(f"📊 [WallFadeV3] ATR обновлён: {old_atr:.4f} → {new_atr:.4f}")
 
     def _cleanup_old_events(self):
         cutoff = time.time() - self._events_window_sec
