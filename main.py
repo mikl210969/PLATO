@@ -440,8 +440,9 @@ class Platform:
         self._tick_file = self._cold_storage_dir / f"{self.symbol}_trades.jsonl"
 
         async def on_spot_trade(event_type: str, data: dict):
-            # 🔥 МАЯЧОК: Проверяем, доходят ли данные со спота
-            logger.info(f"📥 [SPOT TRADE] Получен тик: {data.get('s')} цена={data.get('p')} кол-во={data.get('q')}")
+            # Маячок убран — данные идут стабильно, логирование каждого тика создаёт шум
+            # Если нужно проверить жив ли поток — смотри DELTA_CTX каждые 5 секунд
+            pass
             
             normalized_payload = {
                 "price": float(data.get("p", 0)),

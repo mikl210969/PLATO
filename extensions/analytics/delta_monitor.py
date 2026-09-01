@@ -53,7 +53,7 @@ class DeltaMonitor:
 
     async def _on_trade(self, event):
         """Обработка нормализованной сделки."""
-        print(f"👂 [DeltaMonitor {self.symbol}] Received TRADE_NORMALIZED event")
+        # print(f"👂 [DeltaMonitor {self.symbol}] Received TRADE_NORMALIZED event")
         
         try:
             data = event.payload if hasattr(event, 'payload') else event
