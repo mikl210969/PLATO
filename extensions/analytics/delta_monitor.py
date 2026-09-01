@@ -16,6 +16,10 @@ class DeltaMonitor:
         self.timeframe_sec = timeframe_sec
         self.publish_interval = publish_interval
         
+        # 🔥 Пороги для определения режима рынка
+        self.impulsive_threshold = 100.0  # |delta| > 100 = импульс
+        self.flat_threshold = 5.0         # |delta| < 5 + FLAT тренд = флэт
+        
         # Состояние текущей формирующейся свечи
         self._current_bar = {
             "open": 0.0, "high": 0.0, "low": 999999.0, "close": 0.0,
@@ -27,6 +31,9 @@ class DeltaMonitor:
         
         self._is_running = False
         self._task: Optional[asyncio.Task] = None
+        
+        # 🔥 НОВОЕ: Отслеживаем смену режима для логов
+        self._last_regime = "NORMAL"
 
     async def start(self):
         print(f"▶️  [DeltaMonitor {self.symbol}] Starting...")
@@ -111,6 +118,34 @@ class DeltaMonitor:
 
         return "NONE"
 
+    def _determine_regime(self) -> str:
+        """
+        🔥 Определяет текущий режим рынка на основе дельты и тренда.
+        Возвращает: 'IMPULSIVE', 'FLAT' или 'NORMAL'
+        """
+        delta = self._current_bar["delta"]
+        
+        # Определяем тренд из истории
+        trend = "FLAT"
+        if len(self._history) >= 3:
+            closes = [b['close'] for b in list(self._history)[-3:]]
+            if closes[-1] > closes[0] * 1.001: 
+                trend = "UP"
+            elif closes[-1] < closes[0] * 0.999: 
+                trend = "DOWN"
+        
+        # Импульсный режим: очень сильная дельта
+        if abs(delta) > self.impulsive_threshold:
+            return "IMPULSIVE"
+        
+        # Флэт-режим: слабая дельта + нет тренда
+        elif abs(delta) < self.flat_threshold and trend == "FLAT":
+            return "FLAT"
+        
+        # Нормальный режим
+        else:
+            return "NORMAL"
+
     async def _publish_loop(self):
         last_publish = time.time()
         last_bar_close = time.time()
@@ -149,11 +184,20 @@ class DeltaMonitor:
                         if closes[-1] > closes[0] * 1.001: trend = "UP"
                         elif closes[-1] < closes[0] * 0.999: trend = "DOWN"
 
+                    # 🔥 ИСПРАВЛЕНО: Определяем режим рынка
+                    regime = self._determine_regime()
+                    
+                    # 🔥 НОВОЕ: Логируем смену режима
+                    if regime != self._last_regime:
+                        print(f"🔄 [{self.symbol}] РЕЖИМ РЫНКА СМЕНИЛСЯ: {self._last_regime} → {regime} (delta: {self._current_bar['delta']:.2f}, trend: {trend})")
+                        self._last_regime = regime
+
                     context = {
                         "trend": trend,
                         "delta_strength": round(self._current_bar["delta"], 3),
                         "current_price": round(self._current_bar["close"], 2) if self._current_bar["close"] > 0 else 0.0,
-                        "timeframe": f"{self.timeframe_sec}s"
+                        "timeframe": f"{self.timeframe_sec}s",
+                        "regime": regime  # 🔥 ИСПРАВЛЕНО: передаем режим стратегиям
                     }
                     
                     event_type = "BTC_CONTEXT_UPDATED" if self.symbol == "BTCUSDT" else f"CONTEXT_UPDATED_{self.symbol}"

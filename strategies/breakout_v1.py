@@ -23,15 +23,33 @@ class BreakoutStrategyV1:
         self._event_valid_for_sec = 10.0
         self.btc_trend = "FLAT" # Фоллбэк
         self._event_bus = None
+        
+        # 🔥 НОВОЕ: Хранилище последней дивергенции
+        self._last_divergence = None
+        self._divergence_valid_for_sec = 900.0  # 15 минут
 
     def subscribe_to_events(self, event_bus):
         self._event_bus = event_bus
         self._event_bus.subscribe("BREAKOUT_OPPORTUNITY", self._on_breakout_event)
         self._event_bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
-        logger.info("✅ BreakoutStrategyV1 subscribed to BREAKOUT_OPPORTUNITY & BTC_CONTEXT_UPDATED")
+        
+        # 🔥 НОВОЕ: Подписка на дивергенции
+        self._event_bus.subscribe("DIVERGENCE_DETECTED", self._on_divergence_detected)
+        
+        logger.info("✅ BreakoutStrategyV1 subscribed to BREAKOUT_OPPORTUNITY, BTC_CONTEXT_UPDATED & DIVERGENCE_DETECTED")
 
     async def _on_btc_context_updated(self, event):
         self.btc_trend = event.payload.get("trend", "FLAT")
+
+    async def _on_divergence_detected(self, event):
+        """🔥 НОВОЕ: Сохраняем информацию о дивергенции."""
+        payload = getattr(event, "payload", {})
+        self._last_divergence = {
+            "type": payload.get("type"),
+            "price": payload.get("price", 0.0),
+            "timestamp": time.time()
+        }
+        logger.info(f"🚨 [BreakoutV1] Запомнена дивергенция: {self._last_divergence['type']} @ {self._last_divergence['price']:.2f}")
 
     async def _on_breakout_event(self, event):
         payload = getattr(event, "payload", {})
@@ -54,6 +72,16 @@ class BreakoutStrategyV1:
         now = time.time()
         if now - self._last_signal_time < self.cooldown_sec:
             return None
+
+        # ========================================================================
+        # 🔥 УРОВЕНЬ 4: REGIME FILTER (Блокировка пробоев во флэте)
+        # ========================================================================
+        btc_regime = context.get('btc_delta_context', {}).get('regime', 'NORMAL')
+        
+        if btc_regime == 'FLAT':
+            logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: режим FLAT (высокий риск ложного пробоя)")
+            return None
+        # ========================================================================
 
         if not self._last_breakout_event:
             return None
@@ -135,6 +163,24 @@ class BreakoutStrategyV1:
             base_confidence += 0.10
         elif signal_side == 'short' and sol_delta < -50.0:
             base_confidence += 0.10
+
+        # ========================================================================
+        # 🔥 УРОВЕНЬ 3: Бонус за подтверждение дивергенцией
+        # ========================================================================
+        if self._last_divergence:
+            div_age = now - self._last_divergence["timestamp"]
+            if div_age <= self._divergence_valid_for_sec:
+                div_type = self._last_divergence["type"]
+                
+                if div_type == "BULLISH" and signal_side == "long":
+                    base_confidence += 0.20
+                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал LONG подтвержден бычьей дивергенцией! +0.20 к confidence")
+                elif div_type == "BEARISH" and signal_side == "short":
+                    base_confidence += 0.20
+                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал SHORT подтвержден медвежьей дивергенцией! +0.20 к confidence")
+            else:
+                self._last_divergence = None
+        # ========================================================================
 
         # 3. АНАЛИЗ ЛИКВИДНОСТИ
         liquidity_behind_wall = self._analyze_liquidity_behind_wall(orderbook, wall_price, signal_side)

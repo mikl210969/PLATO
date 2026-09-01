@@ -21,6 +21,10 @@ class AbsorptionStrategyV2:
         self._last_absorption_event: Optional[Dict[str, Any]] = None
         self._event_valid_for_sec = 5.0  # Сигнал актуален только 5 секунд после события
         
+        # 🔥 НОВОЕ: Хранилище последней дивергенции
+        self._last_divergence = None  # {"type": "BULLISH"/"BEARISH", "timestamp": ..., "price": ...}
+        self._divergence_valid_for_sec = 900.0  # 15 минут актуальности
+        
         # 🔥 Фоллбэк: Состояние тренда BTC (если контекст из main.py еще не пришел)
         self.btc_trend = "FLAT"        
         self._event_bus = None
@@ -33,11 +37,24 @@ class AbsorptionStrategyV2:
         # Подписка на BTC контекст (как фоллбэк, основной источник теперь - словарь context)
         self._event_bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
         
-        logger.info("✅ AbsorptionStrategyV2 subscribed to ABSORPTION_DETECTED & BTC_CONTEXT_UPDATED")
+        # 🔥 НОВОЕ: Подписка на дивергенции
+        self._event_bus.subscribe("DIVERGENCE_DETECTED", self._on_divergence_detected)
+        
+        logger.info("✅ AbsorptionStrategyV2 subscribed to ABSORPTION_DETECTED, BTC_CONTEXT_UPDATED & DIVERGENCE_DETECTED")
 
     async def _on_btc_context_updated(self, event):
         """Обновляет локальное состояние тренда BTC при поступлении события (фоллбэк)."""
         self.btc_trend = event.payload.get("trend", "FLAT")
+
+    async def _on_divergence_detected(self, event):
+        """🔥 НОВОЕ: Сохраняем информацию о дивергенции."""
+        payload = getattr(event, "payload", {})
+        self._last_divergence = {
+            "type": payload.get("type"),  # "BULLISH" или "BEARISH"
+            "price": payload.get("price", 0.0),
+            "timestamp": time.time()
+        }
+        logger.info(f"🚨 [AbsorptionV2] Запомнена дивергенция: {self._last_divergence['type']} @ {self._last_divergence['price']:.2f}")
 
     async def _on_absorption_event(self, event):
         """Сохраняем событие, когда детектор его находит."""
@@ -130,6 +147,27 @@ class AbsorptionStrategyV2:
             
         if abs(event["imbalance"]) > 0.4:
             base_confidence += 0.10
+
+        # ========================================================================
+        # 🔥 УРОВЕНЬ 3: Бонус за подтверждение дивергенцией
+        # ========================================================================
+        if self._last_divergence:
+            div_age = now - self._last_divergence["timestamp"]
+            if div_age <= self._divergence_valid_for_sec:
+                div_type = self._last_divergence["type"]
+                
+                # Бычья дивергенция + LONG сигнал = бонус
+                if div_type == "BULLISH" and signal_side == "long":
+                    base_confidence += 0.20
+                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал LONG подтвержден бычьей дивергенцией! +0.20 к confidence")
+                
+                # Медвежья дивергенция + SHORT сигнал = бонус
+                elif div_type == "BEARISH" and signal_side == "short":
+                    base_confidence += 0.20
+                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал SHORT подтвержден медвежьей дивергенцией! +0.20 к confidence")
+            else:
+                self._last_divergence = None  # Сбрасываем устаревшую
+        # ========================================================================
             
         # Ограничиваем максимум 1.0
         final_confidence = min(base_confidence, 1.0)

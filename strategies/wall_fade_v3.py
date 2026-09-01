@@ -41,6 +41,10 @@ class WallFadeStrategyV3:
         
         # Фоллбэк: Состояние тренда BTC
         self.btc_trend = "FLAT"
+        
+        # 🔥 НОВОЕ: Хранилище последней дивергенции
+        self._last_divergence = None  # {"type": "BULLISH"/"BEARISH", "timestamp": ..., "price": ...}
+        self._divergence_valid_for_sec = 900.0  # 15 минут актуальности
 
     def subscribe_to_events(self, event_bus):
         self._event_bus = event_bus
@@ -50,10 +54,24 @@ class WallFadeStrategyV3:
         self._event_bus.subscribe("WALL_DETECTED", self._on_wall_event)
         self._event_bus.subscribe("WALL_CONFIRMED", self._on_wall_event)
         self._event_bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
-        logger.info("✅ WallFadeV3 subscribed to detector events & BTC_CONTEXT_UPDATED")
+        
+        # 🔥 НОВОЕ: Подписка на дивергенции
+        self._event_bus.subscribe("DIVERGENCE_DETECTED", self._on_divergence_detected)
+        
+        logger.info("✅ WallFadeV3 subscribed to detector events, BTC_CONTEXT_UPDATED & DIVERGENCE_DETECTED")
 
     async def _on_btc_context_updated(self, event):
         self.btc_trend = event.payload.get("trend", "FLAT")
+
+    async def _on_divergence_detected(self, event):
+        """🔥 НОВОЕ: Сохраняем информацию о дивергенции."""
+        payload = getattr(event, "payload", {})
+        self._last_divergence = {
+            "type": payload.get("type"),  # "BULLISH" или "BEARISH"
+            "price": payload.get("price", 0.0),
+            "timestamp": time.time()
+        }
+        logger.info(f"🚨 [WallFadeV3] Запомнена дивергенция: {self._last_divergence['type']} @ {self._last_divergence['price']:.2f}")
 
     async def _on_whale_event(self, event):
         payload = getattr(event, "payload", {})
@@ -113,6 +131,16 @@ class WallFadeStrategyV3:
         now = time.time()
         if now - self._last_signal_time < self.cooldown_sec:
             return None
+
+        # ========================================================================
+        # 🔥 УРОВЕНЬ 4: REGIME FILTER (Блокировка контртрендовых стратегий в импульсе)
+        # ========================================================================
+        btc_regime = context.get('btc_delta_context', {}).get('regime', 'NORMAL')
+        
+        if btc_regime == 'IMPULSIVE':
+            logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: режим IMPULSIVE (|дельта BTC| слишком сильная, риск 'поймать нож')")
+            return None
+        # ========================================================================
 
         # 1. MACRO HVN FILTER
         for macro_hvn in hvn_macro:
@@ -205,6 +233,24 @@ class WallFadeStrategyV3:
                 
                 if "REVERSAL" in trade_type and detector_boost < 0.30:
                     return None
+
+                # ========================================================================
+                # 🔥 УРОВЕНЬ 3: Бонус за подтверждение дивергенцией
+                # ========================================================================
+                if self._last_divergence:
+                    div_age = now - self._last_divergence["timestamp"]
+                    if div_age <= self._divergence_valid_for_sec:
+                        div_type = self._last_divergence["type"]
+                        
+                        if div_type == "BEARISH" and signal_side == "short":
+                            base_confidence += 0.20
+                            logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал SHORT подтвержден медвежьей дивергенцией! +0.20 к confidence")
+                        elif div_type == "BULLISH" and signal_side == "long":
+                            base_confidence += 0.20
+                            logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал LONG подтвержден бычьей дивергенцией! +0.20 к confidence")
+                    else:
+                        self._last_divergence = None
+                # ========================================================================
 
                 final_confidence = min(base_confidence + detector_boost, 1.0)
                 
