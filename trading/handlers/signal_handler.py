@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from trading.order_verifier import OrderVerifier
     from trading.drift_monitor import DriftMonitor
     from extensions.risk.position_sizer import PositionSizer
-    from typing import TYPE_CHECKING, Dict, Any, Optional  # 🔥 Добавляем Optional
+    from typing import TYPE_CHECKING, Dict, Any, Optional
 
 class SignalHandlerMixin:
     # ========================================================================
@@ -21,8 +21,7 @@ class SignalHandlerMixin:
     state_manager: "StateManager"
     verifier: "OrderVerifier"
     drift_monitor: "DriftMonitor"
-    # В SignalHandlerMixin (примерно строка 23)
-    position_sizer: Optional["PositionSizer"] = None  # 🔥 Optional и None по умолчанию
+    position_sizer: Optional["PositionSizer"] = None
     config: Dict[str, Any]
     _log: Any
 
@@ -41,6 +40,13 @@ class SignalHandlerMixin:
     def __init__(self):
         self._last_signal_time: Dict[str, float] = {}
         self._signal_cooldown = 5.0
+        # 🔥 УРОВЕНЬ 1: Хранилище BTC-контекста для Smart Sizing
+        self._btc_context: Dict[str, Any] = {
+            "trend": "FLAT",
+            "regime": "NORMAL",
+            "delta_strength": 0.0,
+            "price": 0.0
+        }
 
     def _subscribe_to_events(self):
         self.bus.subscribe("SIGNAL_GENERATED", self._on_signal)
@@ -50,10 +56,67 @@ class SignalHandlerMixin:
         self.bus.subscribe("SYNC_REQUEST", self._on_sync_request)
         self.bus.subscribe("TTL_EXPIRED", self._on_ttl_expired)
         self.bus.subscribe("ORDER_FILLED", self._on_order_filled)
-        self.bus.subscribe("ORDER_PARTIAL", self._on_order_partial)        
+        self.bus.subscribe("ORDER_PARTIAL", self._on_order_partial)
+        # 🔥 УРОВЕНЬ 1: Подписка на BTC-контекст для Smart Sizing
+        self.bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
         self._log("subscribed_to_events", {
-            "subscriptions": ["SIGNAL_GENERATED", "ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "POSITION_CLOSED", "SYNC_REQUEST", "TTL_EXPIRED"]
+            "subscriptions": [
+                "SIGNAL_GENERATED", "ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE",
+                "POSITION_CLOSED", "SYNC_REQUEST", "TTL_EXPIRED",
+                "ORDER_FILLED", "ORDER_PARTIAL", "BTC_CONTEXT_UPDATED"
+            ]
         })
+
+    async def _on_btc_context_updated(self, event):
+        """🔥 УРОВЕНЬ 1: Обновляем локальное хранилище BTC-контекста."""
+        payload = getattr(event, 'payload', {})
+        if not isinstance(payload, dict):
+            return
+        self._btc_context = {
+            "trend": payload.get("trend", "FLAT"),
+            "regime": payload.get("regime", "NORMAL"),
+            "delta_strength": payload.get("delta_strength", 0.0),
+            "price": payload.get("current_price", 0.0)
+        }
+
+    def _calculate_smart_risk(self, base_risk: float, signal_side: str) -> tuple:
+        """
+        🔥 УРОВЕНЬ 1: Smart Sizing — корректирует риск под BTC-тренд.
+        
+        Логика:
+        - BTC UP + LONG → ×1.5 (бонус за подтверждение)
+        - BTC DOWN + SHORT → ×1.5 (бонус за подтверждение)
+        - BTC FLAT → ×1.0 (нейтрально)
+        - Против тренда → ×0.5 (штраф)
+        - IMPULSIVE режим → ×0.7 (защита от "ловли ножей")
+        
+        Возвращает: (adjusted_risk, multiplier, reason)
+        """
+        btc_trend = self._btc_context.get("trend", "FLAT")
+        btc_regime = self._btc_context.get("regime", "NORMAL")
+        
+        # Защита от импульсных движений (IMPULSIVE)
+        if btc_regime == "IMPULSIVE":
+            multiplier = 0.7
+            reason = f"IMPULSIVE regime (delta={self._btc_context.get('delta_strength', 0):.1f}) — защита от ловли ножей"
+            return base_risk * multiplier, multiplier, reason
+        
+        # Совпадение тренда BTC с направлением сигнала
+        if signal_side == "long" and btc_trend == "UP":
+            multiplier = 1.5
+            reason = "BTC UP + LONG → подтверждение трендом (×1.5)"
+        elif signal_side == "short" and btc_trend == "DOWN":
+            multiplier = 1.5
+            reason = "BTC DOWN + SHORT → подтверждение трендом (×1.5)"
+        elif btc_trend == "FLAT":
+            multiplier = 1.0
+            reason = "BTC FLAT → нейтральный режим"
+        else:
+            # Против тренда — штраф
+            multiplier = 0.5
+            reason = f"BTC {btc_trend} vs {signal_side.upper()} → контртренд (×0.5)"
+        
+        return base_risk * multiplier, multiplier, reason
 
     async def _on_signal(self, event):
         self._log("signal_received", {"event": event.type})
@@ -105,24 +168,49 @@ class SignalHandlerMixin:
         self.repository.save(passport)
 
         # ========================================================================
-        # 🔥 ДИНАМИЧЕСКИЙ РАСЧЕТ РАЗМЕРА ПОЗИЦИИ (Position Sizing)
+        # 🔥 УРОВЕНЬ 1: SMART SIZING — адаптивный риск под BTC-тренд
         # ========================================================================
-        risk_usdt = self.config.get('risk', {}).get('risk_per_trade_usdt', 30.0)
+        base_risk_usdt = self.config.get('risk', {}).get('risk_per_trade_usdt', 30.0)
+        
+        # Рассчитываем скорректированный риск
+        risk_usdt, smart_multiplier, smart_reason = self._calculate_smart_risk(
+            base_risk=base_risk_usdt,
+            signal_side=signal.side
+        )
+        
+        # Громкий лог для мониторинга
+        print(f"💰 [SMART SIZING] BTC: {self._btc_context.get('trend')} ({self._btc_context.get('regime')}) | "
+              f"Signal: {signal.side.upper()} | "
+              f"Риск: {base_risk_usdt}$ → {risk_usdt:.2f}$ (×{smart_multiplier}) | "
+              f"{smart_reason}")
+        
+        self._log("smart_sizing_calculated", {
+            "base_risk_usdt": base_risk_usdt,
+            "adjusted_risk_usdt": risk_usdt,
+            "multiplier": smart_multiplier,
+            "reason": smart_reason,
+            "btc_trend": self._btc_context.get("trend"),
+            "btc_regime": self._btc_context.get("regime"),
+            "signal_side": signal.side,
+            "symbol": signal.symbol
+        })
+        # ========================================================================
+
         sl_price = passport.sl_price
         
-        # 1. ЗАЩИТА: Проверяем, инициализирован ли сайзер (убирает ошибку Pylance)
+        # 1. ЗАЩИТА: Проверяем, инициализирован ли сайзер
         if self.position_sizer is None:
             self._log("position_sizer_missing", {
                 "reason": "PositionSizer not initialized, falling back to default lot size"
             })
-            quantity = 7.0  # Fallback на старый жесткий лот, если сайзер не подключен
+            quantity = 7.0
         else:
-            # 2. Вызываем расчет размера позиции
+            # 2. Вызываем расчет с СКОРРЕКТИРОВАННЫМ риском
             safe_quantity = await self.position_sizer.calculate(
                 symbol=signal.symbol,
                 entry_price=signal.entry_price,
                 sl_price=sl_price,
-                risk_usdt=risk_usdt
+                risk_usdt=risk_usdt  # ← используем smart_risk
             )
 
             # 3. Если рассчитанный лот меньше минимума биржи, отменяем сигнал
@@ -130,22 +218,26 @@ class SignalHandlerMixin:
                 self._log("signal_rejected_position_sizing", {
                     "reason": "Calculated quantity is below exchange minimums or risk is too small",
                     "symbol": signal.symbol,
-                    "risk_usdt": risk_usdt,
+                    "base_risk_usdt": base_risk_usdt,
+                    "adjusted_risk_usdt": risk_usdt,
+                    "smart_multiplier": smart_multiplier,
                     "entry": signal.entry_price,
                     "sl": sl_price
                 })
-                # Помечаем паспорт как отклоненный и выходим
                 self.state_manager.handle_event(passport, "ORDER_FAILED", {'error': 'Position sizing failed: quantity too small'})
                 self.repository.save(passport)
                 return
 
-            # Если всё ок, используем рассчитанный размер
             quantity = safe_quantity
-        # ========================================================================
 
-        # 🔥 НОВОЕ: Добавляем информацию о расчете размера позиции в паспорт
+        # 🔥 НОВОЕ: Добавляем информацию о Smart Sizing в паспорт
         passport.sizing_info = {
-            "target_risk_usdt": risk_usdt,
+            "base_risk_usdt": base_risk_usdt,
+            "adjusted_risk_usdt": risk_usdt,
+            "smart_multiplier": smart_multiplier,
+            "smart_reason": smart_reason,
+            "btc_trend": self._btc_context.get("trend"),
+            "btc_regime": self._btc_context.get("regime"),
             "sl_distance": round(abs(signal.entry_price - sl_price), 4),
             "final_quantity": quantity,
             "max_size_cap": self.position_sizer.max_position_size if self.position_sizer else None,
@@ -167,10 +259,11 @@ class SignalHandlerMixin:
             "order_type": order_type, 
             "limit_price": signal.entry_price if order_type == 'limit' else None,
             "client_order_id": rich_client_order_id,
-            "risk_usdt": risk_usdt
+            "base_risk_usdt": base_risk_usdt,
+            "adjusted_risk_usdt": risk_usdt,
+            "smart_multiplier": smart_multiplier
         })
 
-        # 🔥 ГРОМКИЙ ПРИНТ: Точная проверка того, что летит на биржу
         print(f"🚀 [ПЕРЕД ОТПРАВКОЙ] Символ: {signal.symbol} | Количество (quantity): {quantity} | Цена: {signal.entry_price}")
         
         result = await trader.execute_order(

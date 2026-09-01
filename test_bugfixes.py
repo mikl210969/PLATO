@@ -304,6 +304,106 @@ class TestJsonLoggerStability(unittest.TestCase):
         logger.close()
         print(f"✅ Ротация работает (создано {len(log_files)} ротированных файлов с микросекундами)")
 
+class TestSmartSizing(unittest.TestCase):
+    """Тест: Smart Sizing корректирует риск под BTC-тренд."""
+
+    def _make_handler(self):
+        """Создать минимальный SignalHandlerMixin для теста."""
+        from trading.handlers.signal_handler import SignalHandlerMixin
+        
+        class TestHandler(SignalHandlerMixin):
+            def __init__(self):
+                super().__init__()
+        
+        return TestHandler()
+
+    def test_smart_sizing_long_in_uptrend(self):
+        """BTC UP + LONG → множитель 1.5."""
+        handler = self._make_handler()
+        handler._btc_context = {"trend": "UP", "regime": "NORMAL", "delta_strength": 10.0}
+        
+        risk, mult, reason = handler._calculate_smart_risk(base_risk=30.0, signal_side="long")
+        
+        self.assertEqual(mult, 1.5)
+        self.assertEqual(risk, 45.0)
+        print(f"✅ LONG in BTC UP → риск 45$ (×1.5): {reason}")
+
+    def test_smart_sizing_short_in_downtrend(self):
+        """BTC DOWN + SHORT → множитель 1.5."""
+        handler = self._make_handler()
+        handler._btc_context = {"trend": "DOWN", "regime": "NORMAL", "delta_strength": -20.0}
+        
+        risk, mult, reason = handler._calculate_smart_risk(base_risk=30.0, signal_side="short")
+        
+        self.assertEqual(mult, 1.5)
+        self.assertEqual(risk, 45.0)
+        print(f"✅ SHORT in BTC DOWN → риск 45$ (×1.5): {reason}")
+
+    def test_smart_sizing_long_in_downtrend(self):
+        """BTC DOWN + LONG → множитель 0.5 (штраф)."""
+        handler = self._make_handler()
+        handler._btc_context = {"trend": "DOWN", "regime": "NORMAL", "delta_strength": -20.0}
+        
+        risk, mult, reason = handler._calculate_smart_risk(base_risk=30.0, signal_side="long")
+        
+        self.assertEqual(mult, 0.5)
+        self.assertEqual(risk, 15.0)
+        print(f"✅ LONG in BTC DOWN → риск 15$ (×0.5 штраф): {reason}")
+
+    def test_smart_sizing_flat_regime(self):
+        """BTC FLAT → множитель 1.0 (нейтрально)."""
+        handler = self._make_handler()
+        handler._btc_context = {"trend": "FLAT", "regime": "NORMAL", "delta_strength": 0.0}
+        
+        risk, mult, reason = handler._calculate_smart_risk(base_risk=30.0, signal_side="long")
+        
+        self.assertEqual(mult, 1.0)
+        self.assertEqual(risk, 30.0)
+        print(f"✅ BTC FLAT → риск 30$ (×1.0 нейтрально): {reason}")
+
+    def test_smart_sizing_impulsive_regime(self):
+        """IMPULSIVE режим → множитель 0.7 (защита от ловли ножей)."""
+        handler = self._make_handler()
+        handler._btc_context = {"trend": "UP", "regime": "IMPULSIVE", "delta_strength": 500.0}
+        
+        risk, mult, reason = handler._calculate_smart_risk(base_risk=30.0, signal_side="long")
+        
+        self.assertEqual(mult, 0.7)
+        self.assertAlmostEqual(risk, 21.0, places=2)
+        print(f"✅ IMPULSIVE regime → риск 21$ (×0.7 защита): {reason}")
+
+    def test_btc_context_update_via_event(self):
+        """Проверка: событие BTC_CONTEXT_UPDATED обновляет локальный контекст."""
+        import asyncio
+        from trading.handlers.signal_handler import SignalHandlerMixin
+        
+        class TestHandler(SignalHandlerMixin):
+            def __init__(self):
+                super().__init__()
+            def get_trader(self, symbol):
+                return None
+        
+        handler = TestHandler()
+        
+        # Имитируем событие
+        event = type('Event', (), {
+            'payload': {
+                "trend": "UP",
+                "regime": "NORMAL",
+                "delta_strength": 25.5,
+                "current_price": 79500.0
+            }
+        })()
+        
+        # Вызываем синхронно через asyncio
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(handler._on_btc_context_updated(event))
+        loop.close()
+        
+        self.assertEqual(handler._btc_context["trend"], "UP")
+        self.assertEqual(handler._btc_context["regime"], "NORMAL")
+        self.assertEqual(handler._btc_context["delta_strength"], 25.5)
+        print("✅ BTC_CONTEXT_UPDATED обновляет локальный контекст")
 
 if __name__ == "__main__":
     # Запускаем тесты с подробным выводом
