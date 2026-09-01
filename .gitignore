@@ -1,17 +1,12 @@
 config/secrets.json
-# Python compiled files
-__pycache__/
-*.pyc
-*.pyo
-
-# Logs and runtime data
-logs/
-*.log
-s e c r e t s . j s o n 
-# Runtime данные
-passports/
+# Runtime data (НЕ коммитим)
+data/cold_storage/
 extensions/data_layer/*.db
 extensions/data_layer/*.db-shm
 extensions/data_layer/*.db-wal
-logs/*.jsonl 
+logs/
+passports/
+*.pyc
+__pycache__/
+.venv/
  
