@@ -6,6 +6,7 @@ DriftMonitor — периодический страж дрейфа состоя
 import asyncio
 from typing import Dict, Optional
 from core.logger import get_logger
+from core.types import PassportStatus
 
 
 class DriftMonitor:
@@ -44,7 +45,7 @@ class DriftMonitor:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        self.logger.info("🛑 [DRIFT_MONITOR] Stopped")
+        self.logger.info(" [DRIFT_MONITOR] Stopped")
 
     async def _monitor_loop(self, symbols: list):
         """Основной цикл проверки дрейфа."""
@@ -67,7 +68,8 @@ class DriftMonitor:
         Сравнивает:
         1. Позиция на бирже vs локальный активный паспорт
         2. 🔥 НОВОЕ: Принудительное восстановление при потерянном WS-событии FILLED
-        3. Открытые ордера на бирже vs локальные ордера в нетерминальных статусах
+        3. 🔥 НОВОЕ: Восстановление EXTERNAL_CLOSE с историей сделок
+        4. Открытые ордера на бирже vs локальные ордера в нетерминальных статусах
         """
         try:
             # Получаем данные с биржи
@@ -96,16 +98,21 @@ class DriftMonitor:
                 })
                 return
             
-            # Проверка 1.1: Расхождение позиции (паспорт есть, позиции нет)
+            # ========================================================================
+            # 🔥 ПРОВЕРКА 1.1: Расхождение позиции (паспорт есть, позиции нет)
+            # Сценарий: Позиция закрылась на бирже (ручное закрытие, ликвидация),
+            # но наш паспорт всё ещё в статусе OPEN.
+            # Действие: Запрашиваем историю сделок и корректно закрываем паспорт.
+            # ========================================================================
             if local_passport and exchange_position_size < 0.01 and local_position_size > 0.01:
                 self.logger.warning(
                     f"⚠️ [DRIFT_DETECTED] Local passport ({local_position_size}) "
-                    f"but no position on exchange for {symbol}"
+                    f"but no position on exchange for {symbol}. "
+                    f"Recovering EXTERNAL_CLOSE data..."
                 )
-                await self._publish_drift(symbol, "passport_without_position", {
-                    "exchange_size": exchange_position_size,
-                    "local_size": local_position_size
-                })
+                
+                # 🔥 ВОССТАНАВЛИВАЕМ ДАННЫЕ О ЗАКРЫТИИ
+                await self._recover_external_close(local_passport, symbol)
                 return
             
             # ========================================================================
@@ -174,6 +181,144 @@ class DriftMonitor:
                 
         except Exception as e:
             self.logger.error(f"Error checking drift for {symbol}: {e}")
+
+    async def _recover_external_close(self, passport, symbol: str):
+        """
+        🔥 НОВОЕ: Восстанавливает данные о закрытии позиции при EXTERNAL_CLOSE.
+        Запрашивает историю сделок с биржи и вычисляет exit_price и PnL.
+        """
+        try:
+            import time
+            
+            # 1. Запрашиваем историю сделок за последние 24 часа
+            end_time = int(time.time() * 1000)
+            start_time = end_time - (24 * 60 * 60 * 1000)
+            
+            self.logger.info(f"🔍 [DRIFT_RECOVERY] Запрашиваем историю сделок для {symbol}...")
+            trades = await self.rest.get_user_trades(symbol, start_time, end_time, 1000)
+            
+            if not trades:
+                self.logger.error(f" [DRIFT_RECOVERY] История сделок пуста для {symbol}")
+                # Всё равно закрываем паспорт, но с нулевыми данными
+                passport.status = PassportStatus.CLOSED.value
+                passport.exit_reason = "EXTERNAL_CLOSE"
+                passport.exit_price = 0.0
+                passport.gross_pnl = 0.0
+                passport.net_pnl = 0.0
+                passport.position_size = 0.0
+                passport.closed_at = passport.updated_at
+                self.passport_manager.update(passport)
+                return
+            
+            # 2. Ищем сделки, связанные с ордерами этого паспорта
+            passport_order_ids = {str(o.get('order_id', '')) for o in passport.orders}
+            
+            # Фильтруем только сделки, которые относятся к ордерам паспорта
+            passport_trades = [
+                t for t in trades 
+                if str(t.get('orderId', '')) in passport_order_ids
+            ]
+            
+            if not passport_trades:
+                self.logger.warning(
+                    f"⚠️ [DRIFT_RECOVERY] Не найдено сделок для ордера {passport_order_ids}. "
+                    f"Пытаемся найти по client_order_id..."
+                )
+                
+                # Попытка найти по client_order_id
+                passport_client_ids = {str(o.get('client_order_id', '')) for o in passport.orders}
+                passport_trades = [
+                    t for t in trades 
+                    if str(t.get('clientOrderId', '')) in passport_client_ids
+                ]
+            
+            if not passport_trades:
+                self.logger.error(f"❌ [DRIFT_RECOVERY] Не удалось найти сделки для {passport.passport_id}")
+                passport.status = PassportStatus.CLOSED.value
+                passport.exit_reason = "EXTERNAL_CLOSE"
+                passport.exit_price = 0.0
+                passport.gross_pnl = 0.0
+                passport.net_pnl = 0.0
+                passport.position_size = 0.0
+                passport.closed_at = passport.updated_at
+                self.passport_manager.update(passport)
+                return
+            
+            # 3. 🔥 Вычисляем среднюю цену закрытия и общий PnL
+            #    Группируем сделки по стороне (BUY закрывает SHORT, SELL закрывает LONG)
+            closing_side = "BUY" if passport.side == "short" else "SELL"
+            
+            closing_trades = [
+                t for t in passport_trades 
+                if t.get('side') == closing_side
+            ]
+            
+            if not closing_trades:
+                self.logger.warning(
+                    f"⚠️ [DRIFT_RECOVERY] Не найдено закрывающих сделок ({closing_side}) "
+                    f"для {passport.passport_id}. Используем все сделки."
+                )
+                closing_trades = passport_trades
+            
+            # 4. Считаем взвешенную среднюю цену закрытия
+            total_qty = sum(float(t.get('qty', 0)) for t in closing_trades)
+            total_value = sum(float(t.get('quoteQty', 0)) for t in closing_trades)
+            
+            if total_qty > 0:
+                exit_price = total_value / total_qty
+            else:
+                # Fallback: берём цену последней сделки
+                exit_price = float(closing_trades[-1].get('price', 0))
+            
+            # 5. 🔥 Считаем PnL
+            entry_price = passport.entry_price
+            position_qty = abs(passport.position_size or 0)
+            
+            if passport.side == "long":
+                gross_pnl = (exit_price - entry_price) * position_qty
+            else:  # short
+                gross_pnl = (entry_price - exit_price) * position_qty
+            
+            # 6. Считаем комиссию (суммируем из всех закрывающих сделок)
+            total_commission = sum(
+                float(t.get('commission', 0)) for t in closing_trades
+            )
+            
+            # 7. 🔥 Обновляем паспорт с корректными данными
+            passport.status = PassportStatus.CLOSED.value
+            passport.exit_reason = "EXTERNAL_CLOSE"
+            passport.exit_price = exit_price
+            passport.gross_pnl = gross_pnl
+            passport.commission = total_commission
+            passport.net_pnl = gross_pnl - total_commission
+            passport.position_size = 0.0
+            passport.closed_at = passport.updated_at
+            
+            # 8. Добавляем событие в timeline
+            passport.add_timeline_event(
+                "EXTERNAL_CLOSE",
+                f"Recovered: exit_price={exit_price:.4f}, pnl={gross_pnl:+.2f}, commission={total_commission:.4f}"
+            )
+            
+            # 9. Сохраняем изменения
+            self.passport_manager.update(passport)
+            
+            self.logger.info(
+                f"✅ [DRIFT_RECOVERY] Паспорт {passport.passport_id} восстановлен: "
+                f"exit_price={exit_price:.4f}, PnL={gross_pnl:+.2f} USDT, commission={total_commission:.4f}"
+            )
+            
+        except Exception as e:
+            self.logger.error(f"❌ [DRIFT_RECOVERY] Ошибка восстановления {passport.passport_id}: {e}")
+            # В случае ошибки всё равно закрываем паспорт, но с нулевыми данными
+            passport.status = PassportStatus.CLOSED.value
+            passport.exit_reason = "EXTERNAL_CLOSE"
+            passport.exit_price = 0.0
+            passport.gross_pnl = 0.0
+            passport.net_pnl = 0.0
+            passport.position_size = 0.0
+            passport.closed_at = passport.updated_at
+            self.passport_manager.update(passport)
 
     async def _publish_drift(self, symbol: str, drift_type: str, details: dict):
         """Опубликовать событие дрейфа и установить флаг."""
