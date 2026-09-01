@@ -113,18 +113,23 @@ class StateManager:
     def handle_event(self, passport: TradePassport, event_type: str, event_data: Dict[str, Any]) -> bool:
         """
         Обработать событие и выполнить переход.
+        - 🔥 ЖЕСТКИЙ БЛОК: Игнорирование событий для уже закрытых паспортов.
         - Идемпотентность: повтор того же статусного события — тихий no-op.
-        - Аномалия дрейфа: исполнение по закрытому/отменённому паспорту — сигнал на сверку.
-        - 🔥 ЗАЩИТА PnL: предотвращение записи абсурдных значений при exit_price = 0.
         """
         status = passport.status
+        
+        # 🔥 АБСОЛЮТНАЯ ЗАЩИТА: Если паспорт уже закрыт, мы НИЧЕГО не меняем.
+        # Это предотвращает перезапись правильных данных от DriftMonitor запоздалыми WS-событиями.
+        if status == PassportStatus.CLOSED.value:
+            return False
+
         new_status = None
         reason = ""
         position_size = None
         position_price = None
         close_data = None
 
-        # 1. Определяем целевой статус и извлекаем данные БЕЗ побочных изменений
+        # 1. Определяем целевой статус и извлекаем данные
         if event_type == "ORDER_SENT":
             new_status = PassportStatus.ORDER_SENT.value
             reason = "Order sent to exchange"
@@ -162,12 +167,12 @@ class StateManager:
             new_status = PassportStatus.CLOSED.value
             reason = event_data.get('exit_reason', "Position closed")
             
-            # 🔥 ЗАЩИТА УРОВЕНЬ 1: Безопасное извлечение и валидация данных закрытия
+            # Безопасное извлечение
             exit_price = float(event_data.get('exit_price', 0.0) or 0.0)
             gross_pnl = float(event_data.get('gross_pnl', 0.0) or 0.0)
             commission = float(event_data.get('commission', 0.0) or 0.0)
             
-            # Если exit_price = 0, пытаемся восстановить его из известных уровней паспорта
+            # Если exit_price = 0, пытаемся восстановить из уровней
             if exit_price == 0.0:
                 if reason == "SL_HIT":
                     exit_price = float(passport.sl_price or 0.0)
@@ -175,25 +180,25 @@ class StateManager:
                     exit_price = float(passport.tp1_price or 0.0)
                 elif reason == "TP2_HIT":
                     exit_price = float(passport.tp2_price or 0.0)
-                else:
-                    print(f"⚠️ [STATE] exit_price=0 для {passport.passport_id}, PnL будет пересчитан или обнулён")
             
-            # 🔥 ЗАЩИТА УРОВЕНЬ 2: Санитарная проверка PnL на абсурдность
+            # 🔥 ИСПРАВЛЕНИЕ РАСЧЕТА: Используем abs() для количества
             position_qty = abs(passport.position_size or 0.0)
             entry_price = float(passport.position_entry_price or passport.entry_price or 0.0)
             
             if exit_price > 0 and position_qty > 0 and entry_price > 0:
-                # Считаем, каким PnL ДОЛЖЕН быть по законам математики
                 if passport.side == 'long':
                     calculated_pnl = (exit_price - entry_price) * position_qty
                 else:  # short
                     calculated_pnl = (entry_price - exit_price) * position_qty
                 
-                # Если переданный PnL отличается от расчётного более чем на 50% от стоимости позиции — это баг
+                # Если разница огромна, доверяем математике, а не событию
                 max_allowed_diff = position_qty * entry_price * 0.5
                 if abs(gross_pnl - calculated_pnl) > max_allowed_diff:
-                    print(f"⚠️ [STATE] Обнаружен аномальный PnL ({gross_pnl}) для {passport.passport_id}, пересчитан как {calculated_pnl:.2f}")
+                    print(f"⚠️ [STATE] Аномальный PnL ({gross_pnl}) для {passport.passport_id}, пересчитан как {calculated_pnl:.2f}")
                     gross_pnl = calculated_pnl
+            else:
+                # Если exit_price так и остался 0, обнуляем PnL, чтобы не писать мусор вроде 1059.66
+                gross_pnl = 0.0
 
             close_data = {
                 'exit_price': exit_price,
@@ -216,25 +221,19 @@ class StateManager:
         if not new_status:
             return False
 
-        # 2. АНОМАЛИЯ ДРЕЙФА: исполнение по паспорту в терминальном статусе
+        # 2. АНОМАЛИЯ ДРЕЙФА
         if event_type in ("ORDER_FILLED", "ORDER_PARTIAL") and status in (
             PassportStatus.CLOSED.value,
             PassportStatus.CANCELED.value,
             PassportStatus.FAILED.value,
         ):
-            print(
-                f"⚠️ [STATE_ANOMALY] {event_type} при статусе {status} "
-                f"(passport={passport.passport_id}, qty={event_data.get('executed_qty')}) — "
-                f"возможный дрейф состояния, требуется сверка с биржей"
-            )
             return False
 
-        # 3. ИДЕМПОТЕНТНОСТЬ: повтор того же статусного события — тихий no-op.
-        #    ORDER_PARTIAL исключён: частичные исполнения обязаны обновлять размер позиции.
+        # 3. ИДЕМПОТЕНТНОСТЬ
         if new_status == status and event_type != "ORDER_PARTIAL":
             return False
 
-        # 4. Применяем данные позиции/закрытия ТОЛЬКО перед валидным переходом
+        # 4. Применяем данные
         if position_size is not None:
             passport.position_size = position_size
             passport.position_entry_price = position_price if position_price else passport.position_entry_price
@@ -244,9 +243,10 @@ class StateManager:
             passport.gross_pnl = close_data['gross_pnl']
             passport.commission = close_data['commission']
             passport.net_pnl = passport.gross_pnl - passport.commission
-            # 🔥 Обнуляем размер позиции при закрытии, чтобы не было "-0.23" в закрытом паспорте
-            if new_status == PassportStatus.CLOSED.value:
-                passport.position_size = 0.0
+            
+        # 🔥 ГАРАНТИРОВАННОЕ ОБНУЛЕНИЕ размера позиции при любом закрытии
+        if new_status == PassportStatus.CLOSED.value:
+            passport.position_size = 0.0
 
         # 5. Выполняем переход
         return self.transition(passport, new_status, reason)
