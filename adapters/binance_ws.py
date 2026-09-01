@@ -1,12 +1,16 @@
 """
 Binance WebSocket адаптер (Production-Ready).
-Архитектура Producer-Consumer: гарантирует, что сетевой цикл чтения никогда не блокируется 
+Архитектура Producer-Consumer: гарантирует, что сетевой цикл чтения никогда не блокируется
 медленной обработкой сообщений (EventBus, логи), предотвращая разрывы соединения по таймауту.
+
+🔥 ИСПРАВЛЕНО:
+- Храним активные подписки, восстанавливаем их при reconnect
+- Добавлен set_on_reconnect() для колбэков после переподключения
 """
 import asyncio
 import json
 import websockets
-from typing import Dict, Any, Optional, Callable, Awaitable
+from typing import Dict, Any, Optional, Callable, Awaitable, List
 from core.logger import get_logger
 
 
@@ -15,7 +19,7 @@ class BinanceWsAdapter:
 
     def __init__(self, base_url: str = "wss://stream.binancefuture.com/ws", event_bus=None):
         self.base_url = base_url
-        self.event_bus = event_bus  # 🔥 НОВОЕ: Шина событий для нормализации (готовность к Bybit)
+        self.event_bus = event_bus
         self._ws = None
         self._running = False
         self._connected = False
@@ -24,16 +28,41 @@ class BinanceWsAdapter:
         self._json_logger = None
         self._on_reconnect: Optional[Callable[[], Awaitable[None]]] = None
         
-        # 🔥 Ключевой элемент стабильности: очередь сообщений. 
+        # 🔥 НОВОЕ: список активных подписок для восстановления при reconnect
+        self._active_subscriptions: List[str] = []
+        self._is_initial_connect = True
+        
+        # 🔥 Ключевой элемент стабильности: очередь сообщений.
         self._message_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self.logger = get_logger(__name__)
 
     def set_json_logger(self, json_logger):
         self._json_logger = json_logger
 
+    def set_on_reconnect(self, callback: Callable[[], Awaitable[None]]):
+        """🔥 НОВОЕ: Установить колбэк, который вызывается после каждого подключения."""
+        self._on_reconnect = callback
+
     def on(self, event_type: str, handler: Callable[[Dict], Awaitable[None]]):
         """Подписаться на событие."""
         self._handlers[event_type] = handler
+
+    async def _send_subscribe(self, streams: List[str], req_id: int) -> bool:
+        """🔥 Вспомогательный метод: отправить SUBSCRIBE и сохранить в активные подписки."""
+        if not self._connected or self._ws is None:
+            return False
+        msg = {"method": "SUBSCRIBE", "params": streams, "id": req_id}
+        try:
+            await self._ws.send(json.dumps(msg))
+            # Сохраняем подписки (избегаем дублей)
+            for stream in streams:
+                if stream not in self._active_subscriptions:
+                    self._active_subscriptions.append(stream)
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to subscribe to {streams}: {e}")
+            self._connected = False
+            return False
 
     async def connect(self, retries: int = 3):
         """Подключиться к WebSocket с повторными попытками."""
@@ -59,8 +88,16 @@ class BinanceWsAdapter:
                 self._healthy = True
                 self.logger.info("✅ WebSocket connected")
                 
+                # 🔥 НОВОЕ: при reconnect восстанавливаем ВСЕ активные подписки
+                if not self._is_initial_connect and self._active_subscriptions:
+                    self.logger.info(f"🔄 Reconnect: восстанавливаем {len(self._active_subscriptions)} подписок...")
+                    # Отправляем пачкой (Binance принимает список)
+                    await self._send_subscribe(list(self._active_subscriptions), id(self) + 999)
+                
                 if self._on_reconnect:
                     await self._on_reconnect()
+                
+                self._is_initial_connect = False
                 return
                 
             except Exception as e:
@@ -71,18 +108,22 @@ class BinanceWsAdapter:
         raise RuntimeError(f"Failed to connect after {retries} attempts")
 
     async def subscribe_user_data(self, listen_key: str):
+        """🔥 Сохраняем listen_key в активные подписки для восстановления."""
         if not self._connected or self._ws is None:
             self.logger.warning("Cannot subscribe: WebSocket not connected")
             return
         msg = {"method": "SUBSCRIBE", "params": [listen_key], "id": id(self)}
         try:
             await self._ws.send(json.dumps(msg))
+            if listen_key not in self._active_subscriptions:
+                self._active_subscriptions.append(listen_key)
             self.logger.info(f"Subscribed to user data: {listen_key[:10]}...")
         except Exception as e:
             self.logger.warning(f"Failed to subscribe to user data: {e}")
             self._connected = False
 
     async def subscribe_depth(self, symbol: str):
+        """🔥 Сохраняем depth-поток в активные подписки."""
         if not self._connected or self._ws is None:
             self.logger.warning("Cannot subscribe: WebSocket not connected")
             return
@@ -90,6 +131,8 @@ class BinanceWsAdapter:
         msg = {"method": "SUBSCRIBE", "params": [stream], "id": id(self) + 1}
         try:
             await self._ws.send(json.dumps(msg))
+            if stream not in self._active_subscriptions:
+                self._active_subscriptions.append(stream)
             self.logger.info(f"Subscribed to depth: {symbol}")
         except Exception as e:
             self.logger.warning(f"Failed to subscribe to depth: {e}")
@@ -102,14 +145,9 @@ class BinanceWsAdapter:
             return
         
         streams = ["btcusdt@aggTrade", "btcusdt@depth@100ms"]
-        msg = {"method": "SUBSCRIBE", "params": streams, "id": id(self) + 99}
-        
-        try:
-            await self._ws.send(json.dumps(msg))
+        ok = await self._send_subscribe(streams, id(self) + 99)
+        if ok:
             self.logger.info("✅ Subscribed to BTCUSDT streams (aggTrade, depth@100ms)")
-        except Exception as e:
-            self.logger.warning(f"Failed to subscribe to BTC streams: {e}")
-            self._connected = False
 
     async def run(self):
         self._running = True
@@ -172,10 +210,9 @@ class BinanceWsAdapter:
             normalized_payload = {
                 "price": float(data.get('p', 0)),
                 "qty": float(data.get('q', 0)),
-                "is_buyer_maker": bool(data.get('m', False)), # False = покупка (дельта +), True = продажа (дельта -)
+                "is_buyer_maker": bool(data.get('m', False)),
                 "timestamp": data.get('T', 0)
             }
-            # Публикуем асинхронно, чтобы не блокировать очередь
             asyncio.create_task(
                 self.event_bus.publish(
                     event_type=f"TRADE_NORMALIZED_{symbol}",
@@ -185,7 +222,7 @@ class BinanceWsAdapter:
                 )
             )
 
-        # 🔥 3. МАРШРУТИЗАЦИЯ ПО СИМВОЛАМ И СОБЫТИЯМ (для обратной совместимости)
+        # 🔥 3. МАРШРУТИЗАЦИЯ ПО СИМВОЛАМ И СОБЫТИЯМ
         if event_type == 'aggTrade':
             if symbol == 'BTCUSDT':
                 await self._route_event('BTC_AGG_TRADE', data)
