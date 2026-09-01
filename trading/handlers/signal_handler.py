@@ -47,6 +47,8 @@ class SignalHandlerMixin:
             "delta_strength": 0.0,
             "price": 0.0
         }
+        # 🔥 АДАПТИВНЫЙ SL: Хранилище контекстов для каждого символа
+        self._symbol_contexts: Dict[str, Dict[str, Any]] = {}
 
     def _subscribe_to_events(self):
         self.bus.subscribe("SIGNAL_GENERATED", self._on_signal)
@@ -59,11 +61,16 @@ class SignalHandlerMixin:
         self.bus.subscribe("ORDER_PARTIAL", self._on_order_partial)
         # 🔥 УРОВЕНЬ 1: Подписка на BTC-контекст для Smart Sizing
         self.bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
+        # 🔥 АДАПТИВНЫЙ SL: Подписка на контексты всех символов
+        self.bus.subscribe("CONTEXT_UPDATED_SOLUSDT", self._on_symbol_context_updated)
+        self.bus.subscribe("CONTEXT_UPDATED_ETHUSDT", self._on_symbol_context_updated)
+        self.bus.subscribe("CONTEXT_UPDATED_BNBUSDT", self._on_symbol_context_updated)
         self._log("subscribed_to_events", {
             "subscriptions": [
                 "SIGNAL_GENERATED", "ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE",
                 "POSITION_CLOSED", "SYNC_REQUEST", "TTL_EXPIRED",
-                "ORDER_FILLED", "ORDER_PARTIAL", "BTC_CONTEXT_UPDATED"
+                "ORDER_FILLED", "ORDER_PARTIAL", "BTC_CONTEXT_UPDATED",
+                "CONTEXT_UPDATED_SOLUSDT", "CONTEXT_UPDATED_ETHUSDT", "CONTEXT_UPDATED_BNBUSDT"
             ]
         })
 
@@ -78,6 +85,30 @@ class SignalHandlerMixin:
             "delta_strength": payload.get("delta_strength", 0.0),
             "price": payload.get("current_price", 0.0)
         }
+
+    async def _on_symbol_context_updated(self, event):
+        """🔥 АДАПТИВНЫЙ SL: Обновляем контекст для каждого символа."""
+        payload = getattr(event, 'payload', {})
+        if not isinstance(payload, dict):
+            return
+        symbol = payload.get("symbol", "")
+        if not symbol:
+            # Пытаемся извлечь символ из типа события
+            event_type = getattr(event, 'type', '')
+            if 'SOLUSDT' in event_type:
+                symbol = 'SOLUSDT'
+            elif 'ETHUSDT' in event_type:
+                symbol = 'ETHUSDT'
+            elif 'BNBUSDT' in event_type:
+                symbol = 'BNBUSDT'
+        
+        if symbol:
+            self._symbol_contexts[symbol] = {
+                "delta_strength": payload.get("delta_strength", 0.0),
+                "trend": payload.get("trend", "FLAT"),
+                "regime": payload.get("regime", "NORMAL"),
+                "price": payload.get("current_price", 0.0)
+            }
 
     def _calculate_smart_risk(self, base_risk: float, signal_side: str) -> tuple:
         """
@@ -117,6 +148,43 @@ class SignalHandlerMixin:
             reason = f"BTC {btc_trend} vs {signal_side.upper()} → контртренд (×0.5)"
         
         return base_risk * multiplier, multiplier, reason
+
+    def _calculate_adaptive_sl(self, base_sl_distance: float, symbol: str, signal_side: str) -> tuple:
+        """
+        🔥 АДАПТИВНЫЙ SL: Корректирует расстояние до стопа на основе дельты символа.
+        
+        Логика:
+        - Сильная дельта в нашу сторону (>100) → узкий SL (×0.6)
+        - Слабая дельта (<30) → широкий SL (×1.4)
+        - Нейтральная дельта → базовый SL (×1.0)
+        
+        Возвращает: (adjusted_sl_distance, multiplier, reason)
+        """
+        symbol_context = self._symbol_contexts.get(symbol, {})
+        delta = symbol_context.get("delta_strength", 0.0)
+        
+        # Определяем, совпадает ли дельта с направлением сигнала
+        delta_matches_signal = (
+            (signal_side == "long" and delta > 0) or
+            (signal_side == "short" and delta < 0)
+        )
+        
+        abs_delta = abs(delta)
+        
+        if delta_matches_signal and abs_delta > 100:
+            # Сильная дельта в нашу сторону → узкий SL
+            multiplier = 0.6
+            reason = f"Сильная дельта {delta:+.1f} → узкий SL (×0.6)"
+        elif abs_delta < 30:
+            # Слабая дельта → широкий SL (защита от шума)
+            multiplier = 1.4
+            reason = f"Слабая дельта {delta:+.1f} → широкий SL (×1.4)"
+        else:
+            # Нейтральная дельта → базовый SL
+            multiplier = 1.0
+            reason = f"Нейтральная дельта {delta:+.1f} → базовый SL (×1.0)"
+        
+        return base_sl_distance * multiplier, multiplier, reason
 
     async def _on_signal(self, event):
         self._log("signal_received", {"event": event.type})
@@ -161,9 +229,49 @@ class SignalHandlerMixin:
 
         atr_value = self.config.get('trading', {}).get('atr_value', 0.5)
         levels = trader.calculate_exit_levels(side=signal.side, entry_price=signal.entry_price, atr_value=atr_value)
-        passport.sl_price = levels.get('sl_price', 0)
-        passport.tp1_price = levels.get('tp1_price', 0)
-        passport.tp2_price = levels.get('tp2_price', 0)
+        
+        # Базовые уровни из ATR
+        base_sl_price = levels.get('sl_price', 0)
+        base_tp1_price = levels.get('tp1_price', 0)
+        base_tp2_price = levels.get('tp2_price', 0)
+        
+        # ========================================================================
+        # 🔥 АДАПТИВНЫЙ SL: Корректируем расстояние до стопа на основе дельты
+        # ========================================================================
+        base_sl_distance = abs(signal.entry_price - base_sl_price)
+        adjusted_sl_distance, sl_multiplier, sl_reason = self._calculate_adaptive_sl(
+            base_sl_distance=base_sl_distance,
+            symbol=signal.symbol,
+            signal_side=signal.side
+        )
+        
+        # Пересчитываем SL с адаптивным расстоянием
+        if signal.side == "long":
+            passport.sl_price = round(signal.entry_price - adjusted_sl_distance, 2)
+        else:  # short
+            passport.sl_price = round(signal.entry_price + adjusted_sl_distance, 2)
+        
+        # TP остаются без изменений (или можно тоже сделать адаптивными позже)
+        passport.tp1_price = base_tp1_price
+        passport.tp2_price = base_tp2_price
+        
+        # Громкий лог для мониторинга
+        print(f"🎯 [ADAPTIVE SL] {signal.symbol} | {signal.side.upper()} | "
+              f"Базовый SL: {base_sl_distance:.4f} → Адаптивный: {adjusted_sl_distance:.4f} (×{sl_multiplier}) | "
+              f"{sl_reason}")
+        
+        self._log("adaptive_sl_calculated", {
+            "symbol": signal.symbol,
+            "signal_side": signal.side,
+            "base_sl_distance": base_sl_distance,
+            "adjusted_sl_distance": adjusted_sl_distance,
+            "sl_multiplier": sl_multiplier,
+            "sl_reason": sl_reason,
+            "delta_strength": self._symbol_contexts.get(signal.symbol, {}).get("delta_strength", 0.0),
+            "base_sl_price": base_sl_price,
+            "adaptive_sl_price": passport.sl_price
+        })
+        # ========================================================================
 
         self.repository.save(passport)
 
@@ -230,14 +338,22 @@ class SignalHandlerMixin:
 
             quantity = safe_quantity
 
-        # 🔥 НОВОЕ: Добавляем информацию о Smart Sizing в паспорт
+        # 🔥 НОВОЕ: Добавляем информацию о Smart Sizing и Adaptive SL в паспорт
         passport.sizing_info = {
+            # Smart Sizing
             "base_risk_usdt": base_risk_usdt,
             "adjusted_risk_usdt": risk_usdt,
             "smart_multiplier": smart_multiplier,
             "smart_reason": smart_reason,
             "btc_trend": self._btc_context.get("trend"),
             "btc_regime": self._btc_context.get("regime"),
+            # Adaptive SL
+            "base_sl_distance": base_sl_distance,
+            "adjusted_sl_distance": adjusted_sl_distance,
+            "sl_multiplier": sl_multiplier,
+            "sl_reason": sl_reason,
+            "symbol_delta": self._symbol_contexts.get(signal.symbol, {}).get("delta_strength", 0.0),
+            # Итоговые значения
             "sl_distance": round(abs(signal.entry_price - sl_price), 4),
             "final_quantity": quantity,
             "max_size_cap": self.position_sizer.max_position_size if self.position_sizer else None,
@@ -261,7 +377,10 @@ class SignalHandlerMixin:
             "client_order_id": rich_client_order_id,
             "base_risk_usdt": base_risk_usdt,
             "adjusted_risk_usdt": risk_usdt,
-            "smart_multiplier": smart_multiplier
+            "smart_multiplier": smart_multiplier,
+            "base_sl_distance": base_sl_distance,
+            "adjusted_sl_distance": adjusted_sl_distance,
+            "sl_multiplier": sl_multiplier
         })
 
         print(f"🚀 [ПЕРЕД ОТПРАВКОЙ] Символ: {signal.symbol} | Количество (quantity): {quantity} | Цена: {signal.entry_price}")

@@ -405,6 +405,129 @@ class TestSmartSizing(unittest.TestCase):
         self.assertEqual(handler._btc_context["delta_strength"], 25.5)
         print("✅ BTC_CONTEXT_UPDATED обновляет локальный контекст")
 
+class TestAdaptiveSL(unittest.TestCase):
+    """Тест: Адаптивный SL от дельты."""
+
+    def _make_handler(self):
+        """Создать минимальный SignalHandlerMixin для теста."""
+        from trading.handlers.signal_handler import SignalHandlerMixin
+        
+        class TestHandler(SignalHandlerMixin):
+            def __init__(self):
+                super().__init__()
+        
+        return TestHandler()
+
+    def test_adaptive_sl_strong_delta_long(self):
+        """Сильная дельта +800 при LONG → узкий SL (×0.6)."""
+        handler = self._make_handler()
+        handler._symbol_contexts["SOLUSDT"] = {"delta_strength": 800.0}
+        
+        adjusted, mult, reason = handler._calculate_adaptive_sl(
+            base_sl_distance=0.25,
+            symbol="SOLUSDT",
+            signal_side="long"
+        )
+        
+        self.assertEqual(mult, 0.6)
+        self.assertAlmostEqual(adjusted, 0.15, places=4)
+        print(f"✅ Сильная дельта +800 LONG → SL 0.15$ (×0.6): {reason}")
+
+    def test_adaptive_sl_strong_delta_short(self):
+        """Сильная дельта -800 при SHORT → узкий SL (×0.6)."""
+        handler = self._make_handler()
+        handler._symbol_contexts["SOLUSDT"] = {"delta_strength": -800.0}
+        
+        adjusted, mult, reason = handler._calculate_adaptive_sl(
+            base_sl_distance=0.25,
+            symbol="SOLUSDT",
+            signal_side="short"
+        )
+        
+        self.assertEqual(mult, 0.6)
+        self.assertAlmostEqual(adjusted, 0.15, places=4)
+        print(f"✅ Сильная дельта -800 SHORT → SL 0.15$ (×0.6): {reason}")
+
+    def test_adaptive_sl_weak_delta(self):
+        """Слабая дельта +20 → широкий SL (×1.4)."""
+        handler = self._make_handler()
+        handler._symbol_contexts["SOLUSDT"] = {"delta_strength": 20.0}
+        
+        adjusted, mult, reason = handler._calculate_adaptive_sl(
+            base_sl_distance=0.25,
+            symbol="SOLUSDT",
+            signal_side="long"
+        )
+        
+        self.assertEqual(mult, 1.4)
+        self.assertAlmostEqual(adjusted, 0.35, places=4)
+        print(f"✅ Слабая дельта +20 → SL 0.35$ (×1.4): {reason}")
+
+    def test_adaptive_sl_neutral_delta(self):
+        """Нейтральная дельта +50 → базовый SL (×1.0)."""
+        handler = self._make_handler()
+        handler._symbol_contexts["SOLUSDT"] = {"delta_strength": 50.0}
+        
+        adjusted, mult, reason = handler._calculate_adaptive_sl(
+            base_sl_distance=0.25,
+            symbol="SOLUSDT",
+            signal_side="long"
+        )
+        
+        self.assertEqual(mult, 1.0)
+        self.assertEqual(adjusted, 0.25)
+        print(f"✅ Нейтральная дельта +50 → SL 0.25$ (×1.0): {reason}")
+
+    def test_adaptive_sl_wrong_direction(self):
+        """Дельта против сигнала → базовый SL (×1.0)."""
+        handler = self._make_handler()
+        handler._symbol_contexts["SOLUSDT"] = {"delta_strength": -200.0}  # Против LONG
+        
+        adjusted, mult, reason = handler._calculate_adaptive_sl(
+            base_sl_distance=0.25,
+            symbol="SOLUSDT",
+            signal_side="long"
+        )
+        
+        # Дельта против сигнала → не применяем узкий SL
+        self.assertEqual(mult, 1.0)
+        self.assertEqual(adjusted, 0.25)
+        print(f"✅ Дельта против сигнала → SL 0.25$ (×1.0 базовый): {reason}")
+
+    def test_symbol_context_update_via_event(self):
+        """Проверка: событие CONTEXT_UPDATED обновляет контекст символа."""
+        import asyncio
+        from trading.handlers.signal_handler import SignalHandlerMixin
+        
+        class TestHandler(SignalHandlerMixin):
+            def __init__(self):
+                super().__init__()
+            def get_trader(self, symbol):
+                return None
+        
+        handler = TestHandler()
+        
+        # Имитируем событие для SOLUSDT
+        event = type('Event', (), {
+            'type': 'CONTEXT_UPDATED_SOLUSDT',
+            'payload': {
+                "symbol": "SOLUSDT",
+                "delta_strength": 150.5,
+                "trend": "UP",
+                "regime": "NORMAL",
+                "current_price": 103.5
+            }
+        })()
+        
+        # Вызываем синхронно через asyncio
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(handler._on_symbol_context_updated(event))
+        loop.close()
+        
+        self.assertEqual(handler._symbol_contexts["SOLUSDT"]["delta_strength"], 150.5)
+        self.assertEqual(handler._symbol_contexts["SOLUSDT"]["trend"], "UP")
+        print("✅ CONTEXT_UPDATED_SOLUSDT обновляет контекст символа")
+
 if __name__ == "__main__":
     # Запускаем тесты с подробным выводом
     unittest.main(verbosity=2)
