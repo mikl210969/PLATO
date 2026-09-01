@@ -64,9 +64,17 @@ class JsonLogger:
                 # Закрываем текущий файл
                 self._close_file()
                 
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # Добавляем микросекунды для уникальности (исправляем WinError 183)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 new_name = f"platform_log_{timestamp}.jsonl"
                 rotated_path = self._file_path.with_name(new_name)
+                
+                # Проверяем, не существует ли уже такой файл (маловероятно, но возможно)
+                counter = 0
+                while rotated_path.exists():
+                    counter += 1
+                    new_name = f"platform_log_{timestamp}_{counter}.jsonl"
+                    rotated_path = self._file_path.with_name(new_name)
                 
                 # Переименовываем текущий файл
                 self._file_path.rename(rotated_path)
