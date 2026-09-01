@@ -528,6 +528,102 @@ class TestAdaptiveSL(unittest.TestCase):
         self.assertEqual(handler._symbol_contexts["SOLUSDT"]["trend"], "UP")
         print("✅ CONTEXT_UPDATED_SOLUSDT обновляет контекст символа")
 
+class TestDynamicATR(unittest.IsolatedAsyncioTestCase):
+    """Тест: Динамический ATR пересчитывается и публикуется."""
+
+    async def test_atr_monitor_publishes_event(self):
+        """Проверка: AtrMonitor публикует событие ATR_UPDATED."""
+        from extensions.analytics.atr_monitor import AtrMonitor
+        from extensions.analytics.volatility_filter import VolatilityFilter
+        
+        # Создаём мок REST-клиент
+        mock_rest = MagicMock()
+        mock_rest.get_klines = AsyncMock(return_value=[
+            # [time, open, high, low, close, volume, ...]
+            [0, "100.0", "101.0", "99.0", "100.5", "1000"],
+            [1, "100.5", "102.0", "100.0", "101.0", "1200"],
+            [2, "101.0", "101.5", "100.5", "101.2", "1100"],
+            # ... ещё 12 свечей для периода 14
+        ] + [[i, "100.0", "101.0", "99.5", "100.5", "1000"] for i in range(3, 15)])
+        
+        # Создаём VolatilityFilter
+        vol_filter = VolatilityFilter(rest_client=mock_rest)
+        
+        # Создаём мок EventBus
+        mock_bus = MagicMock()
+        mock_bus.publish = AsyncMock()
+        
+        # Создаём AtrMonitor
+        monitor = AtrMonitor(
+            symbol="SOLUSDT",
+            event_bus=mock_bus,
+            volatility_filter=vol_filter,
+            update_interval_sec=300
+        )
+        
+        # Вызываем _update_atr напрямую
+        await monitor._update_atr()
+        
+        # Проверяем: publish был вызван
+        self.assertTrue(mock_bus.publish.called, "publish() должен быть вызван")
+        
+        # Проверяем: событие ATR_UPDATED
+        call_kwargs = mock_bus.publish.call_args[1]
+        self.assertEqual(call_kwargs['event_type'], 'ATR_UPDATED')
+        
+        # Проверяем: payload содержит ATR
+        payload = call_kwargs['payload']
+        self.assertIn('atr', payload)
+        self.assertGreater(payload['atr'], 0, "ATR должен быть > 0")
+        self.assertIn('volatility_mode', payload)
+        
+        print(f"✅ AtrMonitor публикует ATR_UPDATED: {payload['atr']:.4f} ({payload['volatility_mode']})")
+
+    async def test_atr_change_detection(self):
+        """Проверка: AtrMonitor логирует изменения ATR > 5%."""
+        from extensions.analytics.atr_monitor import AtrMonitor
+        from extensions.analytics.volatility_filter import VolatilityFilter
+        
+        mock_rest = MagicMock()
+        mock_rest.get_klines = AsyncMock(return_value=[
+            [i, "100.0", "101.0", "99.5", "100.5", "1000"] for i in range(15)
+        ])
+        
+        vol_filter = VolatilityFilter(rest_client=mock_rest)
+        mock_bus = MagicMock()
+        mock_bus.publish = AsyncMock()
+        
+        monitor = AtrMonitor(
+            symbol="SOLUSDT",
+            event_bus=mock_bus,
+            volatility_filter=vol_filter
+        )
+        
+        # Первый расчёт
+        await monitor._update_atr()
+        first_atr = monitor.get_current_atr()
+        
+        # 🔥 ИСПРАВЛЕНО: очищаем кэш VolatilityFilter перед вторым вызовом
+        vol_filter._cached_atr.clear()
+        vol_filter._last_update.clear()
+        
+        # Меняем данные (симулируем рост волатильности)
+        mock_rest.get_klines = AsyncMock(return_value=[
+            [i, "100.0", "105.0", "95.0", "100.5", "1000"] for i in range(15)
+        ])
+        
+        # Второй расчёт
+        await monitor._update_atr()
+        second_atr = monitor.get_current_atr()
+        
+        # Проверяем: ATR изменился
+        self.assertNotEqual(first_atr, second_atr, "ATR должен измениться после очистки кэша")
+        
+        # Проверяем: изменение > 5% (должен быть лог)
+        change_pct = abs(second_atr - first_atr) / first_atr * 100
+        self.assertGreater(change_pct, 5.0, "Изменение ATR должно быть > 5%")
+        
+        print(f"✅ ATR изменился: {first_atr:.4f} → {second_atr:.4f} ({change_pct:+.1f}%)")
 if __name__ == "__main__":
     # Запускаем тесты с подробным выводом
     unittest.main(verbosity=2)

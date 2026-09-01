@@ -60,6 +60,11 @@ class WallFadeStrategyV3:
         
         logger.info("✅ WallFadeV3 subscribed to detector events, BTC_CONTEXT_UPDATED & DIVERGENCE_DETECTED")
 
+        # 🔥 АДАПТИВНЫЙ ATR: Подписка на обновления
+        self._event_bus.subscribe("ATR_UPDATED", self._on_atr_updated)
+        
+        logger.info("✅ WallFadeV3 subscribed to detector events, BTC_CONTEXT_UPDATED, DIVERGENCE_DETECTED & ATR_UPDATED")        
+
     async def _on_btc_context_updated(self, event):
         self.btc_trend = event.payload.get("trend", "FLAT")
 
@@ -91,6 +96,19 @@ class WallFadeStrategyV3:
             "volume": payload.get("volume", 0.0),
             "timestamp": time.time()
         })
+
+    async def _on_atr_updated(self, event):
+        """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
+        payload = getattr(event, 'payload', {})
+        symbol = payload.get('symbol', '')
+        new_atr = payload.get('atr', 0.0)
+        
+        # Обновляем только если символ совпадает
+        # (стратегия может работать с несколькими символами)
+        if new_atr > 0:
+            old_atr = self.atr_value
+            self.atr_value = new_atr
+            logger.info(f"📊 [WallFadeV3] ATR обновлён: {old_atr:.4f} → {new_atr:.4f}")
 
     def _cleanup_old_events(self):
         cutoff = time.time() - self._events_window_sec

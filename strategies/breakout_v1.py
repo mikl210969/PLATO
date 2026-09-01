@@ -38,6 +38,11 @@ class BreakoutStrategyV1:
         
         logger.info("✅ BreakoutStrategyV1 subscribed to BREAKOUT_OPPORTUNITY, BTC_CONTEXT_UPDATED & DIVERGENCE_DETECTED")
 
+        # 🔥 АДАПТИВНЫЙ ATR: Подписка на обновления
+        self._event_bus.subscribe("ATR_UPDATED", self._on_atr_updated)
+        
+        logger.info("✅ breakout_v1 subscribed to detector events, BTC_CONTEXT_UPDATED, DIVERGENCE_DETECTED & ATR_UPDATED")
+
     async def _on_btc_context_updated(self, event):
         self.btc_trend = event.payload.get("trend", "FLAT")
 
@@ -62,6 +67,19 @@ class BreakoutStrategyV1:
             "current_volume": payload.get("current_volume", 0.0),
             "timestamp": time.time()
         }
+
+    async def _on_atr_updated(self, event):
+        """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
+        payload = getattr(event, 'payload', {})
+        symbol = payload.get('symbol', '')
+        new_atr = payload.get('atr', 0.0)
+        
+        # Обновляем только если символ совпадает
+        # (стратегия может работать с несколькими символами)
+        if new_atr > 0:
+            old_atr = self.atr_value
+            self.atr_value = new_atr
+            logger.info(f"📊 [breakout_v1] ATR обновлён: {old_atr:.4f} → {new_atr:.4f}")
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
         symbol = context.get('symbol', 'SOLUSDT')

@@ -42,6 +42,11 @@ class AbsorptionStrategyV2:
         
         logger.info("✅ AbsorptionStrategyV2 subscribed to ABSORPTION_DETECTED, BTC_CONTEXT_UPDATED & DIVERGENCE_DETECTED")
 
+        # 🔥 АДАПТИВНЫЙ ATR: Подписка на обновления
+        self._event_bus.subscribe("ATR_UPDATED", self._on_atr_updated)
+        
+        logger.info("✅ absorption_v2 subscribed to detector events, BTC_CONTEXT_UPDATED, DIVERGENCE_DETECTED & ATR_UPDATED")
+
     async def _on_btc_context_updated(self, event):
         """Обновляет локальное состояние тренда BTC при поступлении события (фоллбэк)."""
         self.btc_trend = event.payload.get("trend", "FLAT")
@@ -67,6 +72,19 @@ class AbsorptionStrategyV2:
             "timestamp": time.time()
         }
         logger.info(f"🧠 [AbsorptionStrat] Получено событие: {self._last_absorption_event['side']} @ {self._last_absorption_event['price']:.2f}")
+
+    async def _on_atr_updated(self, event):
+        """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
+        payload = getattr(event, 'payload', {})
+        symbol = payload.get('symbol', '')
+        new_atr = payload.get('atr', 0.0)
+        
+        # Обновляем только если символ совпадает
+        # (стратегия может работать с несколькими символами)
+        if new_atr > 0:
+            old_atr = self.atr_value
+            self.atr_value = new_atr
+            logger.info(f"📊 [absorption_v2] ATR обновлён: {old_atr:.4f} → {new_atr:.4f}")
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
         """Генерирует сигнал, если недавно было событие поглощения."""

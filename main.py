@@ -37,6 +37,7 @@ from strategies.breakout_v1 import BreakoutStrategyV1
 
 from extensions.risk.position_sizer import PositionSizer
 from extensions.analytics.monitor_factory import MonitorFactory  # 🔥 НОВОЕ: Фабрика мониторов
+from extensions.analytics.atr_monitor import AtrMonitor  # 🔥 УРОВЕНЬ 5: Dynamic ATR
 
 logger = get_logger(__name__)
 
@@ -223,7 +224,23 @@ class Platform:
         
         logger.info(f"✅ DeltaMonitor Factory initialized for {self.monitored_symbols}")
 
-        # 16. Extensions (Safe Bootstrap)
+        # ========================================================================
+        # 🔥 16. AtrMonitor Factory (Dynamic ATR — живой пересчёт каждые 5 минут)
+        # ========================================================================
+        self.atr_monitors: Dict[str, AtrMonitor] = {}
+        
+        for symbol in self.monitored_symbols:
+            atr_monitor = AtrMonitor(
+                symbol=symbol,
+                event_bus=self.bus,
+                volatility_filter=self.volatility_filter,
+                update_interval_sec=300  # 5 минут
+            )
+            self.atr_monitors[symbol] = atr_monitor
+        
+        logger.info(f"✅ AtrMonitor Factory initialized for {self.monitored_symbols}")
+
+        # 17. Extensions (Safe Bootstrap)
         from extensions.bootstrap import init_extensions_safe
         self.extensions = init_extensions_safe(self.bus, self.symbol)
         if self.extensions:
@@ -231,7 +248,7 @@ class Platform:
         else:
             logger.warning("⚠️ Extensions failed to initialize, running in Core-only mode")
 
-        # 17. Shadow Advanced Risk Evaluator
+        # 18. Shadow Advanced Risk Evaluator
         from extensions.risk.advanced_risk_service import AdvancedRiskService
         self.shadow_risk = AdvancedRiskService(
             basis_monitor=self.extensions.basis if (hasattr(self, 'extensions') and self.extensions) else None,
@@ -475,14 +492,7 @@ class Platform:
         await self.orchestrator.perform_startup_recovery(self.symbol)
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
 
-        if not getattr(self, '_atr_fetched', False):
-            try:
-                real_atr = await self.volatility_filter.calculate_real_atr(self.symbol, period=14, interval="1m")
-                logger.info(f"🎯 [STARTUP] Реальный ATR для {self.symbol} (1m): {real_atr:.4f}")
-                self.wall_fade.atr_value = real_atr
-                self._atr_fetched = True
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось рассчитать реальный ATR при старте: {e}. Использую fallback.")
+        # 🔥 УРОВЕНЬ 5: Удалён одноразовый расчёт ATR — теперь AtrMonitor делает это автоматически
 
         last_log_time = 0
         last_position_check_time = 0
@@ -578,6 +588,12 @@ class Platform:
         # 🔥 НОВОЕ: Запуск всех мониторов через Фабрику
         await MonitorFactory.start_all(self.delta_monitors)
         
+        # 🔥 УРОВЕНЬ 5: Запуск AtrMonitor'ов
+        logger.info(f"🚀 [Factory] Starting {len(self.atr_monitors)} ATR monitors...")
+        for symbol, monitor in self.atr_monitors.items():
+            await monitor.start()
+            logger.info(f"✅ [Factory] Started ATR monitor for {symbol}")
+        
         await self.orchestrator.start()
         await self._main_loop()
 
@@ -608,6 +624,10 @@ class Platform:
 
         # 🔥 НОВОЕ: Остановка всех мониторов через Фабрику
         await MonitorFactory.stop_all(self.delta_monitors)
+        
+        # 🔥 УРОВЕНЬ 5: Остановка AtrMonitor'ов
+        for symbol, monitor in self.atr_monitors.items():
+            await monitor.stop()
                 
         if hasattr(self, 'drift_monitor'):
             try:
