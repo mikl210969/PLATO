@@ -297,8 +297,8 @@ class SignalHandlerMixin:
             "adjusted_risk_usdt": risk_usdt,
             "multiplier": smart_multiplier,
             "reason": smart_reason,
-            "btc_trend": self._btc_context.get("trend"),
-            "btc_regime": self._btc_context.get("regime"),
+            "btc_trend": self._btc_context.get("trend", "FLAT"),  # Дефолт FLAT вместо None
+            "btc_regime": self._btc_context.get("regime", "NORMAL"),  # Дефолт NORMAL вместо None
             "signal_side": signal.side,
             "symbol": signal.symbol
         })
@@ -345,8 +345,8 @@ class SignalHandlerMixin:
             "adjusted_risk_usdt": risk_usdt,
             "smart_multiplier": smart_multiplier,
             "smart_reason": smart_reason,
-            "btc_trend": self._btc_context.get("trend"),
-            "btc_regime": self._btc_context.get("regime"),
+            "btc_trend": self._btc_context.get("trend", "FLAT"),  # ← Дефолт FLAT вместо None
+            "btc_regime": self._btc_context.get("regime", "NORMAL"),  # ← Дефолт NORMAL вместо None
             # Adaptive SL
             "base_sl_distance": base_sl_distance,
             "adjusted_sl_distance": adjusted_sl_distance,

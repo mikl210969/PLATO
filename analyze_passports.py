@@ -109,10 +109,10 @@ def analyze(trades):
 
     return stats
 
-def print_dashboard(stats):
+def print_dashboard(stats, trades):
     """Выводит красивый текстовый отчет."""
     print("\n" + "="*70)
-    print(" 🚀 PLATO TRADING ANALYTICS DASHBOARD v1.0")
+    print(" 🚀 PLATO TRADING ANALYTICS DASHBOARD v1.1")
     print(f" 📅 Отчет сгенерирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("="*70)
 
@@ -179,6 +179,29 @@ def print_dashboard(stats):
         pct = (count / total) * 100
         print(f"   • {reason:<20} : {count} ({pct:.1f}%)")
 
+    # 🔥 НОВОЕ: Секция проблемных сделок
+    problem_trades = [
+        t for t in trades 
+        if t.get('exit_reason') in ('EXTERNAL_CLOSE', 'UNKNOWN') or 
+           t.get('sizing_info', {}).get('btc_trend') == 'UNKNOWN'
+    ]
+    
+    if problem_trades:
+        print(f"\n⚠️ ПРОБЛЕМНЫЕ СДЕЛКИ (требуют проверки) — {len(problem_trades)} шт.")
+        print(f"   {'#':<3} | {'Passport ID':<35} | {'Exit Reason':<15} | {'BTC Trend':<10} | {'PnL':>8}")
+        print("   " + "-" * 85)
+        for i, t in enumerate(problem_trades[:10], 1):  # Показываем максимум 10
+            passport_id = t.get('passport_id', 'N/A')[:35]
+            exit_reason = t.get('exit_reason', 'N/A')
+            btc_trend = t.get('sizing_info', {}).get('btc_trend', 'N/A')
+            pnl = calculate_pnl(t)
+            print(f"   {i:<3} | {passport_id:<35} | {exit_reason:<15} | {btc_trend:<10} | {pnl:>+8.2f}")
+        
+        if len(problem_trades) > 10:
+            print(f"   ... и ещё {len(problem_trades) - 10} сделок")
+    else:
+        print(f"\n✅ Проблемных сделок не обнаружено. Все данные корректны.")
+
     print("\n" + "="*70)
     print(" 💡 СОВЕТ: Если Win Rate при ×0.5 (контртренд) низкий, но PnL близок к 0,")
     print("    значит, Smart Sizing успешно спасает депозит от больших убытков!")
@@ -188,4 +211,4 @@ if __name__ == "__main__":
     print("🔍 Сканирование папки passports/...")
     trades = load_closed_passports()
     stats = analyze(trades)
-    print_dashboard(stats)
+    print_dashboard(stats, trades)  # 🔥 Передаём trades для вывода проблемных сделок
