@@ -624,6 +624,111 @@ class TestDynamicATR(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(change_pct, 5.0, "Изменение ATR должно быть > 5%")
         
         print(f"✅ ATR изменился: {first_atr:.4f} → {second_atr:.4f} ({change_pct:+.1f}%)")
+
+class TestPositionSizer(unittest.IsolatedAsyncioTestCase):
+    """Тесты для динамического расчета размера позиции (PositionSizer)."""
+
+    def setUp(self):
+        """Настройка моков перед каждым тестом."""
+        from extensions.risk.position_sizer import PositionSizer
+        from unittest.mock import MagicMock, AsyncMock
+        
+        # Создаем мок REST клиента
+        self.mock_rest = MagicMock()
+        
+        # Настраиваем успешный ответ от биржи для SOLUSDT
+        self.mock_rest.get_exchange_info = AsyncMock(return_value={
+            'symbols': [{
+                'symbol': 'SOLUSDT',
+                'filters': [
+                    {'filterType': 'LOT_SIZE', 'stepSize': '0.1', 'minQty': '0.1'},
+                    {'filterType': 'MIN_NOTIONAL', 'minNotional': '5.0'}
+                ]
+            }]
+        })
+        
+        # Создаем экземпляр PositionSizer с лимитом 7.0 (как в твоем конфиге)
+        self.sizer = PositionSizer(rest_client=self.mock_rest, max_position_size=7.0)
+
+    async def test_calculate_normal(self):
+        """Нормальный расчет: риск $30, SL $0.25, цена $100."""
+        # raw_qty = 30 / 0.25 = 120. Но лимит 7.0, поэтому должно быть 7.0
+        qty = await self.sizer.calculate(symbol="SOLUSDT", entry_price=100.0, sl_price=100.25, risk_usdt=30.0)
+        
+        self.assertEqual(qty, 7.0)
+        print("✅ Нормальный расчет с ограничением max_size: 7.0")
+
+    async def test_calculate_below_max_size(self):
+        """Расчет, который НЕ достигает лимита max_size."""
+        # raw_qty = 3.0 / 1.0 = 3.0 (ниже лимита 7.0)
+        qty = await self.sizer.calculate(symbol="SOLUSDT", entry_price=100.0, sl_price=101.0, risk_usdt=3.0)
+        
+        # 3.0 округляется вниз до шага 0.1 -> 3.0
+        self.assertEqual(qty, 3.0)
+        print("✅ Расчет ниже лимита max_size: 3.0")
+
+    async def test_calculate_step_size_rounding(self):
+        """Проверка округления вниз до step_size (0.1)."""
+        # raw_qty = 3.55 / 1.0 = 3.55. Должно округлиться вниз до 3.5
+        qty = await self.sizer.calculate(symbol="SOLUSDT", entry_price=100.0, sl_price=101.0, risk_usdt=3.55)
+        
+        self.assertEqual(qty, 3.5)
+        print("✅ Округление вниз до step_size (0.1) работает: 3.5")
+
+    async def test_calculate_reject_min_qty(self):
+        """Отклонение сигнала, если расчетный лот меньше min_qty (0.1)."""
+        # raw_qty = 0.05 / 1.0 = 0.05. Это меньше min_qty (0.1)
+        qty = await self.sizer.calculate(symbol="SOLUSDT", entry_price=100.0, sl_price=101.0, risk_usdt=0.05)
+        
+        self.assertIsNone(qty)
+        print("✅ Отклонение сигнала при qty < min_qty работает")
+
+    async def test_calculate_reject_min_notional(self):
+        """Отклонение сигнала, если стоимость ордера меньше min_notional ($5)."""
+        from extensions.risk.position_sizer import PositionSizer
+        
+        # Настраиваем низкую цену и маленький риск
+        self.mock_rest.get_exchange_info = AsyncMock(return_value={
+            'symbols': [{
+                'symbol': 'SOLUSDT',
+                'filters': [
+                    {'filterType': 'LOT_SIZE', 'stepSize': '0.1', 'minQty': '0.1'},
+                    {'filterType': 'MIN_NOTIONAL', 'minNotional': '5.0'}
+                ]
+            }]
+        })
+        # Пересоздаем, чтобы сбросить кэш
+        self.sizer = PositionSizer(rest_client=self.mock_rest, max_position_size=7.0)
+        
+        # qty будет 0.1 (min_qty), price = 10.0 -> value = 1.0$. Это меньше $5.0
+        qty = await self.sizer.calculate(symbol="SOLUSDT", entry_price=10.0, sl_price=11.0, risk_usdt=0.1)
+        
+        self.assertIsNone(qty)
+        print("✅ Отклонение сигнала при order_value < min_notional работает")
+
+    async def test_fallback_on_api_error(self):
+        """Если API биржи падает, должен сработать fallback."""
+        from extensions.risk.position_sizer import PositionSizer
+        
+        self.mock_rest.get_exchange_info = AsyncMock(side_effect=Exception("API Timeout"))
+        
+        # Пересоздаем, чтобы сбросить кэш
+        self.sizer = PositionSizer(rest_client=self.mock_rest, max_position_size=7.0)
+        
+        # SOLUSDT есть в fallback (step=0.1, min_qty=0.1)
+        # risk=10, dist=1.0 -> raw_qty = 10.0 -> capped to 7.0
+        qty = await self.sizer.calculate(symbol="SOLUSDT", entry_price=100.0, sl_price=101.0, risk_usdt=10.0)
+        
+        self.assertEqual(qty, 7.0)
+        print("✅ Fallback при сбое API работает корректно")
+
+    async def test_zero_sl_distance(self):
+        """Защита от деления на ноль, если entry_price == sl_price."""
+        qty = await self.sizer.calculate(symbol="SOLUSDT", entry_price=100.0, sl_price=100.0, risk_usdt=30.0)
+        
+        self.assertIsNone(qty)
+        print("✅ Защита от нулевого расстояния до SL работает")
+
 if __name__ == "__main__":
     # Запускаем тесты с подробным выводом
     unittest.main(verbosity=2)
