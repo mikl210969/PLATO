@@ -30,7 +30,10 @@ from trading.passport_manager import PassportManager
 from trading.trader import Trader
 from datetime import datetime, timezone
 from core.logger import get_logger
+
 logger = get_logger(__name__)
+
+
 class RiskManager:
     """Внутренняя защита позиции (Internal Stop)."""
 
@@ -327,11 +330,43 @@ class RiskManager:
         if quantity <= 0:
             return False
 
+        # 🔥 ЖЕЛЕЗОБЕТОННАЯ ПРОВЕРКА ПЕРЕД ВЫСТРЕЛОМ
+        try:
+            pos = await self.trader.get_position_from_exchange(passport.symbol)
+            real_size = abs(float(pos.get('size', 0) or 0)) if pos else 0.0
+            
+            if real_size < 0.01:
+                self._log("close_aborted_position_already_zero", {
+                    "passport_id": passport.passport_id,
+                    "reason": reason,
+                    "message": "Позиция уже закрыта, отмена отправки ордера во избежание ошибки -2022/-1106"
+                })
+                # Чистим guard, чтобы больше не дергаться
+                self._guards.pop(passport.passport_id, None)
+                return False
+                
+            # Если реальный размер меньше запрашиваемого (например, частичное ручное закрытие), корректируем
+            if real_size < quantity:
+                self._log("close_qty_adjusted_to_exchange", {
+                    "passport_id": passport.passport_id,
+                    "requested": quantity,
+                    "real_exchange_size": real_size
+                })
+                quantity = real_size
+
+        except Exception as e:
+            self._log("close_exchange_check_failed", {
+                "passport_id": passport.passport_id,
+                "error": str(e),
+                "message": "Не удалось проверить размер позиции, отмена закрытия для безопасности"
+            })
+            return False # Лучше не рисковать и не слать ордер, если биржа не отвечает
+
+        # 🔥 ДАЛЕЕ ИДЕТ СТАНДАРТНАЯ ЛОГИКА ОТПРАВКИ
         is_short = guard['side'] == 'short'
         close_side = 'long' if is_short else 'short'  # execute_order: 'long' -> BUY
 
-        # 🔥 ШАГ 10.1: Короткий формат client_order_id (≤35 символов)
-        # Формат: C1_PASS_YYYYMMDD_HHMMSS_XXXXXX (3+27 = 30 символов, влезает в лимит Binance)
+        # 🔥 Короткий формат client_order_id (≤35 символов)
         prefix_map = {
             'TP1_HIT': 'C1',
             'TP2_HIT': 'C2',
@@ -361,7 +396,7 @@ class RiskManager:
             "error": result.get('error')
         })
 
-        # 🔥 ШАГ 10.1: НЕ обновляем паспорт здесь — это делает _on_order_filled
+        # 🔥 НЕ обновляем паспорт здесь — это делает _on_order_filled
         # при получении события FILLED/PARTIALLY_FILLED от WS или REST.
         # Это устраняет двойной авторитет и гарантирует, что паспорт обновится
         # только после реального исполнения на бирже.
