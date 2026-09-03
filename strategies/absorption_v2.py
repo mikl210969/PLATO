@@ -1,5 +1,4 @@
 """Absorption Strategy V2 — торгует на отскок после поглощения агрессии."""
-import logging
 import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
@@ -7,7 +6,9 @@ from typing import Optional, Dict, Any, List
 # Импортируем EnrichedSignal из wall_fade_v3, чтобы не дублировать код
 from strategies.wall_fade_v3 import EnrichedSignal 
 
-logger = logging.getLogger(__name__)
+import logging
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 
 class AbsorptionStrategyV2:
@@ -19,9 +20,7 @@ class AbsorptionStrategyV2:
         
         self._recent_detector_events: List[Dict[str, Any]] = []
         self._events_window_sec = 30.0
-        
-        # 🔥 ВАЖНО: Атрибут, который требует основной цикл
-        self._last_absorption_event = None 
+        self._last_absorption_event = None
         
         # 🔥 Фоллбэк: Состояние тренда BTC
         self.btc_trend = "FLAT"        

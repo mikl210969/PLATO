@@ -1,11 +1,12 @@
 """Breakout Strategy V1 — торгует на пробой уровня с гибридным исполнением и динамическим Delta-фильтром."""
-import logging
 import time
 from typing import Optional, Dict, Any, List
 
 from strategies.wall_fade_v3 import EnrichedSignal
 
-logger = logging.getLogger(__name__)
+import logging
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 
 class BreakoutStrategyV1:

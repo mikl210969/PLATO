@@ -278,11 +278,31 @@ class Platform:
         logger.info(f"✅ Platform initialized | symbol={self.symbol} | profile={self.profile}")
 
     async def _generate_signals(self, context: dict):
+        # 🔥 ЯДЕРНЫЙ МАЯЧОК: Если это появится в консоли, метод вызывается
+        print("🚨 [ГЛАВНЫЙ ЦИКЛ] _generate_signals ВЫЗВАН!")
+        logger.info("🚨 [ГЛАВНЫЙ ЦИКЛ] _generate_signals вызван")
+        
         signals = []
+        
+        # Проверяем, существуют ли вообще объекты стратегий
+        print(f"🔍 Стратегии: wall_fade={self.wall_fade is not None}, absorption={self.absorption is not None}, breakout={self.breakout is not None}")
+        
         for strategy in [self.wall_fade, self.absorption, self.breakout]:
+            if strategy is None:
+                print("⚠️ Одна из стратегий равна None!")
+                continue
+                
+            print(f"🚨 Вызываем generate_signal для {strategy.__class__.__name__}...")
+            
+            # Вот здесь должен сработать маячок внутри самой стратегии
             signal = strategy.generate_signal(context)
+            
             if signal:
+                print(f"✅ СИГНАЛ ПОЛУЧЕН ОТ {strategy.__class__.__name__}!")
                 signals.append(signal)
+            else:
+                print(f"⚪ {strategy.__class__.__name__} вернула None")
+                
         return signals
 
     async def _main_loop(self):
