@@ -15,19 +15,32 @@ class AbsorptionStrategyV2:
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
-        self.cooldown_sec = config.get('cooldown_sec', 60.0) # 60 сек кулдаун
+        self.cooldown_sec = config.get('cooldown_sec', 30.0)
         
-        # Храним последнее событие поглощения
-        self._last_absorption_event: Optional[Dict[str, Any]] = None
-        self._event_valid_for_sec = 5.0  # Сигнал актуален только 5 секунд после события
+        self._recent_detector_events: List[Dict[str, Any]] = []
+        self._events_window_sec = 30.0
         
-        # 🔥 НОВОЕ: Хранилище последней дивергенции
-        self._last_divergence = None  # {"type": "BULLISH"/"BEARISH", "timestamp": ..., "price": ...}
-        self._divergence_valid_for_sec = 900.0  # 15 минут актуальности
+        # 🔥 ВАЖНО: Атрибут, который требует основной цикл
+        self._last_absorption_event = None 
         
-        # 🔥 Фоллбэк: Состояние тренда BTC (если контекст из main.py еще не пришел)
+        # 🔥 Фоллбэк: Состояние тренда BTC
         self.btc_trend = "FLAT"        
         self._event_bus = None
+        
+        #  НОВОЕ: Хранилище последней дивергенции
+        self._last_divergence = None
+        self._divergence_valid_for_sec = 900.0
+
+        # 🔥 DEBUG MODE: Читаем флаги обхода фильтров из конфига
+        debug_mode = config.get('debug_mode', {})
+        self.bypass_btc_filter = debug_mode.get('bypass_btc_filter', False)
+        self.bypass_adaptive_sl = debug_mode.get('bypass_adaptive_sl', False)
+        self.bypass_smart_sizing = debug_mode.get('bypass_smart_sizing', False)
+        
+        # 🔥 НОВЫЕ ФИЛЬТРЫ ДЛЯ ОТЛАДКИ
+        self.bypass_macro_hvn_filter = debug_mode.get('bypass_macro_hvn_filter', False)
+        self.bypass_wall_distance_filter = debug_mode.get('bypass_wall_distance_filter', False)
+        self.bypass_confidence_threshold = debug_mode.get('bypass_confidence_threshold', False)
 
     def subscribe_to_events(self, event_bus):
         """Подписка на события детектора поглощения."""
@@ -141,12 +154,15 @@ class AbsorptionStrategyV2:
         base_confidence = 0.65 
         
         # 1. Оценка влияния макротренда BTC
-        if signal_side == 'long' and btc_trend == 'DOWN':
-            base_confidence *= 0.5  # Режем уверенность вдвое
-            logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: попытка LONG при DOWN тренде BTC")
-        elif signal_side == 'short' and btc_trend == 'UP':
-            base_confidence *= 0.5
-            logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: попытка SHORT при UP тренде BTC")
+        if not self.bypass_btc_filter:
+            if signal_side == 'long' and btc_trend == 'DOWN':
+                base_confidence *= 0.5  # Режем уверенность вдвое
+                logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: попытка LONG при DOWN тренде BTC")
+            elif signal_side == 'short' and btc_trend == 'UP':
+                base_confidence *= 0.5
+                logger.warning(f"️ [AbsorptionV2] Штраф к confidence: попытка SHORT при UP тренде BTC")
+        else:
+            logger.info(f"⚠️ [DEBUG MODE] Пропускаем штраф confidence за тренд BTC (bypass_btc_filter=True)")
             
         # 2. Оценка влияния дельты самого SOL (дополнительный фильтр)
         # Если мы хотим лонг, а дельта SOL резко отрицательная (продавцы агрессивно давят)
@@ -191,9 +207,11 @@ class AbsorptionStrategyV2:
         final_confidence = min(base_confidence, 1.0)
         
         # 🔥 ЖЕСТКИЙ ПОРОГ: Если после всех штрафов уверенность слишком низкая, отменяем сделку
-        if final_confidence < 0.50:
+        if not self.bypass_confidence_threshold and final_confidence < 0.50:
             logger.info(f"🚫 [AbsorptionV2] Сигнал ОТКЛОНЕН: итоговый confidence {final_confidence:.2f} ниже порога 0.50 (BTC: {btc_trend}, SOL Delta: {sol_delta})")
             return None
+        elif self.bypass_confidence_threshold and final_confidence < 0.50:
+            logger.warning(f"⚠️ [DEBUG MODE] Пропускаем порог confidence (текущий: {final_confidence:.2f}, требуется >= 0.50)")
         # ========================================================================
 
         # ========================================================================

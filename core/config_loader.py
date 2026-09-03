@@ -28,6 +28,7 @@ class ConfigLoader:
             'trading': self.load('trading'),
             'risk': self.load('risk'),
             'strategies': self.load('strategies'),
+            'logging': self.load('logging'),  # 🔥 ДОБАВЛЕНО: загрузка настроек логирования
         }
 
     def load_secrets(self) -> Dict[str, str]:

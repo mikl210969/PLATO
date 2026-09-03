@@ -7,7 +7,8 @@ from .recovery import RecoveryMixin
 from .position_monitor import PositionMonitor
 # 🔥 НОВОЕ: Импортируем PositionSizer для корректной типизации
 from extensions.risk.position_sizer import PositionSizer
-
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMonitor):
     """Главный оркестратор платформы. Координирует модули через миксины."""
@@ -58,7 +59,7 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
                 try:
                     self.json_logger.log("INFO", event, safe_data)
                 except Exception:
-                    print(f"[LOG] {event}: {safe_data}")
+                    logger.info(f"[LOG] {event}: {safe_data}")
 
     def get_trader(self, symbol: str):
         return self.traders.get(symbol)

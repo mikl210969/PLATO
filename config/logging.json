@@ -1,0 +1,22 @@
+{
+  "level": "INFO",
+  "max_file_size_mb": 5,
+  "max_backup_files": 3,
+  "core_modules": [
+    "risk_manager",
+    "passport_manager",
+    "drift_monitor",
+    "order_verifier",
+    "position_sizer",
+    "state_manager"
+  ],
+  "optional_modules": {
+    "ws": false,
+    "lifecycle_manager": true,
+    "analytics": true,
+    "detectors": true,
+    "__main__": true,
+    "strategies.wall_fade_v3": true,
+    "trading": true
+  }
+}

@@ -43,8 +43,19 @@ class WallFadeStrategyV3:
         self.btc_trend = "FLAT"
         
         # 🔥 НОВОЕ: Хранилище последней дивергенции
-        self._last_divergence = None  # {"type": "BULLISH"/"BEARISH", "timestamp": ..., "price": ...}
-        self._divergence_valid_for_sec = 900.0  # 15 минут актуальности
+        self._last_divergence = None
+        self._divergence_valid_for_sec = 900.0
+
+        # 🔥 DEBUG MODE: Читаем флаги обхода фильтров из конфига
+        debug_mode = config.get('debug_mode', {})
+        self.bypass_btc_filter = debug_mode.get('bypass_btc_filter', False)
+        self.bypass_adaptive_sl = debug_mode.get('bypass_adaptive_sl', False)
+        self.bypass_smart_sizing = debug_mode.get('bypass_smart_sizing', False)
+        
+        # 🔥 НОВЫЕ ФИЛЬТРЫ ДЛЯ ОТЛАДКИ
+        self.bypass_macro_hvn_filter = debug_mode.get('bypass_macro_hvn_filter', False)
+        self.bypass_wall_distance_filter = debug_mode.get('bypass_wall_distance_filter', False)
+        self.bypass_confidence_threshold = debug_mode.get('bypass_confidence_threshold', False)
 
     def subscribe_to_events(self, event_bus):
         self._event_bus = event_bus
@@ -144,10 +155,12 @@ class WallFadeStrategyV3:
         atr = self.atr_value
         
         if current_price <= 0 or not orderbook.get('bids') or not orderbook.get('asks'):
+            logger.debug(f"🚫 [{self.__class__.__name__}] Нет цены или стакана")
             return None
 
         now = time.time()
         if now - self._last_signal_time < self.cooldown_sec:
+            # logger.debug(f"🚫 [{self.__class__.__name__}] Кулдаун") 
             return None
 
         # ========================================================================
@@ -156,143 +169,160 @@ class WallFadeStrategyV3:
         btc_regime = context.get('btc_delta_context', {}).get('regime', 'NORMAL')
         
         if btc_regime == 'IMPULSIVE':
-            logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: режим IMPULSIVE (|дельта BTC| слишком сильная, риск 'поймать нож')")
-            return None
+            if self.bypass_btc_filter:
+                logger.info(f"⚠️ [DEBUG MODE] Пропускаем блокировку IMPULSIVE для BTC (bypass_btc_filter=True)")
+            else:
+                logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: режим BTC IMPULSIVE")
+                return None
         # ========================================================================
 
         # 1. MACRO HVN FILTER
-        for macro_hvn in hvn_macro:
-            hvn_price = macro_hvn['price']
-            distance_pct = abs(current_price - hvn_price) / current_price
-            if distance_pct < 0.005 and macro_hvn['strength'] > 15.0:
-                return None
+        if not self.bypass_macro_hvn_filter:
+            for macro_hvn in hvn_macro:
+                hvn_price = macro_hvn['price']
+                distance_pct = abs(current_price - hvn_price) / current_price
+                if distance_pct < 0.005 and macro_hvn['strength'] > 15.0:
+                    logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: MACRO HVN FILTER (цена {current_price} слишком близко к HVN {hvn_price})")
+                    return None
+        else:
+            logger.debug("⚠️ [DEBUG MODE] Пропускаем MACRO HVN FILTER")
 
         # 2. ПОИСК ТОЧКИ ВХОДА И ЯКОРЯ ДЛЯ SL
         bids = orderbook.get('bids', [])
-        if len(bids) >= 5:
-            avg_vol = sum(float(q) for p, q in bids[:10]) / min(10, len(bids))
-            edge_price = current_price
+        if len(bids) < 5:
+            logger.debug(f"🚫 [{self.__class__.__name__}] Недостаточно бидов в стакане: {len(bids)}")
+            return None
             
-            for p, q in bids:
-                if float(q) > avg_vol * 2.0:
-                    edge_price = float(p)
-                    break
+        avg_vol = sum(float(q) for p, q in bids[:10]) / min(10, len(bids))
+        edge_price = current_price
+        
+        for p, q in bids:
+            if float(q) > avg_vol * 2.0:
+                edge_price = float(p)
+                break
+        
+        entry_price = round(current_price, 2)
+        edge_price = round(edge_price, 2)
+        distance_pct = abs(entry_price - edge_price) / entry_price
+        
+        if not self.bypass_wall_distance_filter and distance_pct >= 0.005:
+            logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: Расстояние до стены ({distance_pct:.4f}) >= 0.005")
+            return None
             
-            entry_price = round(current_price, 2)
-            edge_price = round(edge_price, 2)
-            distance_pct = abs(entry_price - edge_price) / entry_price
-            
-            if distance_pct < 0.005:
-                sl_anchor_price = edge_price - (atr * 0.5)
-                best_hvn = None
-                
-                for micro_hvn in hvn_micro:
-                    hvn_price = micro_hvn['price']
-                    if hvn_price < entry_price:
-                        distance = entry_price - hvn_price
-                        if distance <= (atr * 1.5):
-                            if best_hvn is None or (entry_price - hvn_price) < (entry_price - best_hvn['price']):
-                                best_hvn = micro_hvn
-                
-                if best_hvn:
-                    sl_anchor_price = best_hvn['price']
-                sl1 = round(sl_anchor_price - (atr * 0.2), 2) 
-                r_value = abs(entry_price - sl1)
-                tp1 = round(entry_price + (2.0 * r_value), 2)
-                rr_ratio = (tp1 - entry_price) / r_value if r_value > 0 else 0.0
+        sl_anchor_price = edge_price - (atr * 0.5)
+        best_hvn = None
+        
+        for micro_hvn in hvn_micro:
+            hvn_price = micro_hvn['price']
+            if hvn_price < entry_price:
+                distance = entry_price - hvn_price
+                if distance <= (atr * 1.5):
+                    if best_hvn is None or (entry_price - hvn_price) < (entry_price - best_hvn['price']):
+                        best_hvn = micro_hvn
+        
+        if best_hvn:
+            sl_anchor_price = best_hvn['price']
+        sl1 = round(sl_anchor_price - (atr * 0.2), 2) 
+        r_value = abs(entry_price - sl1)
+        tp1 = round(entry_price + (2.0 * r_value), 2)
+        rr_ratio = (tp1 - entry_price) / r_value if r_value > 0 else 0.0
 
-                # 3. ОЦЕНКА ТИПА СДЕЛКИ
-                trend_data = context.get('trend', {})
-                trend_state = trend_data.get('state', 'RANGING')
-                is_short = True 
-                signal_side = "short"
+        # 3. ОЦЕНКА ТИПА СДЕЛКИ
+        trend_data = context.get('trend', {})
+        trend_state = trend_data.get('state', 'RANGING')
+        is_short = True 
+        signal_side = "short"
+        
+        if is_short and trend_data.get('is_continuation_for_short'):
+            trade_type = "CONTINUATION (Short in Downtrend)"
+            trend_bonus = 0.15
+        elif is_short and trend_data.get('is_reversal_for_short'):
+            trade_type = "REVERSAL (Short in Uptrend)"
+            trend_bonus = -0.10
+        else:
+            trade_type = f"NEUTRAL ({trend_state})"
+            trend_bonus = 0.0
+
+        # ========================================================================
+        # 🔥 УРОВЕНЬ 4: Динамическая корректировка Confidence (Delta Context)
+        # ========================================================================
+        btc_context = context.get('btc_delta_context', {})
+        sol_context = context.get('sol_delta_context', {})
+        
+        btc_trend = btc_context.get('trend', self.btc_trend)
+        sol_delta = sol_context.get('delta_strength', 0.0)
+        
+        base_confidence = 0.50
+        base_confidence += 0.25  # Бонус за наличие стены
+        if rr_ratio >= 2.0: base_confidence += 0.10
+        base_confidence += trend_bonus
+
+        # Штрафы за макротренд (WallFade опасен против тренда)
+        if not self.bypass_btc_filter:
+            if signal_side == 'short' and btc_trend == 'UP':
+                base_confidence *= 0.5
+                logger.warning(f"⚠️ [WallFadeV3] Штраф к confidence: попытка SHORT при UP тренде BTC")
+            elif signal_side == 'long' and btc_trend == 'DOWN':
+                base_confidence *= 0.5
+                logger.warning(f"⚠️ [WallFadeV3] Штраф к confidence: попытка LONG при DOWN тренде BTC")
+        else:
+            logger.info(f"⚠️ [DEBUG MODE] Пропускаем штраф confidence за тренд BTC (bypass_btc_filter=True)")
+
+        # Штрафы за локальную дельту SOL
+        if signal_side == 'short' and sol_delta > 30.0:
+            base_confidence *= 0.7
+            logger.warning(f"⚠️ [WallFadeV3] Штраф к confidence: положительная дельта SOL ({sol_delta}) при SHORT")
+        elif signal_side == 'long' and sol_delta < -30.0:
+            base_confidence *= 0.7
+            logger.warning(f"⚠️ [WallFadeV3] Штраф к confidence: отрицательная дельта SOL ({sol_delta}) при LONG")
+
+        detector_boost = self._calculate_confidence_boost(entry_price)
+        
+        if "REVERSAL" in trade_type and detector_boost < 0.30:
+            logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: REVERSAL без достаточного detector_boost ({detector_boost:.2f})")
+            return None
+
+        # ========================================================================
+        # 🔥 УРОВЕНЬ 3: Бонус за подтверждение дивергенцией
+        # ========================================================================
+        if self._last_divergence:
+            div_age = now - self._last_divergence["timestamp"]
+            if div_age <= self._divergence_valid_for_sec:
+                div_type = self._last_divergence["type"]
                 
-                if is_short and trend_data.get('is_continuation_for_short'):
-                    trade_type = "CONTINUATION (Short in Downtrend)"
-                    trend_bonus = 0.15
-                elif is_short and trend_data.get('is_reversal_for_short'):
-                    trade_type = "REVERSAL (Short in Uptrend)"
-                    trend_bonus = -0.10
-                else:
-                    trade_type = f"NEUTRAL ({trend_state})"
-                    trend_bonus = 0.0
+                if div_type == "BEARISH" and signal_side == "short":
+                    base_confidence += 0.20
+                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал SHORT подтвержден медвежьей дивергенцией! +0.20 к confidence")
+                elif div_type == "BULLISH" and signal_side == "long":
+                    base_confidence += 0.20
+                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал LONG подтвержден бычьей дивергенцией! +0.20 к confidence")
+            else:
+                self._last_divergence = None
+        # ========================================================================
 
-                # ========================================================================
-                # 🔥 УРОВЕНЬ 4: Динамическая корректировка Confidence (Delta Context)
-                # ========================================================================
-                btc_context = context.get('btc_delta_context', {})
-                sol_context = context.get('sol_delta_context', {})
-                
-                btc_trend = btc_context.get('trend', self.btc_trend)
-                sol_delta = sol_context.get('delta_strength', 0.0)
-                
-                base_confidence = 0.50
-                base_confidence += 0.25  # Бонус за наличие стены
-                if rr_ratio >= 2.0: base_confidence += 0.10
-                base_confidence += trend_bonus
+        final_confidence = min(base_confidence + detector_boost, 1.0)
+        
+        # Жесткий порог отсечения
+        if not self.bypass_confidence_threshold and final_confidence < 0.50:
+            logger.info(f"🚫 [WallFadeV3] Сигнал ОТКЛОНЕН: итоговый confidence {final_confidence:.2f} ниже порога 0.50 (BTC: {btc_trend}, SOL_Delta: {sol_delta})")
+            return None
+        elif self.bypass_confidence_threshold and final_confidence < 0.50:
+            logger.warning(f"⚠️ [DEBUG MODE] Пропускаем порог confidence (текущий: {final_confidence:.2f}, требуется >= 0.50)")
 
-                # Штрафы за макротренд (WallFade опасен против тренда)
-                if signal_side == 'short' and btc_trend == 'UP':
-                    base_confidence *= 0.5
-                    logger.warning(f"⚠️ [WallFadeV3] Штраф к confidence: попытка SHORT при UP тренде BTC")
-                elif signal_side == 'long' and btc_trend == 'DOWN':
-                    base_confidence *= 0.5
-                    logger.warning(f"⚠️ [WallFadeV3] Штраф к confidence: попытка LONG при DOWN тренде BTC")
-
-                # Штрафы за локальную дельту SOL
-                if signal_side == 'short' and sol_delta > 30.0:
-                    base_confidence *= 0.7
-                    logger.warning(f"⚠️ [WallFadeV3] Штраф к confidence: положительная дельта SOL ({sol_delta}) при SHORT")
-                elif signal_side == 'long' and sol_delta < -30.0:
-                    base_confidence *= 0.7
-                    logger.warning(f"⚠️ [WallFadeV3] Штраф к confidence: отрицательная дельта SOL ({sol_delta}) при LONG")
-
-                detector_boost = self._calculate_confidence_boost(entry_price)
-                
-                if "REVERSAL" in trade_type and detector_boost < 0.30:
-                    return None
-
-                # ========================================================================
-                # 🔥 УРОВЕНЬ 3: Бонус за подтверждение дивергенцией
-                # ========================================================================
-                if self._last_divergence:
-                    div_age = now - self._last_divergence["timestamp"]
-                    if div_age <= self._divergence_valid_for_sec:
-                        div_type = self._last_divergence["type"]
-                        
-                        if div_type == "BEARISH" and signal_side == "short":
-                            base_confidence += 0.20
-                            logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал SHORT подтвержден медвежьей дивергенцией! +0.20 к confidence")
-                        elif div_type == "BULLISH" and signal_side == "long":
-                            base_confidence += 0.20
-                            logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал LONG подтвержден бычьей дивергенцией! +0.20 к confidence")
-                    else:
-                        self._last_divergence = None
-                # ========================================================================
-
-                final_confidence = min(base_confidence + detector_boost, 1.0)
-                
-                # Жесткий порог отсечения
-                if final_confidence < 0.50:
-                    logger.info(f"🚫 [WallFadeV3] Сигнал ОТКЛОНЕН: итоговый confidence {final_confidence:.2f} ниже порога 0.50 (BTC: {btc_trend}, SOL_Delta: {sol_delta})")
-                    return None
-
-                logger.info(f"🎯 [WallFadeV3] Trade Type: {trade_type} | Base: {base_confidence:.2f} | Detector Boost: +{detector_boost:.2f} | Final: {final_confidence:.2f} | BTC: {btc_trend} | SOL_Delta: {sol_delta}")
-                
-                self._last_signal_time = now
-                
-                return EnrichedSignal(
-                    signal_id=f"WallFadeV3_{symbol}_{int(now)}",
-                    symbol=symbol,
-                    side=signal_side,
-                    entry_price=entry_price,
-                    strategy="WallFadeV3",
-                    confidence=final_confidence,
-                    edge_price=edge_price,
-                    rr_ratio=rr_ratio,
-                    atr=atr,
-                    volatility_mode="normal",
-                    basis=0.001
-                )
-
-        return None
+        logger.info(f"🎯 [WallFadeV3] Trade Type: {trade_type} | Base: {base_confidence:.2f} | Detector Boost: +{detector_boost:.2f} | Final: {final_confidence:.2f} | BTC: {btc_trend} | SOL_Delta: {sol_delta}")
+        
+        self._last_signal_time = now
+        
+        return EnrichedSignal(
+            signal_id=f"WallFadeV3_{symbol}_{int(now)}",
+            symbol=symbol,
+            side=signal_side,
+            entry_price=entry_price,
+            strategy="WallFadeV3",
+            confidence=final_confidence,
+            edge_price=edge_price,
+            rr_ratio=rr_ratio,
+            atr=atr,
+            volatility_mode="normal",
+            basis=0.001
+        )

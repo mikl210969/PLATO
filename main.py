@@ -7,6 +7,7 @@ import asyncio
 import signal
 import sys
 import time
+import logging
 import traceback
 from pathlib import Path
 from typing import Optional, Dict, List, Any
@@ -38,6 +39,7 @@ from strategies.breakout_v1 import BreakoutStrategyV1
 from extensions.risk.position_sizer import PositionSizer
 from extensions.analytics.monitor_factory import MonitorFactory  # 🔥 НОВОЕ: Фабрика мониторов
 from extensions.analytics.atr_monitor import AtrMonitor  # 🔥 УРОВЕНЬ 5: Dynamic ATR
+from core.json_logger import JsonLogger, JsonLoggerHandler
 
 logger = get_logger(__name__)
 
@@ -64,8 +66,19 @@ class Platform:
         self.symbol = exchange_config.get('symbol', 'SOLUSDT')
 
         # 2. JSON Logger
-        self.json_logger = JsonLogger(enabled=True)
-        logger.info(f"✅ JSON Logger initialized: enabled={self.json_logger.enabled}")
+        log_config = self.config.get('logging', {})
+        self.json_logger = JsonLogger(config=log_config)
+        
+        # 🔥 НОВОЕ: Подключаем мост к СТАНДАРТНОМУ root-логгеру Python
+        import logging
+        json_handler = JsonLoggerHandler(self.json_logger)
+        json_handler.setLevel(logging.INFO)
+        
+        # Добавляем handler к root logger, чтобы он перехватывал вызовы из ВСЕХ модулей
+        logging.getLogger().addHandler(json_handler)
+        
+        # Теперь используем твой стандартный logger для вывода в консоль
+        logger.info(f"✅ JSON Logger initialized | Level: {log_config.get('level', 'INFO')} | WS Raw: {log_config.get('optional_modules', {}).get('ws', False)}")
 
         # 3. Инициализация базовых компонентов
         self.bus = EventBus()

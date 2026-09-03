@@ -15,7 +15,12 @@ class Logger:
         self.logger = logging.getLogger(name)
         self.logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-        # Убираем дублирующиеся handlers
+        # 🔥 КРИТИЧЕСКИ ВАЖНО: Разрешаем передачу сообщений в корневой логгер (Root Logger).
+        # Именно там подключен наш JsonLoggerHandler, который пишет события в файл.
+        # Если здесь стоит False (по умолчанию в некоторых конфигурациях), файл останется пустым.
+        self.logger.propagate = True
+
+        # Убираем дублирующиеся handlers, чтобы не было задвоения вывода в консоль
         if not self.logger.handlers:
             handler = logging.StreamHandler(sys.stdout)
             handler.setFormatter(logging.Formatter(

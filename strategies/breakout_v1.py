@@ -13,11 +13,10 @@ class BreakoutStrategyV1:
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
-        self.cooldown_sec = config.get('cooldown_sec', 60.0)
-        self.liquidity_void_threshold = config.get('liquidity_void_threshold', 5000.0)
-        self.max_attempts = config.get('max_attempts', 2)
-        self.timeout_sec = config.get('timeout_sec', 5.0)
-        self.price_offset = config.get('price_offset', 0.01)
+        self.cooldown_sec = config.get('cooldown_sec', 30.0)
+        
+        self._recent_detector_events: List[Dict[str, Any]] = []
+        self._events_window_sec = 30.0
         
         self._last_breakout_event: Optional[Dict[str, Any]] = None
         self._event_valid_for_sec = 10.0
@@ -26,7 +25,18 @@ class BreakoutStrategyV1:
         
         # 🔥 НОВОЕ: Хранилище последней дивергенции
         self._last_divergence = None
-        self._divergence_valid_for_sec = 900.0  # 15 минут
+        self._divergence_valid_for_sec = 900.0
+
+        # 🔥 DEBUG MODE: Читаем флаги обхода фильтров из конфига
+        debug_mode = config.get('debug_mode', {})
+        self.bypass_btc_filter = debug_mode.get('bypass_btc_filter', False)
+        self.bypass_adaptive_sl = debug_mode.get('bypass_adaptive_sl', False)
+        self.bypass_smart_sizing = debug_mode.get('bypass_smart_sizing', False)
+        
+        # 🔥 НОВЫЕ ФИЛЬТРЫ ДЛЯ ОТЛАДКИ
+        self.bypass_macro_hvn_filter = debug_mode.get('bypass_macro_hvn_filter', False)
+        self.bypass_wall_distance_filter = debug_mode.get('bypass_wall_distance_filter', False)
+        self.bypass_confidence_threshold = debug_mode.get('bypass_confidence_threshold', False)
 
     def subscribe_to_events(self, event_bus):
         self._event_bus = event_bus
@@ -92,13 +102,16 @@ class BreakoutStrategyV1:
             return None
 
         # ========================================================================
-        # 🔥 УРОВЕНЬ 4: REGIME FILTER (Блокировка пробоев во флэте)
+        #  УРОВЕНЬ 4: REGIME FILTER (Блокировка пробоев во флэте)
         # ========================================================================
         btc_regime = context.get('btc_delta_context', {}).get('regime', 'NORMAL')
         
         if btc_regime == 'FLAT':
-            logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: режим FLAT (высокий риск ложного пробоя)")
-            return None
+            if self.bypass_btc_filter:
+                logger.info(f"⚠️ [DEBUG MODE] Пропускаем блокировку режима FLAT (bypass_btc_filter=True)")
+            else:
+                logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: режим FLAT (высокий риск ложного пробоя)")
+                return None
         # ========================================================================
 
         if not self._last_breakout_event:
@@ -162,19 +175,22 @@ class BreakoutStrategyV1:
         base_confidence += trend_bonus
 
         # Логика для пробоев: Совпадение с трендом = БОНУС, Против тренда = СУРОВЫЙ ШТРАФ
-        if signal_side == 'long' and btc_trend == 'UP':
-            base_confidence += 0.15  # Бонус за подтверждение трендом BTC
-            logger.info(f"✅ [BreakoutV1] Бонус к confidence: LONG пробой подтвержден UP трендом BTC")
-        elif signal_side == 'long' and btc_trend == 'DOWN':
-            base_confidence *= 0.4   # Суровый штраф (высокий риск fakeout)
-            logger.warning(f"⚠️ [BreakoutV1] Штраф к confidence: LONG пробой против DOWN тренда BTC")
-            
-        elif signal_side == 'short' and btc_trend == 'DOWN':
-            base_confidence += 0.15
-            logger.info(f"✅ [BreakoutV1] Бонус к confidence: SHORT пробой подтвержден DOWN трендом BTC")
-        elif signal_side == 'short' and btc_trend == 'UP':
-            base_confidence *= 0.4
-            logger.warning(f"⚠️ [BreakoutV1] Штраф к confidence: SHORT пробой против UP тренда BTC")
+        if not self.bypass_btc_filter:
+            if signal_side == 'long' and btc_trend == 'UP':
+                base_confidence += 0.15  # Бонус за подтверждение трендом BTC
+                logger.info(f"✅ [BreakoutV1] Бонус к confidence: LONG пробой подтвержден UP трендом BTC")
+            elif signal_side == 'long' and btc_trend == 'DOWN':
+                base_confidence *= 0.4   # Суровый штраф (высокий риск fakeout)
+                logger.warning(f"⚠️ [BreakoutV1] Штраф к confidence: LONG пробой против DOWN тренда BTC")
+                
+            elif signal_side == 'short' and btc_trend == 'DOWN':
+                base_confidence += 0.15
+                logger.info(f"✅ [BreakoutV1] Бонус к confidence: SHORT пробой подтвержден DOWN трендом BTC")
+            elif signal_side == 'short' and btc_trend == 'UP':
+                base_confidence *= 0.4
+                logger.warning(f"⚠️ [BreakoutV1] Штраф к confidence: SHORT пробой против UP тренда BTC")
+        else:
+            logger.info(f"⚠️ [DEBUG MODE] Пропускаем бонусы/штрафы confidence за тренд BTC (bypass_btc_filter=True)")
 
         # Подтверждение локальной дельтой SOL
         if signal_side == 'long' and sol_delta > 50.0:
@@ -212,9 +228,11 @@ class BreakoutStrategyV1:
         final_confidence = min(max(base_confidence, 0.0), 1.0)
 
         # Жесткий порог отсечения
-        if final_confidence < 0.50:
+        if not self.bypass_confidence_threshold and final_confidence < 0.50:
             logger.info(f"🚫 [BreakoutV1] Сигнал ОТКЛОНЕН: итоговый confidence {final_confidence:.2f} ниже порога 0.50 (BTC: {btc_trend}, SOL_Delta: {sol_delta})")
             return None
+        elif self.bypass_confidence_threshold and final_confidence < 0.50:
+            logger.warning(f"⚠️ [DEBUG MODE] Пропускаем порог confidence (текущий: {final_confidence:.2f}, требуется >= 0.50)")
 
         # 4. РАСЧЕТ УРОВНЕЙ
         entry_price = round(current_price, 2)

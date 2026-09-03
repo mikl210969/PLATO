@@ -12,7 +12,8 @@ from core.types import OrderSide
 from adapters.binance_rest import BinanceRestClient
 from adapters.binance_ws import BinanceWsAdapter
 from core.event_bus import EventBus
-
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 class Trader:
     """Исполнитель команд. Только отправляет ордера и возвращает результат."""
@@ -253,7 +254,7 @@ class Trader:
             position = await self.rest.get_position(symbol)
             return position
         except Exception as e:
-            print(f"⚠️ [TRADER] Failed to get position: {e}")
+            logger.warning(f"⚠️ [TRADER] Failed to get position: {e}")
             return None
 
     async def get_order_status(
@@ -270,7 +271,7 @@ class Trader:
                 client_order_id=client_order_id
             )
         except Exception as e:
-            print(f"⚠️ [TRADER] Failed to get order status: {e}")
+            logger.warning(f"⚠️ [TRADER] Failed to get order status: {e}")
             return None
 
     async def cancel_order(self, symbol: str, order_id: str) -> Dict:
@@ -294,7 +295,7 @@ class Trader:
             return {"success": False, "error": error_msg, "code": error_code}
 
         except Exception as e:
-            print(f"⚠️ [TRADER] Failed to cancel order: {e}")
+            logger.warning(f"⚠️ [TRADER] Failed to cancel order: {e}")
             return {"success": False, "error": str(e), "code": None}
 
     def calculate_exit_levels(self, side: str, entry_price: float, atr_value: float = 0.5) -> Dict:
@@ -308,4 +309,4 @@ class Trader:
     async def stop(self):
         """Остановка трейдера."""
         self._running = False
-        print(f"🛑 [TRADER] Stopped: {self.symbol}")
+        logger.info(f"🛑 [TRADER] Stopped: {self.symbol}")

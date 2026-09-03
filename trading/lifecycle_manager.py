@@ -14,7 +14,8 @@ from typing import Dict, Optional, Any
 
 from core.event_bus import EventBus, Event
 from trading.passport_manager import PassportManager
-
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 class LifecycleManager:
     """
@@ -55,7 +56,7 @@ class LifecycleManager:
                 data=data or {}
             )
         else:
-            print(f"⏱️ [LIFECYCLE] {event}: {data}")
+            logger.info(f"⏱️ [LIFECYCLE] {event}: {data}")
 
     def _subscribe_to_events(self):
         self.bus.subscribe("PASSPORT_CREATED", self._on_passport_created)

@@ -29,7 +29,8 @@ from trading.passport import TradePassport
 from trading.passport_manager import PassportManager
 from trading.trader import Trader
 from datetime import datetime, timezone
-
+from core.logger import get_logger
+logger = get_logger(__name__)
 class RiskManager:
     """Внутренняя защита позиции (Internal Stop)."""
 
@@ -65,15 +66,16 @@ class RiskManager:
     # СЛУЖЕБНОЕ
     # ============================================================
 
-    def _log(self, event: str, data: Optional[Dict] = None):
+    def _log(self, event: str, data: Optional[Dict] = None, level: str = "INFO"):
         if self.json_logger:
             self.json_logger.log(
                 module="risk_manager",
                 event=event,
-                data=data or {}
+                data=data or {},
+                level=level
             )
         else:
-            print(f"🛡️ [RISK] {event}: {data}")
+            logger.info(f"🛡️ [RISK] {event}: {data}")
 
     def _subscribe_to_events(self):
         self.bus.subscribe("POSITION_OPENED", self._on_position_opened)

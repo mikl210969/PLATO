@@ -6,7 +6,8 @@ from typing import Optional, Dict, Any
 from core.types import PassportStatus
 from trading.passport import TradePassport
 from trading.passport_manager import PassportManager
-
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 class StateManager:
     """Управляет переходами состояний паспорта."""
@@ -82,7 +83,7 @@ class StateManager:
 
         # 2. Проверка карты разрешённых переходов
         if not self.can_transition(current, new_status):
-            print(f"⚠️ [STATE] Forbidden transition: {current} → {new_status} ({reason})")
+            logger.warning(f"⚠️ [STATE] Forbidden transition: {current} → {new_status} ({reason})")
             return False
 
         # 3. Выполняем переход
@@ -90,7 +91,7 @@ class StateManager:
 
         # Логируем
         emoji = self._get_emoji(new_status)
-        print(f"{emoji} [STATE] {current} → {new_status} ({reason})")
+        logger.info(f"{emoji} [STATE] {current} → {new_status} ({reason})")
 
         return True
 
@@ -194,10 +195,10 @@ class StateManager:
                 # Если разница огромна, доверяем математике, а не событию
                 max_allowed_diff = position_qty * entry_price * 0.5
                 if abs(gross_pnl - calculated_pnl) > max_allowed_diff:
-                    print(f"⚠️ [STATE] Аномальный PnL ({gross_pnl}) для {passport.passport_id}, пересчитан как {calculated_pnl:.2f}")
+                    logger.warning(f"⚠️ [STATE] Аномальный PnL ({gross_pnl}) для {passport.passport_id}, пересчитан как {calculated_pnl:.2f}")
                     gross_pnl = calculated_pnl
             else:
-                # Если exit_price так и остался 0, обнуляем PnL, чтобы не писать мусор вроде 1059.66
+                # Если exit_price так и остался 0, обнуляем PnL, чтобы не писать мусор
                 gross_pnl = 0.0
 
             close_data = {
@@ -215,7 +216,7 @@ class StateManager:
             reason = f"Partial close: {event_data.get('closed_qty', 0)}"
 
         else:
-            print(f"⚠️ [STATE] Unknown event: {event_type}")
+            logger.warning(f"⚠️ [STATE] Unknown event: {event_type}")
             return False
 
         if not new_status:

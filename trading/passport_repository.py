@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from typing import Optional, List
 from trading.passport import TradePassport
-
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 class PassportRepository:
     """Сохранение и загрузка паспортов."""
@@ -44,7 +45,7 @@ class PassportRepository:
                 passports.append(passport)
             except Exception as e:
                 # Логируем ошибку, но не прерываем загрузку
-                print(f"⚠️ [REPOSITORY] Failed to load {file_path.name}: {e}")
+                logger.warning(f"⚠️ [REPOSITORY] Failed to load {file_path.name}: {e}")
         return passports
 
     def delete(self, passport_id: str):
