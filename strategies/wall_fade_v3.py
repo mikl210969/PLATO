@@ -40,23 +40,36 @@ class WallFadeStrategyV3:
         self._events_window_sec = 30.0
         self._event_bus = None
         
-        # Фоллбэк: Состояние тренда BTC
         self.btc_trend = "FLAT"
-        
-        # 🔥 НОВОЕ: Хранилище последней дивергенции
         self._last_divergence = None
         self._divergence_valid_for_sec = 900.0
 
-        # 🔥 DEBUG MODE: Читаем флаги обхода фильтров из конфига
-        debug_mode = config.get('debug_mode', {})
-        self.bypass_btc_filter = debug_mode.get('bypass_btc_filter', False)
+        # 🔥 УНИВЕРСАЛЬНОЕ ЧТЕНИЕ: ищем настройки либо в корне переданного конфига, либо в блоке debug_mode
+        debug_mode = config.get('debug_mode', config) 
+        strategy_debug = debug_mode.get('strategies', {}).get('wall_fade_v3', config) 
+
+        self.force_test_signal = strategy_debug.get('force_test_signal', debug_mode.get('enabled', False))
+        self.test_signal_interval = strategy_debug.get('test_signal_interval', debug_mode.get('force_test_signal_every_sec', 60))
+        self.fixed_lot_size = strategy_debug.get('fixed_lot_size', debug_mode.get('fixed_lot_size', 7.0))
+        self.fixed_sl_distance = strategy_debug.get('fixed_sl_distance', debug_mode.get('fixed_sl_distance', 0.25))
+        self.fixed_tp1_distance = strategy_debug.get('fixed_tp1_distance', debug_mode.get('fixed_tp1_distance', 0.25))
+        self.fixed_tp2_distance = strategy_debug.get('fixed_tp2_distance', debug_mode.get('fixed_tp2_distance', 0.50))
+        
+        self.log_input_stream = strategy_debug.get('log_input_stream', False)
+        self.bypass_filters = strategy_debug.get('bypass_filters', False)
+        
+        # 🔥 ДИАГНОСТИКА: теперь мы точно увидим, прочитались ли флаги
+        print(f"🔥 [DEBUG INIT] WallFadeV3: log_input_stream={self.log_input_stream}, force_test_signal={self.force_test_signal}")
+
+        # Для обратной совместимости
+        self.bypass_btc_filter = debug_mode.get('bypass_btc_filter', self.bypass_filters)
         self.bypass_adaptive_sl = debug_mode.get('bypass_adaptive_sl', False)
         self.bypass_smart_sizing = debug_mode.get('bypass_smart_sizing', False)
-        
-        # 🔥 НОВЫЕ ФИЛЬТРЫ ДЛЯ ОТЛАДКИ
-        self.bypass_macro_hvn_filter = debug_mode.get('bypass_macro_hvn_filter', False)
-        self.bypass_wall_distance_filter = debug_mode.get('bypass_wall_distance_filter', False)
-        self.bypass_confidence_threshold = debug_mode.get('bypass_confidence_threshold', False)
+        self.bypass_macro_hvn_filter = debug_mode.get('bypass_macro_hvn_filter', self.bypass_filters)
+        self.bypass_wall_distance_filter = debug_mode.get('bypass_wall_distance_filter', self.bypass_filters)
+        self.bypass_confidence_threshold = debug_mode.get('bypass_confidence_threshold', self.bypass_filters)
+
+        self._last_test_signal_time = 0.0
 
     def subscribe_to_events(self, event_bus):
         self._event_bus = event_bus
@@ -148,28 +161,76 @@ class WallFadeStrategyV3:
         return min(boost, 1.0)
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
-        print(f" [WALLFADE] ВНУТРИ generate_signal | Цена: {context.get('current_price')} | Бидов: {len(context.get('orderbook', {}).get('bids', []))}")
-        
+        # 🔥 ЗАДАЧА 1: ТУМБЛЕР ВХОДНОГО ПОТОКА (Логируем каждый вызов, если включено)
+        if self.log_input_stream:
+            logger.info(f"📥 [ВХОДНОЙ ПОТОК] {self.__class__.__name__}: вызван generate_signal | Цена: {context.get('current_price', 0)} | Бидов: {len(context.get('orderbook', {}).get('bids', []))}")
+
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
+        now = time.time()
+
+        # 🔥 ЗАДАЧИ 1, 3, 4: НЕПРЕРЫВНЫЙ ПОТОК (1 мин) + ФИКСИРОВАННЫЙ ЛОТ 7.0 + ФИКСИРОВАННЫЕ SL/TP
+        if self.force_test_signal and (now - self._last_test_signal_time >= self.test_signal_interval):
+            self._last_test_signal_time = now
+            
+            side = 'short' # Для теста механики открытия/закрытия
+            
+            # Рассчитываем жестко заданные уровни (минимальные биржевые расстояния)
+            if side == 'short':
+                sl_price = round(current_price + self.fixed_sl_distance, 2)
+                tp1_price = round(current_price - self.fixed_tp1_distance, 2)
+                tp2_price = round(current_price - self.fixed_tp2_distance, 2)
+            else:
+                sl_price = round(current_price - self.fixed_sl_distance, 2)
+                tp1_price = round(current_price + self.fixed_tp1_distance, 2)
+                tp2_price = round(current_price + self.fixed_tp2_distance, 2)
+
+            logger.info(f"✅ [{self.__class__.__name__}] ТЕСТОВЫЙ СИГНАЛ (таймер {self.test_signal_interval}с) | Side: {side}, Price: {current_price}, SL: {sl_price}, TP1: {tp1_price}, TP2: {tp2_price}, Lot: {self.fixed_lot_size}")
+            
+            return EnrichedSignal(
+                signal_id=f"{self.__class__.__name__}_TEST_{int(now)}",
+                symbol=symbol,
+                side=side,
+                entry_price=current_price,
+                strategy=self.__class__.__name__,
+                confidence=0.99,
+                edge_price=current_price,
+                rr_ratio=2.0,
+                atr=0.1,
+                volatility_mode="normal",
+                basis=0.0,
+                order_type="limit",
+                execution_params={
+                    "quantity": self.fixed_lot_size,
+                    "sl_price": sl_price,
+                    "tp1_price": tp1_price,
+                    "tp2_price": tp2_price
+                }
+            )
+
+        # ========================================================================
+        # ДАЛЕЕ ИДЕТ ШТАТНАЯ ЛОГИКА СТРАТЕГИИ
+        # (Если тестовый сигнал еще не сработал, стратегия работает как обычно,
+        # но теперь все отказы будут логироваться, а не молча возвращать None)
+        # ========================================================================
+        
         orderbook = context.get('orderbook', {'bids': [], 'asks': []})
         hvn_micro = context.get('hvn_micro', [])
         hvn_macro = context.get('hvn_macro', [])
         atr = self.atr_value
         
         if current_price <= 0 or not orderbook.get('bids') or not orderbook.get('asks'):
-            print("🚫 [WALLFADE] Отказ: нет цены или стакана")
+            logger.warning(f"🚫 [{self.__class__.__name__}] Отказ: нет цены или стакана")
             return None
 
-        now = time.time()
         if now - self._last_signal_time < self.cooldown_sec:
-            print(f"🚫 [WALLFADE] Отказ: кулдаун (осталось {self.cooldown_sec - (now - self._last_signal_time):.1f} сек)")
+            logger.warning(f"🚫 [{self.__class__.__name__}] Отказ: кулдаун (осталось {self.cooldown_sec - (now - self._last_signal_time):.1f} сек)")
             return None
-
+#__________________________________________________________________________________________
         btc_regime = context.get('btc_delta_context', {}).get('regime', 'NORMAL')
         if btc_regime == 'IMPULSIVE':
             if not self.bypass_btc_filter:
-                print("🚫 [WALLFADE] Отказ: режим BTC IMPULSIVE")
+                logger.warning(f"🚫 [{self.__class__.__name__}] Отказ: режим BTC IMPULSIVE")
                 return None
 
         if not self.bypass_macro_hvn_filter:
@@ -177,12 +238,12 @@ class WallFadeStrategyV3:
                 hvn_price = macro_hvn['price']
                 distance_pct = abs(current_price - hvn_price) / current_price
                 if distance_pct < 0.005 and macro_hvn['strength'] > 15.0:
-                    print(f"🚫 [WALLFADE] Отказ: MACRO HVN FILTER (hvn={hvn_price})")
+                    logger.warning(f"🚫 [{self.__class__.__name__}] Отказ: MACRO HVN FILTER (hvn={hvn_price})")
                     return None
 
         bids = orderbook.get('bids', [])
         if len(bids) < 5:
-            print(f"🚫 [WALLFADE] Отказ: в стакане меньше 5 бидов ({len(bids)})")
+            logger.warning(f"🚫 [{self.__class__.__name__}] Отказ: в стакане меньше 5 бидов ({len(bids)})")
             return None
             
         avg_vol = sum(float(q) for p, q in bids[:10]) / min(10, len(bids))
@@ -197,7 +258,7 @@ class WallFadeStrategyV3:
         distance_pct = abs(entry_price - edge_price) / entry_price
         
         if not self.bypass_wall_distance_filter and distance_pct >= 0.005:
-            print(f"🚫 [WALLFADE] Отказ: расстояние до стены {distance_pct:.4f} >= 0.005")
+            logger.warning(f"🚫 [{self.__class__.__name__}] Отказ: расстояние до стены {distance_pct:.4f} >= 0.005")
             return None
             
         sl_anchor_price = edge_price - (atr * 0.5)
@@ -209,7 +270,8 @@ class WallFadeStrategyV3:
                 if distance <= (atr * 1.5):
                     if best_hvn is None or (entry_price - hvn_price) < (entry_price - best_hvn['price']):
                         best_hvn = micro_hvn
-        if best_hvn: sl_anchor_price = best_hvn['price']
+        if best_hvn:
+            sl_anchor_price = best_hvn['price']
         
         sl1 = round(sl_anchor_price - (atr * 0.2), 2) 
         r_value = abs(entry_price - sl1)
@@ -239,16 +301,20 @@ class WallFadeStrategyV3:
         base_confidence = 0.50 + 0.25 + (0.10 if rr_ratio >= 2.0 else 0.0) + trend_bonus
 
         if not self.bypass_btc_filter:
-            if signal_side == 'short' and btc_trend == 'UP': base_confidence *= 0.5
-            elif signal_side == 'long' and btc_trend == 'DOWN': base_confidence *= 0.5
+            if signal_side == 'short' and btc_trend == 'UP':
+                base_confidence *= 0.5
+            elif signal_side == 'long' and btc_trend == 'DOWN':
+                base_confidence *= 0.5
 
-        if signal_side == 'short' and sol_delta > 30.0: base_confidence *= 0.7
-        elif signal_side == 'long' and sol_delta < -30.0: base_confidence *= 0.7
+        if signal_side == 'short' and sol_delta > 30.0:
+            base_confidence *= 0.7
+        elif signal_side == 'long' and sol_delta < -30.0:
+            base_confidence *= 0.7
 
         detector_boost = self._calculate_confidence_boost(entry_price)
         
         if "REVERSAL" in trade_type and detector_boost < 0.30:
-            print(f" [WALLFADE] Отказ: REVERSAL без достаточного detector_boost ({detector_boost:.2f})")
+            logger.warning(f"🚫 [{self.__class__.__name__}] Отказ: REVERSAL без достаточного detector_boost ({detector_boost:.2f})")
             return None
 
         if self._last_divergence:
@@ -260,15 +326,22 @@ class WallFadeStrategyV3:
         final_confidence = min(base_confidence + detector_boost, 1.0)
         
         if not self.bypass_confidence_threshold and final_confidence < 0.50:
-            print(f"🚫 [WALLFADE] Отказ: confidence {final_confidence:.2f} < 0.50")
+            logger.warning(f"🚫 [{self.__class__.__name__}] Отказ: confidence {final_confidence:.2f} < 0.50")
             return None
 
-        print(f"✅ [WALLFADE] СИГНАЛ СОЗДАН! Side: {signal_side}, Price: {entry_price}, Conf: {final_confidence:.2f}")
+        logger.info(f"✅ [{self.__class__.__name__}] ШТАТНЫЙ СИГНАЛ СОЗДАН! Side: {signal_side}, Price: {entry_price}, Conf: {final_confidence:.2f}")
         self._last_signal_time = now
         
         return EnrichedSignal(
             signal_id=f"WallFadeV3_{symbol}_{int(now)}",
-            symbol=symbol, side=signal_side, entry_price=entry_price, strategy="WallFadeV3",
-            confidence=final_confidence, edge_price=edge_price, rr_ratio=rr_ratio,
-            atr=atr, volatility_mode="normal", basis=0.001
+            symbol=symbol,
+            side=signal_side,
+            entry_price=entry_price,
+            strategy="WallFadeV3",
+            confidence=final_confidence,
+            edge_price=edge_price,
+            rr_ratio=rr_ratio,
+            atr=atr,
+            volatility_mode="normal",
+            basis=0.001
         )

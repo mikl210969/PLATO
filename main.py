@@ -278,10 +278,19 @@ class Platform:
         logger.info(f"✅ Platform initialized | symbol={self.symbol} | profile={self.profile}")
 
     async def _generate_signals(self, context: dict):
-        # 🔥 ЯДЕРНЫЙ МАЯЧОК: Если это появится в консоли, метод вызывается
-        print("🚨 [ГЛАВНЫЙ ЦИКЛ] _generate_signals ВЫЗВАН!")
+        # 🔥 Логирование факта вызова (для отладки)
         logger.info("🚨 [ГЛАВНЫЙ ЦИКЛ] _generate_signals вызван")
+        print("🚨 [ГЛАВНЫЙ ЦИКЛ] _generate_signals ВЫЗВАН!")
         
+        # 🔥 ЗАДАЧА 2: Блокировка новых ордеров только за счет статуса паспорта
+        symbol = context.get('symbol', 'SOLUSDT')
+        active_passport = self.passport_manager.get_active_by_symbol(symbol)
+        
+        if active_passport and active_passport.status in ('OPEN', 'PARTIAL_CLOSE', 'ORDER_SENT'):
+            logger.warning(f"🚫 [ГЛАВНЫЙ ЦИКЛ] Сигналы заблокированы: активный паспорт {active_passport.passport_id} в статусе {active_passport.status}")
+            print(f"🚫 [ГЛАВНЫЙ ЦИКЛ] Сигналы заблокированы: активный паспорт {active_passport.passport_id}")
+            return []
+
         signals = []
         
         # Проверяем, существуют ли вообще объекты стратегий
@@ -294,7 +303,7 @@ class Platform:
                 
             print(f"🚨 Вызываем generate_signal для {strategy.__class__.__name__}...")
             
-            # Вот здесь должен сработать маячок внутри самой стратегии
+            # Вот здесь стратегия должна написать в лог "📥 [ВХОДНОЙ ПОТОК]..."
             signal = strategy.generate_signal(context)
             
             if signal:

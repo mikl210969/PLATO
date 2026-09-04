@@ -11,11 +11,28 @@
   "atr_multiplier_tp2": 1.0,
 
   "debug_mode": {
-    "bypass_btc_filter": true,
-    "bypass_adaptive_sl": true,
-    "bypass_smart_sizing": true,
-    "bypass_macro_hvn_filter": true,
-    "bypass_wall_distance_filter": true,
-    "bypass_confidence_threshold": true
+    "enabled": true,
+    "force_test_signal_every_sec": 60,
+    "fixed_lot_size": 7.0,
+    "fixed_sl_distance": 0.25,
+    "fixed_tp1_distance": 0.25,
+    "fixed_tp2_distance": 0.50,
+    "strategies": {
+      "wall_fade_v3": { 
+        "enabled": true, 
+        "log_input_stream": true, 
+        "bypass_filters": true 
+      },
+      "absorption_v2": { 
+        "enabled": true, 
+        "log_input_stream": true, 
+        "bypass_filters": true 
+      },
+      "breakout_v1": { 
+        "enabled": true, 
+        "log_input_stream": true, 
+        "bypass_filters": true 
+      }
+    }
   }
 }
