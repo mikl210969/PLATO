@@ -147,13 +147,13 @@ class StateManager:
         elif event_type == "ORDER_FILLED":
             new_status = PassportStatus.OPEN.value
             reason = "Order filled"
-            position_size = event_data.get('executed_qty', 0)
+            position_size = abs(event_data.get('executed_qty', 0))
             position_price = event_data.get('price', 0)
 
         elif event_type == "ORDER_PARTIAL":
             new_status = PassportStatus.OPEN.value
             reason = f"Partial fill: {event_data.get('executed_qty', 0)}"
-            position_size = event_data.get('executed_qty', 0)
+            position_size = abs(event_data.get('executed_qty', 0))
             position_price = event_data.get('price', 0)
 
         elif event_type == "ORDER_CANCELED":

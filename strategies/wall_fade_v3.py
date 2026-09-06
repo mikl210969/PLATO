@@ -44,30 +44,27 @@ class WallFadeStrategyV3:
         self._last_divergence = None
         self._divergence_valid_for_sec = 900.0
 
-        # 🔥 УНИВЕРСАЛЬНОЕ ЧТЕНИЕ: ищем настройки либо в корне переданного конфига, либо в блоке debug_mode
-        debug_mode = config.get('debug_mode', config) 
-        strategy_debug = debug_mode.get('strategies', {}).get('wall_fade_v3', config) 
+        # 🔥 ПРЯМОЕ ЧТЕНИЕ НАСТРОЕК ИЗ ПЕРЕДАННОГО БЛОКА (так как main.py передает именно его)
+        self.log_input_stream = config.get('log_input_stream', False)
+        self.force_test_signal = config.get('force_test_signal', False)
+        self.test_signal_interval = config.get('test_signal_interval', 60)
+        self.fixed_lot_size = config.get('fixed_lot_size', 7.0)
+        self.fixed_sl_distance = config.get('fixed_sl_distance', 0.25)
+        self.fixed_tp1_distance = config.get('fixed_tp1_distance', 0.25)
+        self.fixed_tp2_distance = config.get('fixed_tp2_distance', 0.50)
+        self.bypass_filters = config.get('bypass_filters', False)
+        
+        # Для обратной совместимости со старыми флагами, если они вдруг есть в глобальном конфиге
+        debug_mode = config.get('debug_mode', {})
+        self.bypass_btc_filter = config.get('bypass_btc_filter', debug_mode.get('bypass_btc_filter', self.bypass_filters))
+        self.bypass_adaptive_sl = config.get('bypass_adaptive_sl', debug_mode.get('bypass_adaptive_sl', False))
+        self.bypass_smart_sizing = config.get('bypass_smart_sizing', debug_mode.get('bypass_smart_sizing', False))
+        self.bypass_macro_hvn_filter = config.get('bypass_macro_hvn_filter', debug_mode.get('bypass_macro_hvn_filter', self.bypass_filters))
+        self.bypass_wall_distance_filter = config.get('bypass_wall_distance_filter', debug_mode.get('bypass_wall_distance_filter', self.bypass_filters))
+        self.bypass_confidence_threshold = config.get('bypass_confidence_threshold', debug_mode.get('bypass_confidence_threshold', self.bypass_filters))
 
-        self.force_test_signal = strategy_debug.get('force_test_signal', debug_mode.get('enabled', False))
-        self.test_signal_interval = strategy_debug.get('test_signal_interval', debug_mode.get('force_test_signal_every_sec', 60))
-        self.fixed_lot_size = strategy_debug.get('fixed_lot_size', debug_mode.get('fixed_lot_size', 7.0))
-        self.fixed_sl_distance = strategy_debug.get('fixed_sl_distance', debug_mode.get('fixed_sl_distance', 0.25))
-        self.fixed_tp1_distance = strategy_debug.get('fixed_tp1_distance', debug_mode.get('fixed_tp1_distance', 0.25))
-        self.fixed_tp2_distance = strategy_debug.get('fixed_tp2_distance', debug_mode.get('fixed_tp2_distance', 0.50))
-        
-        self.log_input_stream = strategy_debug.get('log_input_stream', False)
-        self.bypass_filters = strategy_debug.get('bypass_filters', False)
-        
-        # 🔥 ДИАГНОСТИКА: теперь мы точно увидим, прочитались ли флаги
+        # 🔥 ДИАГНОСТИКА: теперь мы ТОЧНО увидим, что флаг прочитался как True
         print(f"🔥 [DEBUG INIT] WallFadeV3: log_input_stream={self.log_input_stream}, force_test_signal={self.force_test_signal}")
-
-        # Для обратной совместимости
-        self.bypass_btc_filter = debug_mode.get('bypass_btc_filter', self.bypass_filters)
-        self.bypass_adaptive_sl = debug_mode.get('bypass_adaptive_sl', False)
-        self.bypass_smart_sizing = debug_mode.get('bypass_smart_sizing', False)
-        self.bypass_macro_hvn_filter = debug_mode.get('bypass_macro_hvn_filter', self.bypass_filters)
-        self.bypass_wall_distance_filter = debug_mode.get('bypass_wall_distance_filter', self.bypass_filters)
-        self.bypass_confidence_threshold = debug_mode.get('bypass_confidence_threshold', self.bypass_filters)
 
         self._last_test_signal_time = 0.0
 
@@ -173,28 +170,31 @@ class WallFadeStrategyV3:
         if self.force_test_signal and (now - self._last_test_signal_time >= self.test_signal_interval):
             self._last_test_signal_time = now
             
-            side = 'short' # Для теста механики открытия/закрытия
+            side = 'short'  # Для теста механики открытия/закрытия
             
-            # Рассчитываем жестко заданные уровни (минимальные биржевые расстояния)
+            # 🔥 ИСПРАВЛЕНИЕ: Округляем цену до 2 знаков, чтобы избежать ошибки точности Binance (-1111)
+            safe_price = round(current_price, 2)
+            
+            # Рассчитываем жестко заданные уровни на основе безопасной цены
             if side == 'short':
-                sl_price = round(current_price + self.fixed_sl_distance, 2)
-                tp1_price = round(current_price - self.fixed_tp1_distance, 2)
-                tp2_price = round(current_price - self.fixed_tp2_distance, 2)
+                sl_price = round(safe_price + self.fixed_sl_distance, 2)
+                tp1_price = round(safe_price - self.fixed_tp1_distance, 2)
+                tp2_price = round(safe_price - self.fixed_tp2_distance, 2)
             else:
-                sl_price = round(current_price - self.fixed_sl_distance, 2)
-                tp1_price = round(current_price + self.fixed_tp1_distance, 2)
-                tp2_price = round(current_price + self.fixed_tp2_distance, 2)
+                sl_price = round(safe_price - self.fixed_sl_distance, 2)
+                tp1_price = round(safe_price + self.fixed_tp1_distance, 2)
+                tp2_price = round(safe_price + self.fixed_tp2_distance, 2)
 
-            logger.info(f"✅ [{self.__class__.__name__}] ТЕСТОВЫЙ СИГНАЛ (таймер {self.test_signal_interval}с) | Side: {side}, Price: {current_price}, SL: {sl_price}, TP1: {tp1_price}, TP2: {tp2_price}, Lot: {self.fixed_lot_size}")
+            logger.info(f"✅ [{self.__class__.__name__}] ТЕСТОВЫЙ СИГНАЛ (таймер {self.test_signal_interval}с) | Side: {side}, Price: {safe_price}, SL: {sl_price}, TP1: {tp1_price}, TP2: {tp2_price}, Lot: {self.fixed_lot_size}")
             
             return EnrichedSignal(
                 signal_id=f"{self.__class__.__name__}_TEST_{int(now)}",
                 symbol=symbol,
                 side=side,
-                entry_price=current_price,
+                entry_price=safe_price,  # <-- Используем безопасную, округленную цену
                 strategy=self.__class__.__name__,
                 confidence=0.99,
-                edge_price=current_price,
+                edge_price=safe_price,
                 rr_ratio=2.0,
                 atr=0.1,
                 volatility_mode="normal",

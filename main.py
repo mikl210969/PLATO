@@ -84,6 +84,19 @@ class Platform:
         self.bus = EventBus()
         self.passport_manager = PassportManager()
         self.passport_repository = PassportRepository()
+        
+        # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ (Шаг 10.4): Восстановление состояния при старте
+        # Загружаем паспорта с диска в оперативную память, чтобы is_symbol_busy работал корректно
+        # и предотвращал фантомное увеличение лота при перезапусках или сбоях.
+        saved_passports = self.passport_repository.load_all()
+        active_count = 0
+        for passport in saved_passports:
+            # Добавляем в память только те, что еще не закрыты
+            if passport.status not in ("CLOSED", "CANCELED", "FAILED"):
+                self.passport_manager.update(passport)
+                active_count += 1
+        
+        logger.info(f"✅ Загружено {len(saved_passports)} паспортов из хранилища, {active_count} активных добавлено в память")
 
         # 4. REST и WS клиенты
         self.rest = BinanceRestClient(
@@ -172,6 +185,7 @@ class Platform:
         self.drift_monitor = DriftMonitor(
             rest_client=self.rest,
             passport_manager=self.passport_manager,
+            passport_repository=self.passport_repository,  # 🔥 ДОБАВИТЬ ЭТО
             event_bus=self.bus,
             poll_interval=30.0
         )

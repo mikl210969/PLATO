@@ -72,7 +72,18 @@ class PassportManager:
 
     def is_symbol_busy(self, symbol: str) -> bool:
         """Проверить, занят ли символ."""
-        return self.get_active_by_symbol(symbol) is not None
+        is_busy = self.get_active_by_symbol(symbol) is not None
+        
+        # 🔥 КАНАРЕЙКА: Если менеджер говорит "свободно", мы заставим его признаться, что он видит внутри
+        if not is_busy:
+            all_for_symbol = [f"{p.passport_id} (статус: {p.status})" for p in self._passports.values() if p.symbol == symbol]
+            # Используем print, чтобы это точно попало в консоль, даже если логгер настроен иначе
+            print(f"⚠️ [PASSPORT_MANAGER DIAGNOSTIC] is_symbol_busy('{symbol}') вернул False.")
+            print(f"   Паспорта для этого символа, которые менеджер ВИДИТ в памяти: {all_for_symbol}")
+            if not all_for_symbol:
+                print("   ⛔ ВНИМАНИЕ: Менеджер абсолютно пуст для этого символа! Паспорт создается, но не регистрируется в .create() или .update()")
+            
+        return is_busy
 
     def update(self, passport: TradePassport):
         """Обновить паспорт в кэше."""

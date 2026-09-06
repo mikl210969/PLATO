@@ -70,7 +70,7 @@ class OrderHandlerMixin:
             avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
             self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': executed_qty})
             if executed_qty > 0:
-                passport.position_size = executed_qty
+                passport.position_size = abs(executed_qty)
                 # 🔥 Сверяем фактический размер с биржей (защита от чанков)
                 await self._reconcile_position_from_exchange(passport, symbol)                
                 passport.position_entry_price = avg_price if avg_price > 0.0 else passport.entry_price
@@ -139,7 +139,7 @@ class OrderHandlerMixin:
         if not transitioned and passport.status == "OPEN" and executed_qty > 0:
             old_size = passport.position_size
             if abs(executed_qty - old_size) > 0.001:
-                passport.position_size = executed_qty
+                passport.position_size = abs(executed_qty)
                 # 🔥 Сверяем фактический размер с биржей (защита от чанков)
                 await self._reconcile_position_from_exchange(passport, passport.symbol)                
                 if avg_price > 0: passport.position_entry_price = avg_price

@@ -101,14 +101,31 @@ class RiskManager:
             self._log("passport_not_found", {"passport_id": passport_id})
             return
 
+        # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если уровни не заданы, рассчитываем их принудительно
         if passport.sl_price == 0 or passport.tp1_price == 0:
-            self._log("levels_not_set", {
+            self._log("levels_missing_calculating", {
+                "passport_id": passport_id,
+                "message": "Уровни отсутствуют, рассчитываем принудительно перед регистрацией guard"
+            })
+            
+            atr_value = self.config.get('trading', {}).get('atr_value', 0.5)
+            levels = self.trader.calculate_exit_levels(
+                side=passport.side, 
+                entry_price=passport.position_entry_price or passport.entry_price, 
+                atr_value=atr_value
+            )
+            passport.sl_price = levels.get('sl_price', 0)
+            passport.tp1_price = levels.get('tp1_price', 0)
+            passport.tp2_price = levels.get('tp2_price', 0)
+            self.passport_manager.update(passport)
+            self._log("levels_calculated", {
                 "passport_id": passport_id,
                 "sl": passport.sl_price,
-                "tp1": passport.tp1_price
+                "tp1": passport.tp1_price,
+                "tp2": passport.tp2_price
             })
-            return
 
+        # Теперь регистрируем guard, зная, что уровни точно есть
         self._register_guard(passport, remaining=passport.position_size)
 
     def _register_guard(self, passport: TradePassport, remaining: Optional[float] = None):
@@ -139,6 +156,14 @@ class RiskManager:
             "tp2_done": False,
             "sl_done": False,
         }
+        
+        # 🔥 НОВОЕ: Явно публикуем в таймлайн, что уровни активны
+        passport.add_timeline_event(
+            "LEVELS_ACTIVATED", 
+            f"Guard registered. SL: {sl_price}, TP1: {passport.tp1_price}, TP2: {passport.tp2_price}"
+        )
+        self.passport_manager.update(passport)
+        
         self._log("guard_registered", {
             "passport_id": passport.passport_id,
             "side": passport.side,
@@ -194,16 +219,19 @@ class RiskManager:
                     guard['tp1_done'] = True
                     passport = self.passport_manager.get(passport_id)
                     if passport:
-                        be = passport.position_entry_price or passport.entry_price
-                        guard['sl_price'] = be
-                        passport.sl_price = be
-                        passport.add_timeline_event('SL_MOVED_TO_BREAKEVEN', {'price': be, 'reason': 'ACCOUNT_UPDATE_SYNC'})
+                        # 🔥 ИСПРАВЛЕНИЕ: Инициализируем be ПЕРЕД использованием
+                        be = passport.position_entry_price or passport.entry_price or 0.0
+                        if be > 0:
+                            guard['sl_price'] = be
+                            passport.sl_price = be
+                            passport.add_timeline_event('SL_MOVED_TO_BREAKEVEN', f"price={be}, reason=TP1_HIT")
                         self.passport_manager.update(passport)
-                    self._log("tp1_derived_from_exchange", {
-                        "passport_id": passport_id,
-                        "remaining": size,
-                        "sl_breakeven": be
-                    })
+                        # 🔥 ИСПРАВЛЕНИЕ: Используем be внутри блока, где она точно определена
+                        self._log("tp1_derived_from_exchange", {
+                            "passport_id": passport_id,
+                            "remaining": size,
+                            "sl_breakeven": be if be > 0 else None
+                        })
 
     async def _on_position_closed(self, event: Event):
         payload = event.payload
@@ -238,7 +266,12 @@ class RiskManager:
         # Авторегистрация: активный паспорт есть, а защиты нет (рестарт/сбой)
         active_ids = [g['passport_id'] for g in self._guards.values() if g['symbol'] == symbol]
         if not active_ids:
+            if not symbol:
+                self._log("guard_check_skipped", {"reason": "symbol_is_none"})
+                return
             passport = self.passport_manager.get_active_by_symbol(symbol)
+            if not passport:
+                return
             if passport and passport.status in (
                 PassportStatus.OPEN.value,
                 PassportStatus.PARTIAL_CLOSE.value
@@ -264,7 +297,9 @@ class RiskManager:
         if not guard['tp1_done'] and guard['tp1_price'] > 0:
             hit = price <= guard['tp1_price'] if is_short else price >= guard['tp1_price']
             if hit:
-                guard['tp1_done'] = True  # ставим ДО отправки — защита от дублей
+                guard['tp1_done'] = True
+                passport.tp1_activated = True  # 🔥 НОВОЕ: Фиксируем срабатывание
+                
                 qty = round(guard['remaining'] * 0.5, 2)
                 if qty >= 0.1:
                     ok = await self._close_market(passport, guard, qty, 'TP1_HIT')
@@ -273,8 +308,10 @@ class RiskManager:
                         be = passport.position_entry_price or passport.entry_price
                         guard['sl_price'] = be
                         passport.sl_price = be
-                        passport.add_timeline_event('SL_MOVED_TO_BREAKEVEN', {'price': be, 'reason': 'TP1_HIT'})
+                        
+                        passport.add_timeline_event('TP1_TRIGGERED', f"Closed {qty}, SL moved to breakeven: {be}")
                         self.passport_manager.update(passport)
+                        
                         self._log("tp1_triggered", {
                             "passport_id": passport.passport_id,
                             "price": price,
@@ -283,18 +320,23 @@ class RiskManager:
                             "sl_breakeven": be
                         })
                     else:
-                        guard['tp1_done'] = False  # retry на следующем тике
+                        guard['tp1_done'] = False
 
         # 🔥 TP2: полное закрытие остатка
         if not guard['tp2_done'] and guard['tp2_price'] > 0:
             hit = price <= guard['tp2_price'] if is_short else price >= guard['tp2_price']
             if hit:
                 guard['tp2_done'] = True
+                passport.tp2_activated = True  # 🔥 НОВОЕ: Фиксируем срабатывание
+                
                 qty = await self._full_close_qty(passport, guard)
                 if qty >= 0.1:
                     ok = await self._close_market(passport, guard, qty, 'TP2_HIT')
                     if ok:
                         guard['remaining'] = 0.0
+                        passport.add_timeline_event('TP2_TRIGGERED', f"Fully closed {qty}")
+                        self.passport_manager.update(passport)
+                        
                         self._log("tp2_triggered", {
                             "passport_id": passport.passport_id,
                             "price": price,
@@ -308,11 +350,16 @@ class RiskManager:
             hit = price >= guard['sl_price'] if is_short else price <= guard['sl_price']
             if hit:
                 guard['sl_done'] = True
+                passport.sl_activated = True  # 🔥 НОВОЕ: Фиксируем срабатывание
+                
                 qty = await self._full_close_qty(passport, guard)
                 if qty >= 0.1:
                     ok = await self._close_market(passport, guard, qty, 'SL_HIT')
                     if ok:
                         guard['remaining'] = 0.0
+                        passport.add_timeline_event('SL_TRIGGERED', f"Fully closed {qty} at SL")
+                        self.passport_manager.update(passport)
+                        
                         self._log("sl_triggered", {
                             "passport_id": passport.passport_id,
                             "price": price,

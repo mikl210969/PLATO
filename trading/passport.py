@@ -52,6 +52,17 @@ class TradePassport:
     commission: float = 0.0
     net_pnl: float = 0.0
     
+    # 🔥 НОВОЕ: Флаги активации и срабатывания уровней защиты
+    tp1_activated: bool = False
+    tp2_activated: bool = False
+    sl_activated: bool = False
+    
+    # Информация о Smart Sizing и Adaptive SL
+    sizing_info: Optional[Dict[str, Any]] = None
+    
+    # 🔥 НОВОЕ: Информация о Smart Sizing и Adaptive SL
+    sizing_info: Optional[Dict[str, Any]] = None
+    
     def transition_to(self, new_status: str, reason: str = ""):
         """Безопасный переход статуса."""
         self.status = new_status
@@ -63,8 +74,21 @@ class TradePassport:
         })
 
     def add_timeline_event(self, event_type: str, details: str):
-        """Добавить событие в таймлайн."""
+        """Добавить событие в таймлайн с защитой от дубликатов."""
         from datetime import datetime, timezone
+        
+        # Защита от дубликатов
+        if self.timeline:
+            last_event = self.timeline[-1]
+            if last_event.get('event') == event_type:
+                try:
+                    last_ts = datetime.fromisoformat(last_event['timestamp'])
+                    now = datetime.now(timezone.utc)
+                    if (now - last_ts).total_seconds() < 1.0:
+                        return  # Пропускаем дубликат
+                except:
+                    pass
+        
         self.timeline.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "event": event_type,
@@ -112,5 +136,10 @@ class TradePassport:
             "exit_price": self.exit_price,
             "gross_pnl": self.gross_pnl,
             "commission": self.commission,
-            "net_pnl": self.net_pnl
+            "net_pnl": self.net_pnl,
+            # 🔥 НОВОЕ: добавляем флаги в выгрузку
+            "tp1_activated": self.tp1_activated,
+            "tp2_activated": self.tp2_activated,
+            "sl_activated": self.sl_activated,
+            "sizing_info": self.sizing_info
         }

@@ -14,9 +14,10 @@ class DriftMonitor:
     Периодически проверяет согласованность локального состояния с биржей.
     """
 
-    def __init__(self, rest_client, passport_manager, event_bus, poll_interval: float = 30.0):
+    def __init__(self, rest_client, passport_manager, passport_repository, event_bus, poll_interval: float = 30.0):
         self.rest = rest_client
         self.passport_manager = passport_manager
+        self.repository = passport_repository  # 🔥 ДОБАВЛЕНО: Ссылка на репозиторий для сохранения на диск
         self.bus = event_bus
         self.poll_interval = poll_interval
         self._task: Optional[asyncio.Task] = None
@@ -45,7 +46,7 @@ class DriftMonitor:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        self.logger.info(" [DRIFT_MONITOR] Stopped")
+        self.logger.info("🛑 [DRIFT_MONITOR] Stopped")
 
     async def _monitor_loop(self, symbols: list):
         """Основной цикл проверки дрейфа."""
@@ -132,8 +133,9 @@ class DriftMonitor:
                 # Используем entry_price как цену входа, если точная цена исполнения пока неизвестна
                 local_passport.position_entry_price = local_passport.entry_price 
                 
-                # Сохраняем изменения
+                # Сохраняем изменения в память и на диск
                 self.passport_manager.update(local_passport)
+                self.repository.save(local_passport)  # 🔥 ВАЖНО: Синхронизация с диском
                 
                 # 2. Публикуем событие, чтобы RiskManager НЕМЕДЛЕННО выставил защиту (SL/TP)
                 await self.bus.publish(
@@ -149,7 +151,8 @@ class DriftMonitor:
                     symbol=symbol
                 )
                 
-                self.logger.info(f"✅ [DRIFT_RECOVERY] Паспорт {local_passport.passport_id} успешно синхронизирован и защищен!")
+                # 🔥 ДОБАВИТЬ: Явная проверка, что RiskManager подхватил событие
+                self.logger.info(f"✅ [DRIFT_RECOVERY] Паспорт {local_passport.passport_id} переведен в OPEN. Ожидание регистрации guard в RiskManager...")
                 return  # Выходим, так как проблема решена, дальнейшие проверки не нужны
 
             # Проверка 3: Локальные ордера в нетерминальных статусах должны быть на бирже
@@ -197,18 +200,12 @@ class DriftMonitor:
             self.logger.info(f"🔍 [DRIFT_RECOVERY] Запрашиваем историю сделок для {symbol}...")
             trades = await self.rest.get_user_trades(symbol, start_time, end_time, 1000)
             
+            # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ 1: Если список пуст из-за ошибки сети, 
+            # мы НЕ МОЖЕМ быть уверены, что позиция закрыта. Мы НЕ закрываем паспорт!
             if not trades:
-                self.logger.error(f" [DRIFT_RECOVERY] История сделок пуста для {symbol}")
-                # Всё равно закрываем паспорт, но с нулевыми данными
-                passport.status = PassportStatus.CLOSED.value
-                passport.exit_reason = "EXTERNAL_CLOSE"
-                passport.exit_price = 0.0
-                passport.gross_pnl = 0.0
-                passport.net_pnl = 0.0
-                passport.position_size = 0.0
-                passport.closed_at = passport.updated_at
-                self.passport_manager.update(passport)
-                return
+                self.logger.warning(f"⚠️ [DRIFT_RECOVERY] История сделок пуста для {symbol} (возможная ошибка сети или таймаут).")
+                self.logger.warning(f"   Паспорт {passport.passport_id} ОСТАЕТСЯ в статусе {passport.status}. Новые сигналы будут заблокированы.")
+                return  # <-- Просто выходим, не меняя статус на CLOSED
             
             # 2. Ищем сделки, связанные с ордерами этого паспорта
             passport_order_ids = {str(o.get('order_id', '')) for o in passport.orders}
@@ -232,17 +229,11 @@ class DriftMonitor:
                     if str(t.get('clientOrderId', '')) in passport_client_ids
                 ]
             
+            # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ 2: Если всё ещё не нашли, не закрываем насильно.
             if not passport_trades:
-                self.logger.error(f"❌ [DRIFT_RECOVERY] Не удалось найти сделки для {passport.passport_id}")
-                passport.status = PassportStatus.CLOSED.value
-                passport.exit_reason = "EXTERNAL_CLOSE"
-                passport.exit_price = 0.0
-                passport.gross_pnl = 0.0
-                passport.net_pnl = 0.0
-                passport.position_size = 0.0
-                passport.closed_at = passport.updated_at
-                self.passport_manager.update(passport)
-                return
+                self.logger.warning(f"⚠️ [DRIFT_RECOVERY] Не удалось найти сделки для {passport.passport_id} в истории биржи.")
+                self.logger.warning(f"   Паспорт ОСТАЕТСЯ в статусе {passport.status}.")
+                return  # <-- Просто выходим, не меняя статус на CLOSED
             
             # 3. 🔥 Вычисляем среднюю цену закрытия и общий PnL
             #    Группируем сделки по стороне (BUY закрывает SHORT, SELL закрывает LONG)
@@ -284,9 +275,40 @@ class DriftMonitor:
                 float(t.get('commission', 0)) for t in closing_trades
             )
             
-            # 7. 🔥 Обновляем паспорт с корректными данными
+            # 7. 🔥 Обновляем паспорт с корректными данными (только если мы УВЕРЕНЫ в данных)
             passport.status = PassportStatus.CLOSED.value
             passport.exit_reason = "EXTERNAL_CLOSE"
+            
+            # 🔥 ЗАЩИТА: Если exit_price равен 0.0, используем SL или TP как fallback
+            if exit_price == 0.0:
+                self.logger.warning(f"⚠️ [DRIFT_RECOVERY] exit_price=0.0 для {passport.passport_id}. Используем fallback.")
+                if passport.sl_price > 0:
+                    exit_price = passport.sl_price
+                elif passport.tp1_price > 0:
+                    exit_price = passport.tp1_price
+                elif passport.tp2_price > 0:
+                    exit_price = passport.tp2_price
+                else:
+                    exit_price = passport.entry_price  # Последний fallback
+                    
+                # Сбрасываем PnL, так как точная цена неизвестна
+                gross_pnl = 0.0
+                self.logger.warning(f"   PnL сброшен в 0.0. Fallback exit_price: {exit_price}")
+
+            # 🔥 ЗАЩИТА: Если exit_price == 0.0, используем TP/SL как fallback
+            if exit_price == 0.0:
+                self.logger.warning(f"⚠️ [DRIFT_RECOVERY] exit_price=0.0 для {passport.passport_id}. Используем fallback.")
+                if passport.tp1_price > 0:
+                    exit_price = passport.tp1_price
+                elif passport.tp2_price > 0:
+                    exit_price = passport.tp2_price
+                elif passport.sl_price > 0:
+                    exit_price = passport.sl_price
+                else:
+                    exit_price = passport.entry_price
+                gross_pnl = 0.0
+                total_commission = 0.0
+
             passport.exit_price = exit_price
             passport.gross_pnl = gross_pnl
             passport.commission = total_commission
@@ -300,25 +322,20 @@ class DriftMonitor:
                 f"Recovered: exit_price={exit_price:.4f}, pnl={gross_pnl:+.2f}, commission={total_commission:.4f}"
             )
             
-            # 9. Сохраняем изменения
+            # 9. 🔥 СОХРАНЯЕМ в память И на диск
             self.passport_manager.update(passport)
+            self.repository.save(passport)  # <--  КРИТИЧЕСКИ ВАЖНО: синхронизация с диском!
             
             self.logger.info(
-                f"✅ [DRIFT_RECOVERY] Паспорт {passport.passport_id} восстановлен: "
+                f"✅ [DRIFT_RECOVERY] Паспорт {passport.passport_id} восстановлен и СОХРАНЕН на диск: "
                 f"exit_price={exit_price:.4f}, PnL={gross_pnl:+.2f} USDT, commission={total_commission:.4f}"
             )
             
         except Exception as e:
             self.logger.error(f"❌ [DRIFT_RECOVERY] Ошибка восстановления {passport.passport_id}: {e}")
-            # В случае ошибки всё равно закрываем паспорт, но с нулевыми данными
-            passport.status = PassportStatus.CLOSED.value
-            passport.exit_reason = "EXTERNAL_CLOSE"
-            passport.exit_price = 0.0
-            passport.gross_pnl = 0.0
-            passport.net_pnl = 0.0
-            passport.position_size = 0.0
-            passport.closed_at = passport.updated_at
-            self.passport_manager.update(passport)
+            # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ 3: При любой ошибке мы НЕ закрываем паспорт насильно.
+            self.logger.warning(f"   Паспорт {passport.passport_id} ОСТАЕТСЯ в статусе {passport.status} до успешной синхронизации.")
+            return  # <-- Просто выходим, оставляя паспорт в текущем (OPEN) статусе
 
     async def _publish_drift(self, symbol: str, drift_type: str, details: dict):
         """Опубликовать событие дрейфа и установить флаг."""

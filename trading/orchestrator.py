@@ -46,7 +46,9 @@ class Orchestrator(EventHandlersMixin, MonitorMixin, RecoveryMixin, PositionMoni
         PositionMonitor.__init__(self)
         
         self._subscribe_to_events()
-
+        self.passport_manager = passport_manager
+        print(f"🔥 [ORCHESTRATOR] ID менеджера паспортов: {id(self.passport_manager)}")
+        
     def _log(self, event: str, data: Optional[Dict] = None):
         """Унифицированный метод логирования с защитой от разных сигнатур."""
         safe_data = data or {}

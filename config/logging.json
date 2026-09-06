@@ -17,6 +17,8 @@
     "detectors": true,
     "__main__": true,
     "strategies.wall_fade_v3": true,
+    "strategies.absorption_v2": true,
+    "strategies.breakout_v1": true,
     "trading": true
   }
 }

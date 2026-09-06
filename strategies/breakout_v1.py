@@ -14,30 +14,43 @@ class BreakoutStrategyV1:
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
-        self.cooldown_sec = config.get('cooldown_sec', 30.0)
+        self.cooldown_sec = config.get('cooldown_sec', 60.0)
         
         self._recent_detector_events: List[Dict[str, Any]] = []
         self._events_window_sec = 30.0
-        
         self._last_breakout_event: Optional[Dict[str, Any]] = None
         self._event_valid_for_sec = 10.0
-        self.btc_trend = "FLAT" # Фоллбэк
+        self.btc_trend = "FLAT"
         self._event_bus = None
-        
-        # 🔥 НОВОЕ: Хранилище последней дивергенции
         self._last_divergence = None
         self._divergence_valid_for_sec = 900.0
 
-        # 🔥 DEBUG MODE: Читаем флаги обхода фильтров из конфига
-        debug_mode = config.get('debug_mode', {})
-        self.bypass_btc_filter = debug_mode.get('bypass_btc_filter', False)
-        self.bypass_adaptive_sl = debug_mode.get('bypass_adaptive_sl', False)
-        self.bypass_smart_sizing = debug_mode.get('bypass_smart_sizing', False)
+        # 🔥 ПРАВИЛЬНОЕ ЧТЕНИЕ: читаем напрямую из переданного конфига стратегии
+        self.force_test_signal = config.get('force_test_signal', False)
+        self.test_signal_interval = config.get('test_signal_interval', 60)
+        self.fixed_lot_size = config.get('fixed_lot_size', 7.0)
+        self.fixed_sl_distance = config.get('fixed_sl_distance', 0.25)
+        self.fixed_tp1_distance = config.get('fixed_tp1_distance', 0.25)
+        self.fixed_tp2_distance = config.get('fixed_tp2_distance', 0.50)
         
-        # 🔥 НОВЫЕ ФИЛЬТРЫ ДЛЯ ОТЛАДКИ
-        self.bypass_macro_hvn_filter = debug_mode.get('bypass_macro_hvn_filter', False)
-        self.bypass_wall_distance_filter = debug_mode.get('bypass_wall_distance_filter', False)
-        self.bypass_confidence_threshold = debug_mode.get('bypass_confidence_threshold', False)
+        self.log_input_stream = config.get('log_input_stream', False)
+        self.bypass_filters = config.get('bypass_filters', False)
+        
+        self.bypass_btc_filter = config.get('bypass_btc_filter', self.bypass_filters)
+        self.bypass_adaptive_sl = config.get('bypass_adaptive_sl', False)
+        self.bypass_smart_sizing = config.get('bypass_smart_sizing', False)
+        self.bypass_macro_hvn_filter = config.get('bypass_macro_hvn_filter', self.bypass_filters)
+        self.bypass_wall_distance_filter = config.get('bypass_wall_distance_filter', self.bypass_filters)
+        self.bypass_confidence_threshold = config.get('bypass_confidence_threshold', self.bypass_filters)
+
+        # Инициализация параметров пробоя из локального конфига
+        self.liquidity_void_threshold = config.get('liquidity_void_threshold', 5000.0)
+        self.max_attempts = config.get('max_attempts', 2)
+        self.timeout_sec = config.get('timeout_sec', 5.0)
+        self.price_offset = config.get('price_offset', 0.01)
+
+        print(f"🔥 [DEBUG INIT] BreakoutV1: log_input_stream={self.log_input_stream}, force_test_signal={self.force_test_signal}")
+        self._last_test_signal_time = 0.0
 
     def subscribe_to_events(self, event_bus):
         self._event_bus = event_bus
@@ -93,12 +106,61 @@ class BreakoutStrategyV1:
         }
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
+        # 🔥 1. ТУМБЛЕР ВХОДНОГО ПОТОКА
+        if self.log_input_stream:
+            logger.info(f"📥 [ВХОДНОЙ ПОТОК] {self.__class__.__name__}: вызван generate_signal | Цена: {context.get('current_price', 0)} | Бидов: {len(context.get('orderbook', {}).get('bids', []))}")
+
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
         orderbook = context.get('orderbook', {'bids': [], 'asks': []})
         atr = self.atr_value
         
         now = time.time()
+
+        # 🔥 2. ТЕСТОВЫЙ РЕЖИМ (Фиксированные параметры)
+        if self.force_test_signal and (now - self._last_test_signal_time >= self.test_signal_interval):
+            self._last_test_signal_time = now
+            side = 'short' 
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Округляем цену входа до 2 знаков (tick size биржи)
+            safe_entry_price = round(current_price, 2)
+            
+            if side == 'short':
+                sl_price = round(safe_entry_price + self.fixed_sl_distance, 2)
+                tp1_price = round(safe_entry_price - self.fixed_tp1_distance, 2)
+                tp2_price = round(safe_entry_price - self.fixed_tp2_distance, 2)
+            else:
+                sl_price = round(safe_entry_price - self.fixed_sl_distance, 2)
+                tp1_price = round(safe_entry_price + self.fixed_tp1_distance, 2)
+                tp2_price = round(safe_entry_price + self.fixed_tp2_distance, 2)
+
+            logger.info(f"✅ [{self.__class__.__name__}] ТЕСТОВЫЙ СИГНАЛ (таймер {self.test_signal_interval}с) | Side: {side}, Price: {safe_entry_price}, SL: {sl_price}, TP1: {tp1_price}, TP2: {tp2_price}, Lot: {self.fixed_lot_size}")
+            
+            return EnrichedSignal(
+                signal_id=f"{self.__class__.__name__}_TEST_{int(now)}",
+                symbol=symbol, 
+                side=side, 
+                entry_price=safe_entry_price,  # <-- Передаем округленную цену
+                strategy=self.__class__.__name__,
+                confidence=0.99, 
+                edge_price=safe_entry_price, 
+                rr_ratio=2.0, 
+                atr=0.1,
+                volatility_mode="normal", 
+                basis=0.0, 
+                order_type="limit",
+                execution_params={
+                    "quantity": self.fixed_lot_size,
+                    "sl_price": sl_price,
+                    "tp1_price": tp1_price,
+                    "tp2_price": tp2_price
+                }
+            )
+
+        # ========================================================================
+        # ШТАТНАЯ ЛОГИКА (ВРЕМЕННО ВОЗВРАЩАЕМ NONE ДЛЯ ТЕСТА)
+        # ========================================================================
+        
         if now - self._last_signal_time < self.cooldown_sec:
             return None
 

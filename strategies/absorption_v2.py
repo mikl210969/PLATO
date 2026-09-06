@@ -16,30 +16,38 @@ class AbsorptionStrategyV2:
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
-        self.cooldown_sec = config.get('cooldown_sec', 30.0)
+        self.cooldown_sec = config.get('cooldown_sec', 60.0)
         
         self._recent_detector_events: List[Dict[str, Any]] = []
         self._events_window_sec = 30.0
+        self._event_valid_for_sec = 30.0  # 🔥 ИСПРАВЛЕНИЕ: добавлен отсутствующий атрибут
         self._last_absorption_event = None
         
-        # 🔥 Фоллбэк: Состояние тренда BTC
         self.btc_trend = "FLAT"        
         self._event_bus = None
-        
-        #  НОВОЕ: Хранилище последней дивергенции
         self._last_divergence = None
         self._divergence_valid_for_sec = 900.0
 
-        # 🔥 DEBUG MODE: Читаем флаги обхода фильтров из конфига
-        debug_mode = config.get('debug_mode', {})
-        self.bypass_btc_filter = debug_mode.get('bypass_btc_filter', False)
-        self.bypass_adaptive_sl = debug_mode.get('bypass_adaptive_sl', False)
-        self.bypass_smart_sizing = debug_mode.get('bypass_smart_sizing', False)
+        # 🔥 ПРАВИЛЬНОЕ ЧТЕНИЕ: читаем напрямую из переданного конфига стратегии
+        self.force_test_signal = config.get('force_test_signal', False)
+        self.test_signal_interval = config.get('test_signal_interval', 60)
+        self.fixed_lot_size = config.get('fixed_lot_size', 7.0)
+        self.fixed_sl_distance = config.get('fixed_sl_distance', 0.25)
+        self.fixed_tp1_distance = config.get('fixed_tp1_distance', 0.25)
+        self.fixed_tp2_distance = config.get('fixed_tp2_distance', 0.50)
         
-        # 🔥 НОВЫЕ ФИЛЬТРЫ ДЛЯ ОТЛАДКИ
-        self.bypass_macro_hvn_filter = debug_mode.get('bypass_macro_hvn_filter', False)
-        self.bypass_wall_distance_filter = debug_mode.get('bypass_wall_distance_filter', False)
-        self.bypass_confidence_threshold = debug_mode.get('bypass_confidence_threshold', False)
+        self.log_input_stream = config.get('log_input_stream', False)
+        self.bypass_filters = config.get('bypass_filters', False)
+        
+        self.bypass_btc_filter = config.get('bypass_btc_filter', self.bypass_filters)
+        self.bypass_adaptive_sl = config.get('bypass_adaptive_sl', False)
+        self.bypass_smart_sizing = config.get('bypass_smart_sizing', False)
+        self.bypass_macro_hvn_filter = config.get('bypass_macro_hvn_filter', self.bypass_filters)
+        self.bypass_wall_distance_filter = config.get('bypass_wall_distance_filter', self.bypass_filters)
+        self.bypass_confidence_threshold = config.get('bypass_confidence_threshold', self.bypass_filters)
+
+        print(f"🔥 [DEBUG INIT] AbsorptionV2: log_input_stream={self.log_input_stream}, force_test_signal={self.force_test_signal}")
+        self._last_test_signal_time = 0.0
 
     def subscribe_to_events(self, event_bus):
         """Подписка на события детектора поглощения."""
@@ -74,7 +82,7 @@ class AbsorptionStrategyV2:
         logger.info(f"🚨 [AbsorptionV2] Запомнена дивергенция: {self._last_divergence['type']} @ {self._last_divergence['price']:.2f}")
 
     async def _on_atr_updated(self, event):
-        """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
+        """ АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
         payload = getattr(event, 'payload', {})
         symbol = payload.get('symbol', '')
         new_atr = payload.get('atr', 0.0)
@@ -100,11 +108,50 @@ class AbsorptionStrategyV2:
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
         """Генерирует сигнал, если недавно было событие поглощения."""
+        
+        # 🔥 1. ТУМБЛЕР ВХОДНОГО ПОТОКА
+        if self.log_input_stream:
+            logger.info(f" [ВХОДНОЙ ПОТОК] {self.__class__.__name__}: вызван generate_signal | Цена: {context.get('current_price', 0)} | Бидов: {len(context.get('orderbook', {}).get('bids', []))}")
+
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
         atr = self.atr_value
         
         now = time.time()
+
+        #  2. ТЕСТОВЫЙ РЕЖИМ (Фиксированные параметры)
+        if self.force_test_signal and (now - self._last_test_signal_time >= self.test_signal_interval):
+            self._last_test_signal_time = now
+            side = 'short' 
+            
+            if side == 'short':
+                sl_price = round(current_price + self.fixed_sl_distance, 2)
+                tp1_price = round(current_price - self.fixed_tp1_distance, 2)
+                tp2_price = round(current_price - self.fixed_tp2_distance, 2)
+            else:
+                sl_price = round(current_price - self.fixed_sl_distance, 2)
+                tp1_price = round(current_price + self.fixed_tp1_distance, 2)
+                tp2_price = round(current_price + self.fixed_tp2_distance, 2)
+
+            logger.info(f"✅ [{self.__class__.__name__}] ТЕСТОВЫЙ СИГНАЛ (таймер {self.test_signal_interval}с) | Side: {side}, Price: {current_price}, SL: {sl_price}, TP1: {tp1_price}, TP2: {tp2_price}, Lot: {self.fixed_lot_size}")
+            
+            return EnrichedSignal(
+                signal_id=f"{self.__class__.__name__}_TEST_{int(now)}",
+                symbol=symbol, side=side, entry_price=current_price, strategy=self.__class__.__name__,
+                confidence=0.99, edge_price=current_price, rr_ratio=2.0, atr=0.1,
+                volatility_mode="normal", basis=0.0, order_type="limit",
+                execution_params={
+                    "quantity": self.fixed_lot_size,
+                    "sl_price": sl_price,
+                    "tp1_price": tp1_price,
+                    "tp2_price": tp2_price
+                }
+            )
+
+        # ========================================================================
+        # ШТАТНАЯ ЛОГИКА
+        # ========================================================================
+        
         if now - self._last_signal_time < self.cooldown_sec:
             return None
 
@@ -159,7 +206,7 @@ class AbsorptionStrategyV2:
                 logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: попытка LONG при DOWN тренде BTC")
             elif signal_side == 'short' and btc_trend == 'UP':
                 base_confidence *= 0.5
-                logger.warning(f"️ [AbsorptionV2] Штраф к confidence: попытка SHORT при UP тренде BTC")
+                logger.warning(f"⚠️ [AbsorptionV2] Штраф к confidence: попытка SHORT при UP тренде BTC")
         else:
             logger.info(f"⚠️ [DEBUG MODE] Пропускаем штраф confidence за тренд BTC (bypass_btc_filter=True)")
             
@@ -192,7 +239,7 @@ class AbsorptionStrategyV2:
                 # Бычья дивергенция + LONG сигнал = бонус
                 if div_type == "BULLISH" and signal_side == "long":
                     base_confidence += 0.20
-                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал LONG подтвержден бычьей дивергенцией! +0.20 к confidence")
+                    logger.info(f" [DIVERGENCE CONFIRMED] Сигнал LONG подтвержден бычьей дивергенцией! +0.20 к confidence")
                 
                 # Медвежья дивергенция + SHORT сигнал = бонус
                 elif div_type == "BEARISH" and signal_side == "short":
