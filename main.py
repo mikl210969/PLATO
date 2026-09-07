@@ -166,7 +166,8 @@ class Platform:
             passport_manager=self.passport_manager,
             trader=self.trader,
             config=self.config,
-            json_logger=self.json_logger
+            json_logger=self.json_logger,
+            passport_repository=self.passport_repository  # 🔥 ДОБАВИТЬ ЭТУ СТРОКУ
         )
         self.orchestrator.set_risk_manager(self.risk_manager)
         logger.info("✅ RiskManager initialized and set in Orchestrator")

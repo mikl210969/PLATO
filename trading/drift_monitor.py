@@ -77,9 +77,15 @@ class DriftMonitor:
             # Получаем данные с биржи
             position_data = await self.rest.get_position(symbol)
             open_orders = await self.rest.get_open_orders(symbol)
-            
+
+            # 🔥 КРИТИЧЕСКАЯ ЗАЩИТА: Если position_data == None (из-за ошибки REST или бана),
+            # мы НЕ знаем реальный размер позиции. Прерываем проверку, чтобы не закрыть паспорт ложно.
+            if position_data is None:
+                self.logger.warning(f"⚠️ [DRIFT_MONITOR] Пропуск проверки для {symbol}: не удалось получить данные о позиции (возможно, бан IP или таймаут).")
+                return
+
             exchange_position_size = 0.0
-            if position_data and isinstance(position_data, dict):
+            if isinstance(position_data, dict):
                 exchange_position_size = abs(float(position_data.get('size', 0) or 0))
             
             # Получаем локальный активный паспорт

@@ -43,15 +43,15 @@ class RiskManager:
         passport_manager: PassportManager,
         trader: Trader,
         config: Dict,
-        json_logger: Any = None
+        json_logger: Any = None,
+        passport_repository: Any = None  # 🔥 НОВОЕ
     ):
         self.bus = event_bus
         self.passport_manager = passport_manager
         self.trader = trader
         self.config = config
         self.json_logger = json_logger
-
-        # Внутренняя защита: passport_id -> guard
+        self.repository = passport_repository  # 🔥 НОВОЕ: сохраняем репозиторий
         self._guards: Dict[str, Dict[str, Any]] = {}
 
         # Свежесть цены (сек). Конфиг: risk.max_price_age_sec, дефолт 3.0
@@ -177,9 +177,7 @@ class RiskManager:
     async def ensure_guard_registered(self, passport):
         """
         Гарантированная регистрация guard через REST-фоллбэк.
-        Вызывается DriftMonitor, если видит открытую позицию, но guard отсутствует.
         """
-        # Если guard уже есть, ничего не делаем
         if passport.passport_id in self._guards:
             return
 
@@ -210,7 +208,10 @@ class RiskManager:
             f"Guard force-registered via REST fallback. SL: {passport.sl_price}, TP1: {passport.tp1_price}"
         )
         self.passport_manager.update(passport)
-        self.repository.save(passport)
+        
+        # 🔥 ЗАЩИТА: Проверяем, что repository существует
+        if self.repository:
+            self.repository.save(passport)
 
     # ============================================================
     # СИНХРОНИЗАЦИЯ С БИРЖЕЙ
@@ -545,7 +546,7 @@ class RiskManager:
         Вызывается периодически или при обнаружении расхождения.
         """
         # Получаем все открытые паспорта для символа
-        open_passports = self.passport_manager.get_open_passports(symbol)
+        open_passports = self.passport_manager.get_all_active_by_symbol(symbol)
         
         for passport in open_passports:
             # Проверяем, есть ли уже guard
