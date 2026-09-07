@@ -14,11 +14,12 @@ class DriftMonitor:
     Периодически проверяет согласованность локального состояния с биржей.
     """
 
-    def __init__(self, rest_client, passport_manager, passport_repository, event_bus, poll_interval: float = 30.0):
+    def __init__(self, rest_client, passport_manager, passport_repository, event_bus, risk_manager, poll_interval: float = 30.0):
         self.rest = rest_client
         self.passport_manager = passport_manager
-        self.repository = passport_repository  # 🔥 ДОБАВЛЕНО: Ссылка на репозиторий для сохранения на диск
+        self.repository = passport_repository
         self.bus = event_bus
+        self.risk_manager = risk_manager  # 🔥 НОВОЕ: Прямая ссылка на RiskManager
         self.poll_interval = poll_interval
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -137,22 +138,29 @@ class DriftMonitor:
                 self.passport_manager.update(local_passport)
                 self.repository.save(local_passport)  # 🔥 ВАЖНО: Синхронизация с диском
                 
-                # 2. Публикуем событие, чтобы RiskManager НЕМЕДЛЕННО выставил защиту (SL/TP)
-                await self.bus.publish(
-                    event_type="POSITION_OPENED",
-                    source="drift_monitor_recovery",
-                    payload={
-                        "passport_id": local_passport.passport_id,
-                        "symbol": symbol,
-                        "side": local_passport.side,
-                        "entry_price": local_passport.position_entry_price,
-                        "position_size": exchange_position_size
-                    },
-                    symbol=symbol
-                )
+                # 2. 🔥 НОВОЕ: Гарантированно регистрируем Guard через REST-фоллбэк
+                if hasattr(self, 'risk_manager') and self.risk_manager is not None:
+                    try:
+                        await self.risk_manager.ensure_guard_registered(local_passport)
+                        self.logger.info(f"✅ [DRIFT_RECOVERY] Guard успешно зарегистрирован для {local_passport.passport_id} через REST-фоллбэк. Позиция под защитой!")
+                    except Exception as e:
+                        self.logger.error(f"❌ [DRIFT_RECOVERY] Ошибка при принудительной регистрации guard: {e}")
+                else:
+                    # Фоллбэк на старый метод, если risk_manager не был передан в конструктор
+                    self.logger.warning("⚠️ [DRIFT_RECOVERY] RiskManager не передан в DriftMonitor. Используем публикацию события.")
+                    await self.bus.publish(
+                        event_type="POSITION_OPENED",
+                        source="drift_monitor_recovery",
+                        payload={
+                            "passport_id": local_passport.passport_id,
+                            "symbol": symbol,
+                            "side": local_passport.side,
+                            "entry_price": local_passport.position_entry_price,
+                            "position_size": exchange_position_size
+                        },
+                        symbol=symbol
+                    )
                 
-                # 🔥 ДОБАВИТЬ: Явная проверка, что RiskManager подхватил событие
-                self.logger.info(f"✅ [DRIFT_RECOVERY] Паспорт {local_passport.passport_id} переведен в OPEN. Ожидание регистрации guard в RiskManager...")
                 return  # Выходим, так как проблема решена, дальнейшие проверки не нужны
 
             # Проверка 3: Локальные ордера в нетерминальных статусах должны быть на бирже

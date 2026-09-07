@@ -174,6 +174,44 @@ class RiskManager:
             "tp1_done": tp1_done
         })
 
+    async def ensure_guard_registered(self, passport):
+        """
+        Гарантированная регистрация guard через REST-фоллбэк.
+        Вызывается DriftMonitor, если видит открытую позицию, но guard отсутствует.
+        """
+        # Если guard уже есть, ничего не делаем
+        if passport.passport_id in self._guards:
+            return
+
+        self._log("guard_fallback_triggered", {
+            "passport_id": passport.passport_id,
+            "message": "DriftMonitor detected open position without guard. Forcing registration."
+        })
+
+        # 1. Проверяем и рассчитываем уровни, если их нет
+        if passport.sl_price == 0 or passport.tp1_price == 0:
+            atr_value = self.config.get('trading', {}).get('atr_value', 0.5)
+            levels = self.trader.calculate_exit_levels(
+                side=passport.side,
+                entry_price=passport.position_entry_price or passport.entry_price,
+                atr_value=atr_value
+            )
+            passport.sl_price = levels.get('sl_price', 0)
+            passport.tp1_price = levels.get('tp1_price', 0)
+            passport.tp2_price = levels.get('tp2_price', 0)
+            self.passport_manager.update(passport)
+
+        # 2. Принудительно регистрируем guard
+        self._register_guard(passport, remaining=abs(passport.position_size or 0))
+
+        # 3. Фиксируем в таймлайне и сохраняем на диск
+        passport.add_timeline_event(
+            "LEVELS_ACTIVATED", 
+            f"Guard force-registered via REST fallback. SL: {passport.sl_price}, TP1: {passport.tp1_price}"
+        )
+        self.passport_manager.update(passport)
+        self.repository.save(passport)
+
     # ============================================================
     # СИНХРОНИЗАЦИЯ С БИРЖЕЙ
     # ============================================================

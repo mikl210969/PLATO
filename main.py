@@ -187,6 +187,7 @@ class Platform:
             passport_manager=self.passport_manager,
             passport_repository=self.passport_repository,  # 🔥 ДОБАВИТЬ ЭТО
             event_bus=self.bus,
+            risk_manager=self.risk_manager,  # 🔥 ДОБАВИТЬ ЭТУ СТРОКУ
             poll_interval=30.0
         )
         logger.info("✅ DriftMonitor initialized")
