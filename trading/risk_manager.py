@@ -501,5 +501,57 @@ class RiskManager:
         })
         return cancelled > 0
 
+    async def force_guard_registration(self, symbol: str):
+        """
+        Принудительная регистрация guard для паспортов без защиты.
+        Вызывается периодически или при обнаружении расхождения.
+        """
+        # Получаем все открытые паспорта для символа
+        open_passports = self.passport_manager.get_open_passports(symbol)
+        
+        for passport in open_passports:
+            # Проверяем, есть ли уже guard
+            if passport.passport_id in self._guards:
+                continue
+            
+            # Проверяем, есть ли уровни
+            if passport.sl_price == 0 or passport.tp1_price == 0:
+                self._log("levels_missing_forcing_calculation", {
+                    "passport_id": passport.passport_id,
+                    "message": "Уровни отсутствуют, рассчитываем принудительно"
+                })
+                
+                # Рассчитываем уровни
+                atr_value = self.config.get('trading', {}).get('atr_value', 0.5)
+                levels = self.trader.calculate_exit_levels(
+                    side=passport.side,
+                    entry_price=passport.position_entry_price or passport.entry_price,
+                    atr_value=atr_value
+                )
+                
+                passport.sl_price = levels.get('sl_price', 0)
+                passport.tp1_price = levels.get('tp1_price', 0)
+                passport.tp2_price = levels.get('tp2_price', 0)
+                self.passport_manager.update(passport)
+            
+            # Регистрируем guard
+            self._register_guard(passport, remaining=passport.position_size)
+            
+            # Добавляем запись в timeline
+            passport.add_timeline_event(
+                "LEVELS_ACTIVATED",
+                f"Guard registered. SL: {passport.sl_price}, TP1: {passport.tp1_price}, TP2: {passport.tp2_price}"
+            )
+            self.passport_manager.update(passport)
+            
+            self._log("guard_force_registered", {
+                "passport_id": passport.passport_id,
+                "side": passport.side,
+                "remaining": passport.position_size,
+                "tp1": passport.tp1_price,
+                "tp2": passport.tp2_price,
+                "sl": passport.sl_price
+            })
+
     async def stop(self):
         self._log("stopped", {"guards_active": len(self._guards)})

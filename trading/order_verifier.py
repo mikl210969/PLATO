@@ -13,7 +13,7 @@ class OrderVerifier:
     Используется как fallback при потере WS-событий.
     """
 
-    def __init__(self, rest_client, event_bus, poll_interval: float = 3.0, max_attempts: int = 20):
+    def __init__(self, rest_client, event_bus, poll_interval: float = 5.0, max_attempts: int = 12):
         self.rest = rest_client
         self.bus = event_bus
         self.poll_interval = poll_interval

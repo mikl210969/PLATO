@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from .orchestrator import Orchestrator
 
 from .base_mixin import BaseMixin
-
+from datetime import datetime, timezone
 
 class PositionMonitor(BaseMixin):
     """Монитор позиций с управлением TP/SL/Basis Stop."""
@@ -22,6 +22,18 @@ class PositionMonitor(BaseMixin):
         self._monitor_task = None
         self._position_running = True
         self._last_price_check: Dict[str, float] = {}
+        # Запускаем периодическую проверку
+        self._check_interval = 30  # каждые 30 секунд
+        asyncio.create_task(self._periodic_guard_check())
+
+    async def _periodic_guard_check(self):
+        """Периодическая проверка и регистрация guard"""
+        while True:
+            try:
+                await asyncio.sleep(self._check_interval)
+                await self.force_guard_registration("SOLUSDT")
+            except Exception as e:
+                self._log("periodic_check_error", {"error": str(e)})        
 
     async def start_position_monitor(self):
         """Запуск мониторинга позиций."""
@@ -223,15 +235,18 @@ class PositionMonitor(BaseMixin):
             self._log("trader_not_found_for_close", {"passport_id": passport.passport_id})
             return False
         
+        # 🔥 ЗАЩИТА: quantity всегда положительное
         if quantity is None:
-            quantity = passport.position_size
+            quantity = abs(passport.position_size)
+        else:
+            quantity = abs(quantity)
         
-        is_partial = quantity < passport.position_size
+        is_partial = quantity < abs(passport.position_size)
         
         self._log("closing_position", {
             "passport_id": passport.passport_id,
             "quantity": quantity,
-            "total_size": passport.position_size,
+            "total_size": abs(passport.position_size),
             "reason": reason,
             "is_partial": is_partial
         })
@@ -256,31 +271,58 @@ class PositionMonitor(BaseMixin):
             })
             return False
         
+        # 🔥 Устанавливаем флаги активации в зависимости от причины закрытия
+        if reason == "TP1_HIT":
+            passport.tp1_activated = True
+        elif reason == "TP2_HIT":
+            passport.tp1_activated = True  # TP2 предполагает что TP1 уже был
+            passport.tp2_activated = True
+        elif reason == "SL_HIT":
+            passport.sl_activated = True
+        
         if is_partial:
-            passport.position_size -= quantity
+            passport.position_size = abs(passport.position_size) - quantity
             passport.exit_reason = reason
             passport.timeline.append({
-                "timestamp": time.time(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "event": f"PARTIAL_CLOSE: {reason}",
                 "details": f"Closed {quantity} @ {price}, remaining: {passport.position_size}"
             })
         else:
             passport.status = "CLOSED"
             passport.exit_reason = reason
-            passport.exit_price = price
             
-            if passport.side == "short":
-                gross_pnl = (passport.position_entry_price - price) * quantity
+            # 🔥 ЗАЩИТА: если price = 0, используем fallback
+            if price and price > 0:
+                passport.exit_price = price
             else:
-                gross_pnl = (price - passport.position_entry_price) * quantity
+                passport.exit_price = passport.position_entry_price or passport.entry_price
+                self._log("exit_price_fallback", {
+                    "passport_id": passport.passport_id,
+                    "fallback_price": passport.exit_price
+                })
+            
+            # 🔥 Корректный расчет PnL с защитой от нулевых значений
+            entry_price = passport.position_entry_price or passport.entry_price
+            if entry_price and passport.exit_price:
+                if passport.side == "short":
+                    gross_pnl = (entry_price - passport.exit_price) * quantity
+                else:
+                    gross_pnl = (passport.exit_price - entry_price) * quantity
+            else:
+                gross_pnl = 0.0
+                self._log("pnl_calculation_skipped", {
+                    "passport_id": passport.passport_id,
+                    "reason": "entry_price or exit_price is zero"
+                })
             
             passport.gross_pnl = gross_pnl
-            passport.closed_at = time.time()
+            passport.closed_at = datetime.now(timezone.utc).isoformat()
             
             passport.timeline.append({
-                "timestamp": time.time(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "event": f"CLOSED: {reason}",
-                "details": f"Closed {quantity} @ {price}, PnL: {gross_pnl:.2f}"
+                "details": f"Closed {quantity} @ {passport.exit_price}, PnL: {gross_pnl:.2f}"
             })
             
             await self.bus.publish(
@@ -290,7 +332,7 @@ class PositionMonitor(BaseMixin):
                     "passport_id": passport.passport_id,
                     "symbol": passport.symbol,
                     "exit_reason": reason,
-                    "exit_price": price,
+                    "exit_price": passport.exit_price,
                     "gross_pnl": gross_pnl
                 },
                 symbol=passport.symbol
