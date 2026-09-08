@@ -8,6 +8,7 @@ import hmac
 import time
 from typing import Dict, Any, Optional, List
 import aiohttp
+import traceback
 
 from core.logger import get_logger
 
@@ -94,7 +95,11 @@ class BinanceRestClient:
 
     # ─── Открытые методы ──────────────────────────────────────
 
-    async def get_position(self, symbol: str) -> Optional[Dict]:
+    async def get_position(self, symbol: str):
+        # 🔥 ЖЕЛЕЗОБЕТОННЫЙ ТРАССЕР (используем print, чтобы точно увидеть в консоли)
+        #print(f"\n🚨 [REST TRACE] ВЫЗОВ get_position для {symbol}!\nСтек вызовов:")
+        #print("".join(traceback.format_stack()[-5:-1]))
+
         """Получить позицию по символу.
         
         Возвращает:

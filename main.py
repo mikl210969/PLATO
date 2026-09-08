@@ -82,8 +82,11 @@ class Platform:
 
         # 3. Инициализация базовых компонентов
         self.bus = EventBus()
-        self.passport_manager = PassportManager()
+        # 1. Сначала создаем репозиторий
         self.passport_repository = PassportRepository()
+
+        # 2. Затем передаем его в менеджер паспортов
+        self.passport_manager = PassportManager(repository=self.passport_repository)
         
         # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ (Шаг 10.4): Восстановление состояния при старте
         # Загружаем паспорта с диска в оперативную память, чтобы is_symbol_busy работал корректно
@@ -572,7 +575,7 @@ class Platform:
                 current_time = time.time()
                 
                 if current_time - last_position_check_time >= 10:
-                    await self.rest.get_position(self.symbol)
+                    #await self.rest.get_position(self.symbol)
                     last_position_check_time = current_time
 
                 if current_time - last_log_time >= 60:
