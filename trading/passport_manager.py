@@ -217,40 +217,59 @@ class PassportManager:
     
     def _handle_tp1_hit(self, passport, payload: Dict):
         passport.tp1_activated = True
-        closed_qty = payload.get("closed_qty", 0)
-        passport.position_size = abs(passport.position_size) - closed_qty
+        closed_qty = payload.get("closed_qty") or 0
+        passport.position_size = round(abs(passport.position_size) - closed_qty, 4)
+        
         if passport.position_size > 0:
             passport.status = "PARTIAL_CLOSE"
-            passport.sl_price = payload.get("sl_breakeven", passport.position_entry_price)
+            be = payload.get("sl_breakeven") or passport.position_entry_price or passport.entry_price
+            passport.sl_price = round(be, 8)
         else:
+            passport.position_size = 0
             passport.status = "CLOSED"
-            passport.exit_price = payload.get("price", 0)
+            exit_price = payload.get("price") or 0
+            if exit_price == 0:
+                exit_price = passport.position_entry_price or passport.entry_price
+                self.logger.warning(f"⚠️ TP1_HIT: exit_price=0, используем entry_price={exit_price}")
+            passport.exit_price = round(exit_price, 8)
             passport.exit_reason = "TP1_HIT"
-            passport.gross_pnl = self._calculate_pnl(passport, payload.get("price", 0), closed_qty)
-            passport.net_pnl = passport.gross_pnl - passport.commission
+            passport.gross_pnl = round(self._calculate_pnl(passport, exit_price, closed_qty), 2)
+            passport.net_pnl = round(passport.gross_pnl - (passport.commission or 0), 2)
             passport.closed_at = datetime.now(timezone.utc).isoformat()
-    
+
     def _handle_tp2_hit(self, passport, payload: Dict):
         passport.tp1_activated = True
         passport.tp2_activated = True
-        closed_qty = payload.get("closed_qty", passport.position_size)
+        closed_qty = payload.get("closed_qty") or abs(passport.position_size)
         passport.position_size = 0
         passport.status = "CLOSED"
-        passport.exit_price = payload.get("price", 0)
+        
+        exit_price = payload.get("price") or 0
+        if exit_price == 0:
+            exit_price = passport.position_entry_price or passport.entry_price
+            self.logger.warning(f"⚠️ TP2_HIT: exit_price=0, используем entry_price={exit_price}")
+        
+        passport.exit_price = round(exit_price, 8)
         passport.exit_reason = "TP2_HIT"
-        passport.gross_pnl = self._calculate_pnl(passport, payload.get("price", 0), closed_qty)
-        passport.net_pnl = passport.gross_pnl - passport.commission
+        passport.gross_pnl = round(self._calculate_pnl(passport, exit_price, closed_qty), 2)
+        passport.net_pnl = round(passport.gross_pnl - (passport.commission or 0), 2)
         passport.closed_at = datetime.now(timezone.utc).isoformat()
-    
+
     def _handle_sl_hit(self, passport, payload: Dict):
         passport.sl_activated = True
-        closed_qty = payload.get("closed_qty", passport.position_size)
+        closed_qty = payload.get("closed_qty") or abs(passport.position_size)
         passport.position_size = 0
         passport.status = "CLOSED"
-        passport.exit_price = payload.get("price", 0)
+        
+        exit_price = payload.get("price") or 0
+        if exit_price == 0:
+            exit_price = passport.position_entry_price or passport.entry_price
+            self.logger.warning(f"⚠️ SL_HIT: exit_price=0, используем entry_price={exit_price}")
+        
+        passport.exit_price = round(exit_price, 8)
         passport.exit_reason = "SL_HIT"
-        passport.gross_pnl = self._calculate_pnl(passport, payload.get("price", 0), closed_qty)
-        passport.net_pnl = passport.gross_pnl - passport.commission
+        passport.gross_pnl = round(self._calculate_pnl(passport, exit_price, closed_qty), 2)
+        passport.net_pnl = round(passport.gross_pnl - (passport.commission or 0), 2)
         passport.closed_at = datetime.now(timezone.utc).isoformat()
     
     def _handle_partial_close(self, passport, payload: Dict):

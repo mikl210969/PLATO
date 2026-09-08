@@ -340,6 +340,15 @@ class RiskManager:
     async def _check_guard(self, passport: TradePassport, guard: Dict, price: float):
         is_short = guard['side'] == 'short'
 
+        # 🔥 ЗАЩИТА: Проверяем валидность цены
+        if not price or price <= 0:
+            self._log("invalid_price_skip", {
+                "passport_id": passport.passport_id,
+                "price": price,
+                "message": "Пропускаем проверку guard из-за невалидной цены"
+            })
+            return
+
         # 🔥 TP1: частичное закрытие + SL в безубыток
         if not guard['tp1_done'] and guard['tp1_price'] > 0:
             hit = price <= guard['tp1_price'] if is_short else price >= guard['tp1_price']
@@ -351,7 +360,14 @@ class RiskManager:
                     ok = await self._close_market(passport, guard, qty, 'TP1_HIT')
                     if ok:
                         guard['remaining'] = round(guard['remaining'] - qty, 2)
-                        be = passport.position_entry_price or passport.entry_price
+                        # 🔥 ЗАЩИТА: Используем fallback если оба значения None
+                        be = passport.position_entry_price or passport.entry_price or 0
+                        if be <= 0:
+                            self._log("tp1_breakeven_zero", {
+                                "passport_id": passport.passport_id,
+                                "message": "Внимание: breakeven price = 0, используем текущую цену"
+                            })
+                            be = price
                         
                         # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ
                         await self.passport_manager.apply_change(
@@ -373,6 +389,16 @@ class RiskManager:
                         })
                     else:
                         guard['tp1_done'] = False
+                        self._log("tp1_close_failed", {
+                            "passport_id": passport.passport_id,
+                            "message": "Не удалось закрыть позицию по TP1, сбрасываем флаг для повторной попытки"
+                        })
+                else:
+                    self._log("tp1_qty_too_small", {
+                        "passport_id": passport.passport_id,
+                        "qty": qty,
+                        "message": "Количество для TP1 слишком мало, пропускаем"
+                    })
 
         # 🔥 TP2: полное закрытие остатка
         if not guard['tp2_done'] and guard['tp2_price'] > 0:
@@ -402,6 +428,16 @@ class RiskManager:
                         })
                     else:
                         guard['tp2_done'] = False
+                        self._log("tp2_close_failed", {
+                            "passport_id": passport.passport_id,
+                            "message": "Не удалось закрыть позицию по TP2, сбрасываем флаг для повторной попытки"
+                        })
+                else:
+                    self._log("tp2_qty_too_small", {
+                        "passport_id": passport.passport_id,
+                        "qty": qty,
+                        "message": "Количество для TP2 слишком мало, пропускаем"
+                    })
 
         # 🔥 SL: полное закрытие остатка
         if not guard['sl_done'] and guard['sl_price'] > 0:
@@ -431,6 +467,16 @@ class RiskManager:
                         })
                     else:
                         guard['sl_done'] = False
+                        self._log("sl_close_failed", {
+                            "passport_id": passport.passport_id,
+                            "message": "Не удалось закрыть позицию по SL, сбрасываем флаг для повторной попытки"
+                        })
+                else:
+                    self._log("sl_qty_too_small", {
+                        "passport_id": passport.passport_id,
+                        "qty": qty,
+                        "message": "Количество для SL слишком мало, пропускаем"
+                    })
 
     # ============================================================
     # ИСПОЛНЕНИЕ: MARKET-ЗАКРЫТИЕ (Hedge Mode)

@@ -27,3 +27,21 @@ git status
 
 # 3. Забираем последние изменения с GitHub
 git pull origin main
+
+
+
+# Сначала гарантированно убиваем старые процессы (на случай, если они висят)
+Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 2
+
+# Запускаем платформу с записью в файл (режим -Append добавляет новые строки, не стирая старые)
+python main.py | Tee-Object -FilePath platform_run.log -Append
+
+
+
+# Убиваем старые процессы
+Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 2
+
+# Запускаем и перенаправляем ВСЕ потоки (stdout, stderr, warnings) в файл
+python main.py *> platform_run.log

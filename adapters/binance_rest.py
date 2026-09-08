@@ -1,11 +1,12 @@
 """
-Binance REST API клиент.
+Binance REST API клиент с Circuit Breaker (автоматический выключатель при бане).
 """
 
-import asyncio  # 🔥 ДОБАВИТЬ
+import asyncio
 import hashlib
 import hmac
 import time
+import re
 from typing import Dict, Any, Optional, List
 import aiohttp
 import traceback
@@ -22,14 +23,42 @@ class BinanceRestClient:
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
         self.logger = get_logger(__name__)
+        
+        # 🔥 Circuit Breaker: время, до которого REST заблокирован
+        self._ban_until = 0.0
+
+    def _ban_active(self) -> bool:
+        """True, если IP сейчас забанен и REST-запросы слать нельзя."""
+        return bool(self._ban_until) and time.time() < self._ban_until
+
+    def _register_ban(self, error_text: str):
+        """Парсит 'banned until <ms>' из ошибки -1003 и включает паузу."""
+        m = re.search(r"banned until (\d+)", error_text)
+        if m:
+            until_sec = int(m.group(1)) / 1000.0
+            # +5 секунд запаса, чтобы точно не упереться в границу
+            self._ban_until = max(self._ban_until, until_sec + 5.0)
+            wait_time = int(self._ban_until - time.time())
+            self.logger.warning(
+                f"🛑 [REST BREAKER] Получен -1003. REST-запросы приостановлены до "
+                f"{time.strftime('%H:%M:%S', time.localtime(self._ban_until))} "
+                f"(ждём {wait_time} сек)."
+            )
 
     async def get_listen_key(self) -> str:
         """Получить listen_key для user data stream."""
+        if self._ban_active():
+            self.logger.debug(f"⏸️ [REST] get_listen_key() пропущен — активен бан")
+            return ''
+        
         result = await self._request('POST', '/fapi/v1/listenKey', signed=True)
         return result.get('listenKey', '')
 
     async def renew_listen_key(self, listen_key: str) -> bool:
         """Продлить listen_key (keep-alive)."""
+        if self._ban_active():
+            return False
+        
         try:
             await self._request('PUT', '/fapi/v1/listenKey', {'listenKey': listen_key}, signed=True)
             return True
@@ -42,7 +71,6 @@ class BinanceRestClient:
 
     def _sign(self, params: Dict[str, Any]) -> str:
         """Создаёт подпись для запроса."""
-        # Сортируем параметры и формируем строку
         query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
         signature = hmac.new(
             self.api_secret.encode('utf-8'),
@@ -63,7 +91,6 @@ class BinanceRestClient:
             req_params['timestamp'] = int(time.time() * 1000)
             req_params['recvWindow'] = 60000
             
-        # Формируем строку запроса для подписи (сортировка по ключам обязательна)
         query_string = '&'.join([f"{k}={v}" for k, v in sorted(req_params.items())])
         
         if signed:
@@ -74,7 +101,6 @@ class BinanceRestClient:
             ).hexdigest()
             query_string += f"&signature={signature}"
         
-        # ВАЖНО: параметры уже в URL, не передаем их в session.request, чтобы aiohttp не перекодировал их
         url = f"{self.base_url}{path}?{query_string}"
         headers = {"X-MBX-APIKEY": self.api_key}
         
@@ -86,26 +112,24 @@ class BinanceRestClient:
         
         async with session.request(method, url, headers=headers, timeout=timeout) as resp:
             data = await resp.json()
-            # Binance возвращает код ошибки в поле 'code' при неудаче
             if isinstance(data, dict) and 'code' in data:
                 error_msg = f"Binance API error: {data.get('msg', 'Unknown error')} (code: {data.get('code')})"
+                # 🔥 Circuit Breaker: регистрируем бан при -1003
+                if data.get('code') == -1003:
+                    self._register_ban(error_msg)
                 self.logger.error(error_msg)
-                raise Exception(error_msg)  # <-- КРИТИЧЕСКИ ВАЖНО: прерываем выполнение
+                raise Exception(error_msg)
             return data
 
     # ─── Открытые методы ──────────────────────────────────────
 
     async def get_position(self, symbol: str):
-        # 🔥 ЖЕЛЕЗОБЕТОННЫЙ ТРАССЕР (используем print, чтобы точно увидеть в консоли)
-        #print(f"\n🚨 [REST TRACE] ВЫЗОВ get_position для {symbol}!\nСтек вызовов:")
-        #print("".join(traceback.format_stack()[-5:-1]))
+        """Получить позицию по символу."""
+        # 🔥 Circuit Breaker
+        if self._ban_active():
+            self.logger.debug(f"️ [REST] get_position({symbol}) пропущен — активен бан до {self._ban_until}")
+            return None
 
-        """Получить позицию по символу.
-        
-        Возвращает:
-        - Dict с данными позиции при успехе (суммирует все positionSide в Hedge Mode)
-        - None при ошибке (бан, таймаут, сеть) — КРИТИЧНО для защиты от ложных закрытий
-        """
         params = {'symbol': symbol}
         try:
             result = await self._request('GET', '/fapi/v2/positionRisk', params, signed=True)
@@ -114,8 +138,6 @@ class BinanceRestClient:
                 self.logger.error(f"Binance returned non-list for positionRisk: {type(result)}")
                 return None
             
-            # 🔥 ИЩЕМ АКТИВНУЮ ПОЗИЦИЮ (с ненулевым размером)
-            # В Hedge Mode Binance возвращает несколько записей (LONG + SHORT)
             active_position = None
             total_size = 0.0
             total_entry_price = 0.0
@@ -129,16 +151,14 @@ class BinanceRestClient:
                 entry_price = float(pos.get('entryPrice', 0) or 0)
                 unrealized_pnl = float(pos.get('unRealizedProfit', 0) or 0)
                 
-                if abs(pos_amt) > 0.001:  # Ненулевая позиция
+                if abs(pos_amt) > 0.001:
                     total_size += pos_amt
-                    # Усредняем цену входа взвешенно по размеру
                     if total_size != 0:
                         total_entry_price = (total_entry_price * (total_size - pos_amt) + entry_price * pos_amt) / total_size
                     total_pnl += unrealized_pnl
                     active_position = pos
             
             if active_position:
-                # Нашли активную позицию
                 return {
                     'symbol': symbol,
                     'side': 'short' if total_size < 0 else 'long',
@@ -147,18 +167,22 @@ class BinanceRestClient:
                     'unrealized_pnl': total_pnl
                 }
             
-            # Все позиции нулевые
             return {'symbol': symbol, 'side': 'none', 'size': 0.0, 'entry_price': 0.0, 'unrealized_pnl': 0.0}
             
         except Exception as e:
-            print(f"️ [REST] Failed to get position: {e}")
+            error_text = str(e)
+            if "-1003" in error_text:
+                self._register_ban(error_text)
+            self.logger.error(f"⚠️ [REST] Failed to get position: {error_text}")
             return None
 
     async def get_open_orders(self, symbol: str) -> List[Dict]:
-        """
-        Получить все открытые ордера по символу.
-        Возвращает список ордеров или пустой список при ошибке.
-        """
+        """Получить все открытые ордера по символу."""
+        # 🔥 Circuit Breaker
+        if self._ban_active():
+            self.logger.debug(f"⏸️ [REST] get_open_orders({symbol}) пропущен — активен бан до {self._ban_until}")
+            return []
+        
         params = {'symbol': symbol}
         try:
             result = await self._request('GET', '/fapi/v1/openOrders', params, signed=True)
@@ -170,15 +194,22 @@ class BinanceRestClient:
             return result
             
         except Exception as e:
-            print(f"⚠️ [REST] Failed to get open orders: {e}")
+            error_text = str(e)
+            if "-1003" in error_text:
+                self._register_ban(error_text)
+            self.logger.error(f"⚠️ [REST] Failed to get open orders: {error_text}")
             return []
 
     async def get_orderbook(self, symbol: str, limit: int = 20) -> Dict:
         """Получить стакан."""
+        if self._ban_active():
+            return {}
         return await self._request('GET', '/fapi/v1/depth', {'symbol': symbol, 'limit': limit})
 
     async def get_order_by_client_id(self, symbol: str, client_order_id: str) -> Optional[Dict]:
         """Получить ордер по client_order_id."""
+        if self._ban_active():
+            return None
         result = await self._request('GET', '/fapi/v1/order', {
             'symbol': symbol,
             'origClientOrderId': client_order_id
@@ -194,6 +225,9 @@ class BinanceRestClient:
         new_client_order_id: Optional[str] = None,
         position_side: str = 'BOTH'
     ) -> Dict:
+        if self._ban_active():
+            return {'success': False, 'error': 'REST banned, order not sent'}
+        
         params = {
             'symbol': symbol,
             'side': side.upper(),
@@ -230,6 +264,8 @@ class BinanceRestClient:
         position_side: str = 'BOTH'
     ) -> Dict:
         """Создать лимитный ордер."""
+        if self._ban_active():
+            return {'success': False, 'error': 'REST banned, order not sent'}
         
         params = {
             'symbol': symbol,
@@ -243,7 +279,6 @@ class BinanceRestClient:
             'recvWindow': 60000
         }
         
-        # 🔥 ТОЛЬКО если reduce_only = True
         if reduce_only:
             params['reduceOnly'] = 'true'
             
@@ -277,14 +312,10 @@ class BinanceRestClient:
         reduce_only: bool = False,
         new_client_order_id: Optional[str] = None
     ) -> Dict:
-        """
-        ВРЕМЕННОЕ РЕШЕНИЕ для Testnet.
-        Algo API не работает на testnet.binancefuture.com.
-        Используем LIMIT-ордер с reduceOnly=True.
-        """
-        # Определяем цену для лимитного ордера
-        # Для SHORT (SELL): SL выше цены, ставим лимит чуть выше stop_price
-        # Для LONG (BUY): SL ниже цены, ставим лимит чуть ниже stop_price
+        """ВРЕМЕННОЕ РЕШЕНИЕ для Testnet. Используем LIMIT-ордер с reduceOnly=True."""
+        if self._ban_active():
+            return {'success': False, 'error': 'REST banned, order not sent'}
+        
         if side.upper() == 'SELL':
             limit_price = stop_price + 0.01
         else:
@@ -315,7 +346,7 @@ class BinanceRestClient:
         url = f"{self.base_url}/fapi/v1/order?{query_string}"
         headers = {"X-MBX-APIKEY": self.api_key}
 
-        print(f"🔍 [REST] Creating SL as LIMIT (Testnet workaround): {symbol} {side} @ {limit_price} (stop: {stop_price})")
+        self.logger.info(f" [REST] Creating SL as LIMIT (Testnet workaround): {symbol} {side} @ {limit_price} (stop: {stop_price})")
 
         if self._session is None:
             await self._ensure_session()
@@ -325,10 +356,12 @@ class BinanceRestClient:
 
         async with session.post(url, headers=headers) as resp:
             data = await resp.json()
-            print(f"🔍 [REST] LIMIT response: {data}")
+            self.logger.info(f" [REST] LIMIT response: {data}")
 
         if isinstance(data, dict) and 'code' in data:
             error_msg = data.get('msg', 'Unknown error')
+            if data.get('code') == -1003:
+                self._register_ban(f"Binance API error: {error_msg} (code: -1003)")
             self.logger.error(f"Binance API error: {error_msg} (code: {data.get('code')})")
             return {'success': False, 'error': error_msg}
 
@@ -350,10 +383,10 @@ class BinanceRestClient:
         reduce_only: bool = False,
         new_client_order_id: Optional[str] = None
     ) -> Dict:
-        """
-        ВРЕМЕННОЕ РЕШЕНИЕ для Testnet.
-        Используем LIMIT-ордер с reduceOnly=True.
-        """
+        """ВРЕМЕННОЕ РЕШЕНИЕ для Testnet."""
+        if self._ban_active():
+            return {'success': False, 'error': 'REST banned, order not sent'}
+        
         params = {
             'symbol': symbol,
             'side': side.upper(),
@@ -379,7 +412,7 @@ class BinanceRestClient:
         url = f"{self.base_url}/fapi/v1/order?{query_string}"
         headers = {"X-MBX-APIKEY": self.api_key}
 
-        print(f"🔍 [REST] Creating STOP_LIMIT as LIMIT (Testnet workaround): {symbol} {side} @ {limit_price} (stop: {stop_price})")
+        self.logger.info(f"🔍 [REST] Creating STOP_LIMIT as LIMIT (Testnet workaround): {symbol} {side} @ {limit_price} (stop: {stop_price})")
 
         if self._session is None:
             await self._ensure_session()
@@ -389,10 +422,12 @@ class BinanceRestClient:
 
         async with session.post(url, headers=headers) as resp:
             data = await resp.json()
-            print(f"🔍 [REST] LIMIT response: {data}")
+            self.logger.info(f"🔍 [REST] LIMIT response: {data}")
 
         if isinstance(data, dict) and 'code' in data:
             error_msg = data.get('msg', 'Unknown error')
+            if data.get('code') == -1003:
+                self._register_ban(f"Binance API error: {error_msg} (code: -1003)")
             self.logger.error(f"Binance API error: {error_msg} (code: {data.get('code')})")
             return {'success': False, 'error': error_msg}
 
@@ -411,29 +446,15 @@ class BinanceRestClient:
         end_time: Optional[int] = None,
         limit: int = 500
     ) -> List[Dict]:
-        """
-        Получить историю трейдов пользователя.
+        """Получить историю трейдов пользователя."""
+        # 🔥 Circuit Breaker
+        if self._ban_active():
+            self.logger.debug(f"⏸️ [REST] get_user_trades({symbol}) пропущен — активен бан до {self._ban_until}")
+            return []
         
-        🔥 ШАГ 10.4.2: Используется для replay трейдов при стартовой реконсиляции.
-        
-        Args:
-            symbol: Торговая пара (например, 'SOLUSDT')
-            start_time: Начало периода в мс (Unix timestamp * 1000)
-            end_time: Конец периода в мс
-            limit: Максимальное количество записей (до 1000)
-        
-        Returns:
-            Список трейдов с полями:
-            - symbol, id, orderId
-            - side, positionSide
-            - price, qty, quoteQty
-            - commission, commissionAsset
-            - time, isBuyer, isMaker
-            - isClosePosition, realizedPnl
-        """
         params = {
             'symbol': symbol,
-            'limit': min(limit, 1000)  # Binance лимит = 1000
+            'limit': min(limit, 1000)
         }
         
         if start_time:
@@ -451,7 +472,10 @@ class BinanceRestClient:
             return result
             
         except Exception as e:
-            self.logger.error(f"⚠️ [REST] Failed to get user trades: {e}")
+            error_text = str(e)
+            if "-1003" in error_text:
+                self._register_ban(error_text)
+            self.logger.error(f"⚠️ [REST] Failed to get user trades: {error_text}")
             return []
 
     async def get_all_orders(
@@ -461,10 +485,10 @@ class BinanceRestClient:
         end_time: Optional[int] = None,
         limit: int = 1000
     ) -> List[Dict]:
-        """
-        🔥 ШАГ 10.4.4: История ордеров с origClientOrderId.
-        Один вызов заменяет N вызовов get_order_status в replay.
-        """
+        """История ордеров с origClientOrderId."""
+        if self._ban_active():
+            return []
+        
         params = {'symbol': symbol, 'limit': min(limit, 1000)}
         if start_time:
             params['startTime'] = start_time
@@ -478,10 +502,16 @@ class BinanceRestClient:
                 return []
             return result
         except Exception as e:
-            self.logger.error(f"⚠️ [REST] Failed to get all orders: {e}")
+            error_text = str(e)
+            if "-1003" in error_text:
+                self._register_ban(error_text)
+            self.logger.error(f"⚠️ [REST] Failed to get all orders: {error_text}")
             return []
 
     async def cancel_order(self, symbol: str, order_id: str) -> Dict:
+        if self._ban_active():
+            return {'success': False, 'error': 'REST banned, cancel not sent'}
+        
         params = {
             'symbol': symbol,
             'orderId': order_id
@@ -498,7 +528,7 @@ class BinanceRestClient:
             return {'success': False, 'error': str(e)}
 
     async def reset_session(self):
-        """Принудительно пересоздать aiohttp-сессию (зависший сокет → новый)."""
+        """Принудительно пересоздать aiohttp-сессию."""
         if self._session is not None:
             try:
                 await self._session.close()
@@ -512,11 +542,10 @@ class BinanceRestClient:
         order_id: Optional[str] = None,
         client_order_id: Optional[str] = None
     ) -> Optional[Dict]:
-        """
-        Получить статус ордера с биржи.
-        ВАЖНО: Binance не принимает оба идентификатора одновременно.
-        Приоритет: orderId (если передан, client_order_id игнорируется).
-        """
+        """Получить статус ордера с биржи."""
+        if self._ban_active():
+            return None
+        
         if not order_id and not client_order_id:
             return None
 
@@ -530,42 +559,43 @@ class BinanceRestClient:
             result = await self._request('GET', '/fapi/v1/order', params, signed=True)
             return result if result.get('orderId') else None
         except Exception as e:
-            print(f"⚠️ [REST] Failed to get order status: {e}")
+            error_text = str(e)
+            if "-1003" in error_text:
+                self._register_ban(error_text)
+            self.logger.error(f"⚠️ [REST] Failed to get order status: {error_text}")
             return None
 
     async def get_exchange_info(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Получить информацию о торговых правилах биржи.
-        Если symbol указан, запрашиваем только его (это намного быстрее и исключает таймауты).
-        """
+        """Получить информацию о торговых правилах биржи."""
+        if self._ban_active():
+            return {}
+        
         params = {}
         if symbol:
             params['symbol'] = symbol.upper()
             
         try:
-            # Передаем params, чтобы Binance вернул данные только по нужной паре
             result = await self._request('GET', '/fapi/v1/exchangeInfo', params, signed=False)
             return result
         except Exception as e:
-            error_details = str(e) if str(e) else repr(e)
-            self.logger.error(f"⚠️ [REST] Failed to get exchange info: {error_details}")
+            error_text = str(e)
+            if "-1003" in error_text:
+                self._register_ban(error_text)
+            self.logger.error(f"️ [REST] Failed to get exchange info: {error_text}")
             return {}
 
     async def get_klines(self, symbol: str, interval: str = "1m", limit: int = 100) -> list:
-        """
-        Получение исторических свечей с Binance Spot REST API.
-        :param symbol: Торговая пара, например, 'SOLUSDT'
-        :param interval: Интервал свечи ('1m', '5m', '15m', '1h' и т.д.)
-        :param limit: Количество свечей (макс. 1000)
-        :return: Список свечей в формате [timestamp, open, high, low, close, volume, ...]
-        """
+        """Получение исторических свечей с Binance Spot REST API."""
         import logging
-        import aiohttp
         from aiohttp import ClientTimeout
         
         logger = logging.getLogger(__name__)
         
-        # Используем Spot API, так как наш анализ строится на спотовых данных
+        # 🔥 Circuit Breaker (для Spot API используем тот же флаг)
+        if self._ban_active():
+            logger.debug(f"⏸️ [REST] get_klines({symbol}) пропущен — активен бан")
+            return []
+        
         url = f"https://api.binance.com/api/v3/klines"
         params = {
             "symbol": symbol.upper(),
@@ -574,7 +604,6 @@ class BinanceRestClient:
         }
         
         try:
-            # Создаем timeout правильно для aiohttp
             timeout = ClientTimeout(total=10)
             
             async with aiohttp.ClientSession() as session:

@@ -1,5 +1,5 @@
 """
-JSON Logger — структурированное логирование с фильтрацией и ротацией.
+JSON Logger — структурированное логирование с гибкой фильтрацией и ротацией.
 """
 import json
 import sys
@@ -16,8 +16,8 @@ class JsonLogger:
         self.max_bytes = config.get('max_file_size_mb', 5) * 1024 * 1024
         self.max_backups = config.get('max_backup_files', 3)
         
-        self.core_modules = set(config.get('core_modules', []))
-        self.optional_modules = config.get('optional_modules', {})
+        # 🔥 НОВАЯ СТРУКТУРА: единый словарь модулей с настройками событий
+        self.modules_config = config.get('modules', {})
         
         self.log_dir = Path("logs")
         self._file_path: Optional[Path] = None
@@ -78,27 +78,39 @@ class JsonLogger:
         except Exception:
             pass
 
-    def _should_log(self, module: str, level: str) -> bool:
-        """Проверяет, нужно ли логировать событие по правилам конфига."""
-        levels = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3}
+    def _should_log(self, module: str, event: str, level: str) -> bool:
+        levels = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
         
-        # 1. Проверка глобального уровня
+        # 1. Глобальный уровень
         if levels.get(level, 1) < levels.get(self.log_level, 1):
             return False
             
-        # 2. Проверка WS-модуля (сырые данные)
-        if module == "ws" and not self.optional_modules.get("ws", False):
+        # 2. Настройки модуля
+        module_cfg = self.modules_config.get(module, {"enabled": True, "events": ["*"]})
+        
+        # 3. Если модуль выключен
+        if not module_cfg.get("enabled", True):
             return False
             
-        # 3. Проверка опциональных модулей
-        if module not in self.core_modules:
-            if not self.optional_modules.get(module, False):
-                return False
+        # 4. WARNING, ERROR, CRITICAL проходят всегда
+        if level in ("WARNING", "ERROR", "CRITICAL"):
+            return True
+            
+        allowed_events = module_cfg.get("events", ["*"])
+        
+        # 5. Разрешены все события
+        if "*" in allowed_events:
+            return True
+            
+        # 6. Гибкая проверка: частичное совпадение строки
+        for allowed in allowed_events:
+            if allowed in event:
+                return True
                 
-        return True
+        return False
 
     def log(self, module: str, event: str, data: Dict[str, Any], level: str = "INFO", correlation_id: Optional[str] = None):
-        if not self._should_log(module, level):
+        if not self._should_log(module, event, level):
             return
 
         self._write_count += 1
@@ -134,6 +146,7 @@ class JsonLogger:
     def close(self):
         self._close_file()
 
+
 import logging
 
 class JsonLoggerHandler(logging.Handler):
@@ -147,21 +160,16 @@ class JsonLoggerHandler(logging.Handler):
 
     def emit(self, record):
         try:
-            # Извлекаем имя модуля (например, '__main__', 'trading.order_verifier')
             module = record.name
-            
-            # Пытаемся выделить суть события из сообщения (до двоеточия или первые 20 символов)
             msg = record.getMessage()
-            event = msg.split(':')[0].strip() if ':' in msg else msg[:30].strip()
+            event = msg.split(':')[0].strip() if ':' in msg else msg[:40].strip()
             
-            # Данные для JSON
             data = {
                 "message": msg,
                 "file": record.filename,
                 "line": record.lineno
             }
             
-            # Отправляем в наш JsonLogger
             self.json_logger.log(
                 module=module,
                 event=event,
@@ -169,5 +177,4 @@ class JsonLoggerHandler(logging.Handler):
                 level=record.levelname
             )
         except Exception:
-            # Если что-то пошло не так, не ломаем основную программу
             self.handleError(record)

@@ -31,7 +31,7 @@ class PositionMonitor(BaseMixin):
         while True:
             try:
                 await asyncio.sleep(self._check_interval)
-                await self.force_guard_registration("SOLUSDT")
+                #await self.force_guard_registration("SOLUSDT")
             except Exception as e:
                 self._log("periodic_check_error", {"error": str(e)})        
 
