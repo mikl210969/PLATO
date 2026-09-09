@@ -211,22 +211,53 @@ class PassportManager:
         passport.status = "CANCELLED"
     
     def _handle_guard_registered(self, passport, payload: Dict):
-        # 🔥 ЗАЩИТА ОТ ДУБЛЕЙ: Если guard уже зарегистрирован, игнорируем повторные вызовы
+        # 🔥 ЖЕСТКАЯ ЗАЩИТА ОТ ДУБЛЕЙ: если guard уже зарегистрирован, игнорируем повторные вызовы
         if getattr(passport, '_guard_registered', False):
+            self.logger.debug(f"⏭️ Игнорирован дубликат GUARD_REGISTERED для {passport.passport_id}")
             return
             
-        passport.sl_price = payload.get("sl_price", 0)
-        passport.tp1_price = payload.get("tp1_price", 0)
-        passport.tp2_price = payload.get("tp2_price", 0)
+        passport.sl_price = round(payload.get("sl_price", 0), 8)
+        passport.tp1_price = round(payload.get("tp1_price", 0), 8)
+        passport.tp2_price = round(payload.get("tp2_price", 0), 8)
         
-        # Ставим флаг, что регистрация прошла
-        passport._guard_registered = True 
-    
+        # Ставим флаг, что регистрация прошла успешно
+        passport._guard_registered = True
+
+    def _handle_sl_hit(self, passport, payload: Dict):
+        passport.sl_activated = True
+        
+        # 🔥 1. ГАРАНТИРОВАННО ОБНУЛЯЕМ РАЗМЕР (никаких отрицательных значений)
+        passport.position_size = 0.0
+        passport.status = "CLOSED"
+        passport.exit_reason = "SL_HIT"
+        
+        # 🔥 2. ЗАЩИТА ОТ exit_price = 0.0
+        exit_price = payload.get("price", 0)
+        if not exit_price or exit_price <= 0:
+            # Fallback: если цена не пришла из-за обрыва сети, используем цену SL как наименьшее зло
+            exit_price = passport.sl_price or passport.position_entry_price or passport.entry_price
+            self.logger.warning(f"⚠️ SL_HIT: exit_price=0, используем fallback: {exit_price}")
+            
+        passport.exit_price = round(exit_price, 8)
+        
+        # 🔥 3. БЕЗОПАСНЫЙ РАСЧЕТ PnL
+        closed_qty = abs(payload.get("closed_qty", 0)) or abs(passport.position_size) or 7.0
+        
+        if passport.side == "short":
+            gross_pnl = (passport.position_entry_price - exit_price) * closed_qty
+        else:
+            gross_pnl = (exit_price - passport.position_entry_price) * closed_qty
+            
+        passport.gross_pnl = round(gross_pnl, 2)
+        passport.commission = round(payload.get("commission", 0) or getattr(passport, 'commission', 0), 2)
+        passport.net_pnl = round(passport.gross_pnl - passport.commission, 2)
+        passport.closed_at = datetime.now(timezone.utc).isoformat()
+
     def _handle_tp1_hit(self, passport, payload: Dict):
         passport.tp1_activated = True
         closed_qty = abs(payload.get("closed_qty", 0))
         
-        # 🔥 БЕЗОПАСНОЕ ВЫЧИТАНИЕ
+        # 🔥 БЕЗОПАСНОЕ ВЫЧИТАНИЕ С ИСПОЛЬЗОВАНИЕМ abs()
         current_size = abs(passport.position_size or 0)
         passport.position_size = round(max(0.0, current_size - closed_qty), 4)
         
@@ -239,90 +270,35 @@ class PassportManager:
             passport.position_size = 0.0
             passport.status = "CLOSED"
             passport.exit_reason = "TP1_HIT"
+            
             exit_price = payload.get("price", 0) or passport.sl_price or passport.position_entry_price
             passport.exit_price = round(exit_price, 8)
             
-            gross_pnl = (passport.position_entry_price - exit_price) * closed_qty if passport.side == "short" else (exit_price - passport.position_entry_price) * closed_qty
+            if passport.side == "short":
+                gross_pnl = (passport.position_entry_price - exit_price) * closed_qty
+            else:
+                gross_pnl = (exit_price - passport.position_entry_price) * closed_qty
+                
             passport.gross_pnl = round(gross_pnl, 2)
             passport.net_pnl = round(passport.gross_pnl - (getattr(passport, 'commission', 0) or 0), 2)
             passport.closed_at = datetime.now(timezone.utc).isoformat()
 
     def _handle_tp2_hit(self, passport, payload: Dict):
-        """
-        Обработка полного закрытия по TP2.
-        Критически важно: округляем exit_price ДО расчета PnL, чтобы избежать артефактов float.
-        """
-        # 1. Активируем флаги
         passport.tp1_activated = True
         passport.tp2_activated = True
         
-        # 2. Определяем закрытое количество (защищаемся от None и 0)
-        closed_qty = payload.get("closed_qty")
-        if closed_qty is None or closed_qty <= 0:
-            closed_qty = abs(passport.position_size or 0)
-            self.logger.warning(f"⚠️ TP2_HIT: closed_qty некорректен ({payload.get('closed_qty')}), используем position_size={closed_qty}")
-        
-        # 3. Обнуляем позицию
+        closed_qty = abs(payload.get("closed_qty", 0)) or abs(passport.position_size)
         passport.position_size = 0.0
         passport.status = "CLOSED"
-        
-        # 4. Определяем цену выхода (защищаемся от None, 0 и отрицательных)
-        exit_price = payload.get("price")
-        if exit_price is None or exit_price <= 0:
-            exit_price = passport.position_entry_price or passport.entry_price or 0
-            self.logger.warning(f"⚠️ TP2_HIT: exit_price некорректен ({payload.get('price')}), используем entry_price={exit_price}")
-        
-        # 5. 🔥 КРИТИЧЕСКИ ВАЖНО: Округляем цену ДО расчета PnL!
-        # Это устраняет артефакты float вроде 103.00999999999999
-        exit_price = round(exit_price, 8)
-        passport.exit_price = exit_price
-        
-        # 6. Устанавливаем причину закрытия
         passport.exit_reason = "TP2_HIT"
         
-        # 7. Рассчитываем PnL с защитой от ошибок
-        try:
-            gross_pnl = self._calculate_pnl(passport, exit_price, closed_qty)
-            passport.gross_pnl = round(gross_pnl or 0, 2)
-        except Exception as e:
-            self.logger.error(f"❌ TP2_HIT: Ошибка расчета PnL: {e}")
-            passport.gross_pnl = 0.0
-        
-        # 8. Рассчитываем net PnL (используем getattr для безопасности)
-        commission = getattr(passport, 'commission', 0) or 0
-        passport.net_pnl = round(passport.gross_pnl - commission, 2)
-        
-        # 9. Устанавливаем время закрытия
-        passport.closed_at = datetime.now(timezone.utc).isoformat()
-        
-        # 10. Логируем результат для отладки
-        self.logger.info(
-            f"✅ TP2_HIT обработан: {passport.passport_id}, "
-            f"exit_price={exit_price}, closed_qty={closed_qty}, "
-            f"gross_pnl={passport.gross_pnl}, net_pnl={passport.net_pnl}"
-        )
-
-    def _handle_sl_hit(self, passport, payload: Dict):
-        passport.sl_activated = True
-        
-        # 🔥 1. ГАРАНТИРОВАННО ОБНУЛЯЕМ РАЗМЕР (никаких -7.0)
-        passport.position_size = 0.0
-        passport.status = "CLOSED"
-        passport.exit_reason = "SL_HIT"
-        
-        # 🔥 2. ЗАЩИТА ОТ exit_price = 0.0
         exit_price = payload.get("price", 0)
         if not exit_price or exit_price <= 0:
-            # Fallback: если цена не пришла, используем цену SL как наименьшее зло
             exit_price = passport.sl_price or passport.position_entry_price or passport.entry_price
-            self.logger.warning(f"⚠️ SL_HIT: exit_price=0, используем fallback: {exit_price}")
+            self.logger.warning(f"⚠️ TP2_HIT: exit_price=0, используем fallback: {exit_price}")
             
         passport.exit_price = round(exit_price, 8)
         
-        # 🔥 3. БЕЗОПАСНЫЙ РАСЧЕТ PnL
-        closed_qty = abs(payload.get("closed_qty", 0)) or abs(passport.position_size) or 7.0 # fallback на полный лот
-        
-        # Формула для SHORT: (Entry - Exit) * Qty
         if passport.side == "short":
             gross_pnl = (passport.position_entry_price - exit_price) * closed_qty
         else:

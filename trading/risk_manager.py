@@ -176,42 +176,67 @@ class RiskManager:
 
     async def ensure_guard_registered(self, passport):
         """Гарантированная регистрация guard через REST-фоллбэк."""
-        if passport.passport_id in self._guards:
-            return
+        # 🔥 ЗАЩИТА 1: asyncio.Lock для атомарности операции
+        async with self._guard_lock:
+            # 🔥 ЗАЩИТА 2: Повторная проверка внутри lock (double-check)
+            if passport.passport_id in self._guards:
+                return
 
-        self._log("guard_fallback_triggered", {
-            "passport_id": passport.passport_id,
-            "message": "DriftMonitor detected open position without guard. Forcing registration."
-        })
+            self._log("guard_fallback_triggered", {
+                "passport_id": passport.passport_id,
+                "message": "DriftMonitor detected open position without guard. Forcing registration."
+            })
 
-        if passport.sl_price == 0 or passport.tp1_price == 0:
-            atr_value = self.config.get('trading', {}).get('atr_value', 0.5)
-            levels = self.trader.calculate_exit_levels(
-                side=passport.side,
-                entry_price=passport.position_entry_price or passport.entry_price,
-                atr_value=atr_value
-            )
-            await self.passport_manager.apply_change(
+            #  ЗАЩИТА 3: Пересчет уровней если нужно
+            if passport.sl_price == 0 or passport.tp1_price == 0:
+                atr_value = self.config.get('trading', {}).get('atr_value', 0.5)
+                levels = self.trader.calculate_exit_levels(
+                    side=passport.side,
+                    entry_price=passport.position_entry_price or passport.entry_price,
+                    atr_value=atr_value
+                )
+                # Проверяем результат
+                levels_ok = await self.passport_manager.apply_change(
+                    passport_id=passport.passport_id,
+                    change_type="LEVELS_UPDATED",
+                    payload={
+                        "sl_price": levels.get('sl_price', 0),
+                        "tp1_price": levels.get('tp1_price', 0),
+                        "tp2_price": levels.get('tp2_price', 0)
+                    }
+                )
+                if not levels_ok:
+                    self._log("guard_registration_failed", {
+                        "passport_id": passport.passport_id,
+                        "reason": "LEVELS_UPDATED failed"
+                    })
+                    return
+
+            # 🔥 ЗАЩИТА 4: Регистрация guard с проверкой результата
+            guard_ok = await self.passport_manager.apply_change(
                 passport_id=passport.passport_id,
-                change_type="LEVELS_UPDATED",
+                change_type="GUARD_REGISTERED",
                 payload={
-                    "sl_price": levels.get('sl_price', 0),
-                    "tp1_price": levels.get('tp1_price', 0),
-                    "tp2_price": levels.get('tp2_price', 0)
+                    "sl_price": passport.sl_price,
+                    "tp1_price": passport.tp1_price,
+                    "tp2_price": passport.tp2_price,
+                    "remaining": abs(passport.position_size or 0)
                 }
             )
-
-        await self.passport_manager.apply_change(
-            passport_id=passport.passport_id,
-            change_type="GUARD_REGISTERED",
-            payload={
-                "sl_price": passport.sl_price,
-                "tp1_price": passport.tp1_price,
-                "tp2_price": passport.tp2_price,
-                "remaining": abs(passport.position_size or 0)
-            }
-        )
-        self._register_guard_in_memory(passport)
+            
+            # 🔥 ЗАЩИТА 5: Регистрируем в памяти ТОЛЬКО если apply_change успешен
+            if guard_ok:
+                self._register_guard_in_memory(passport)
+                self._log("guard_registered_success", {
+                    "passport_id": passport.passport_id,
+                    "side": passport.side,
+                    "remaining": abs(passport.position_size or 0)
+                })
+            else:
+                self._log("guard_registration_failed", {
+                    "passport_id": passport.passport_id,
+                    "reason": "GUARD_REGISTERED apply_change returned False"
+                })
 
     # ============================================================
     # СИНХРОНИЗАЦИЯ С БИРЖЕЙ

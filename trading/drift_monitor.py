@@ -14,7 +14,7 @@ class DriftMonitor:
     Периодически проверяет согласованность локального состояния с биржей.
     """
 
-    def __init__(self, rest_client, passport_manager, passport_repository, event_bus, risk_manager, poll_interval: float = 30.0):
+    def __init__(self, rest_client, passport_manager, passport_repository, event_bus, risk_manager, poll_interval: float = 60.0):  # 🔥 ИЗМЕНЕНО: было 30.0
         self.rest = rest_client
         self.passport_manager = passport_manager
         self.repository = passport_repository
