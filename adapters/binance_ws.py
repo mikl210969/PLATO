@@ -107,20 +107,61 @@ class BinanceWsAdapter:
 
         raise RuntimeError(f"Failed to connect after {retries} attempts")
 
-    async def subscribe_user_data(self, listen_key: str):
-        """🔥 Сохраняем listen_key в активные подписки для восстановления."""
-        if not self._connected or self._ws is None:
-            self.logger.warning("Cannot subscribe: WebSocket not connected")
-            return
-        msg = {"method": "SUBSCRIBE", "params": [listen_key], "id": id(self)}
-        try:
-            await self._ws.send(json.dumps(msg))
-            if listen_key not in self._active_subscriptions:
-                self._active_subscriptions.append(listen_key)
-            self.logger.info(f"Subscribed to user data: {listen_key[:10]}...")
-        except Exception as e:
-            self.logger.warning(f"Failed to subscribe to user data: {e}")
-            self._connected = False
+    async def subscribe_user_data(self, listen_key: str, refresh_key_callback=None):
+        """🔥 ИСПРАВЛЕНО: Добавлен колбэк для получения нового ключа при истечении старого."""
+        self._user_data_task = asyncio.create_task(
+            self._run_user_data_stream(listen_key, refresh_key_callback)
+        )
+        self.logger.info(f"🚀 Запущен отдельный поток для Futures User Data: {listen_key[:10]}...")
+
+    async def _run_user_data_stream(self, listen_key: str, refresh_key_callback=None):
+        """Отдельный цикл подключения для User Data Stream с самовосстановлением при HTTP 400."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if "testnet" in self.base_url:
+            user_data_url = f"wss://stream.binancefuture.com/ws/{listen_key}"
+        else:
+            user_data_url = f"wss://fstream.binance.com/ws/{listen_key}"
+            
+        logger.info(f"🔄 Connecting to Futures User Data stream: {user_data_url}")
+        
+        while getattr(self, '_running', True):
+            try:
+                async with websockets.connect(user_data_url, ping_interval=20, ping_timeout=20) as ws:
+                    logger.info("✅ User Data WS connected")
+                    async for message in ws:
+                        try:
+                            await self._message_queue.put(message)
+                        except Exception as e:
+                            logger.error(f"Error processing user data message: {e}")
+                            
+            except Exception as e:
+                error_str = str(e)
+                # 🔥 САМОВОССТАНОВЛЕНИЕ: Если ключ протух (HTTP 400), запрашиваем новый
+                if "HTTP 400" in error_str or "400" in error_str:
+                    logger.warning("⚠️ Listen key expired (HTTP 400). Пытаемся получить новый ключ...")
+                    if refresh_key_callback:
+                        try:
+                            new_key = await refresh_key_callback()
+                            if new_key:
+                                listen_key = new_key
+                                # Обновляем URL для следующей итерации цикла
+                                if "testnet" in self.base_url:
+                                    user_data_url = f"wss://stream.binancefuture.com/ws/{listen_key}"
+                                else:
+                                    user_data_url = f"wss://fstream.binance.com/ws/{listen_key}"
+                                logger.info(f"✅ Получен новый listen key: {listen_key[:10]}... Переподключение.")
+                                await asyncio.sleep(2) # Небольшая пауза перед переподключением
+                                continue # Перезапускаем цикл while с новым ключом
+                            else:
+                                logger.error("❌ Не удалось получить новый listen key (вернул None)")
+                        except Exception as refresh_err:
+                            logger.error(f"❌ Ошибка при обновлении listen key: {refresh_err}")
+                
+                # Если это не 400, просто стандартное переподключение
+                logger.warning(f"⚠️ User Data WS connection lost. Reconnecting in 5s... ({error_str})")
+                await asyncio.sleep(5)
 
     async def subscribe_depth(self, symbol: str):
         """🔥 Сохраняем depth-поток в активные подписки."""
@@ -321,6 +362,15 @@ class BinanceWsAdapter:
 
     async def close(self):
         self._running = False
+        
+        # 🔥 Отменяем задачу User Data Stream, если она есть
+        if hasattr(self, '_user_data_task') and self._user_data_task:
+            self._user_data_task.cancel()
+            try:
+                await self._user_data_task
+            except asyncio.CancelledError:
+                pass
+                
         if self._ws is not None:
             try:
                 await self._ws.close()

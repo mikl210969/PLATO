@@ -336,64 +336,43 @@ class Platform:
     async def _main_loop(self):
         logger.info("🔄 Main loop started")
 
+        # 1. Инициализация Listen Key
         listen_key = await self.rest.get_listen_key()
         self._listen_key = listen_key
         logger.info(f"✅ Listen key obtained: {listen_key[:10]}...")
 
+        # 2. Подключение основного WebSocket и первичная подписка
         await self.ws.connect()
         await self.ws.subscribe_depth(self.symbol)
 
         self._last_user_data_ts = time.time()
         self._last_price_update_ts = time.time()
 
+        # 3. Обработчик переподключения ОСНОВНОГО WebSocket
         async def on_ws_reconnect():
             if getattr(self, '_is_reconnecting', False):
                 return
             
             self._is_reconnecting = True
-            refreshed = False
-            
             try:
-                for attempt in range(3):
-                    try:
-                        new_listen_key = await asyncio.wait_for(self.rest.get_listen_key(), timeout=3.0)
-                        self._listen_key = new_listen_key
-                        
-                        await self.ws.subscribe_user_data(new_listen_key)
-                        self._last_user_data_ts = time.time()
-                        
-                        await self.ws.subscribe_depth(self.symbol)
-                        
-                        refreshed = True
-                        logger.info(f"✅ Listen key refreshed on reconnect: {new_listen_key[:10]}...")
-                        logger.info(f"✅ Depth stream (orderbook) resubscribed for {self.symbol}")
-                        break
-                        
-                    except asyncio.CancelledError:
-                        logger.warning("⚠️ Listen key refresh cancelled")
-                        return
-                    except Exception as e:
-                        error_details = repr(e) or str(e) or "Unknown empty error"
-                        logger.error(f"❌ Refresh listen key attempt {attempt + 1}/3 failed: {error_details}")
-                        if attempt < 2:
-                            await asyncio.sleep(0.5 * (attempt + 1))
-
-                if not refreshed:
-                    logger.critical("❌ CRITICAL: listen key not refreshed after 3 attempts")
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                logger.error(f"❌ Reconnect handler error: {e}")
-            finally:
-                self._is_reconnecting = False
-
-            if refreshed:
+                # 🔥 ИСПРАВЛЕНО: Мы НЕ трогаем здесь listen_key и subscribe_user_data.
+                # User Data Stream управляется своим фоновым процессом и callback-ом.
+                # Здесь мы только восстанавливаем рыночные данные.
+                await self.ws.subscribe_depth(self.symbol)
+                await self.ws.subscribe_btc_streams()
+                
+                logger.info("✅ Основные потоки (depth, btc) переподписаны после reconnect.")
+                
                 await self.bus.publish(
                     event_type="SYNC_REQUEST",
                     source="platform",
                     payload={"symbol": self.symbol},
                     symbol=self.symbol
                 )
+            except Exception as e:
+                logger.error(f"❌ Reconnect handler error: {e}")
+            finally:
+                self._is_reconnecting = False
 
         async def on_ws_reconnect_forced(event: Event):
             logger.warning(f"⚠️ WS reconnect forced for passport {event.payload.get('passport_id')}")
@@ -402,6 +381,7 @@ class Platform:
 
         self.bus.subscribe("WS_RECONNECT_FORCED", on_ws_reconnect_forced)
 
+        # 4. Обработчики событий WebSocket
         async def on_order_update(data):
             self._last_user_data_ts = time.time()            
             order_data = data.get('o', data)
@@ -462,7 +442,6 @@ class Platform:
                     )
             except Exception as e:
                 logger.error(f"Error processing depth update: {e}")
-
         self.ws.on("depthUpdate", on_depth_update)
 
         async def on_btc_agg_trade(data):
@@ -474,37 +453,53 @@ class Platform:
             )
         self.ws.on("BTC_AGG_TRADE", on_btc_agg_trade)
 
-        await self.ws.subscribe_user_data(listen_key)
+        # 5. 🔥 НОВОЕ: Callback для автоматического обновления listen_key фоновым процессом
+        async def refresh_listen_key_callback():
+            try:
+                new_key = await self.rest.get_listen_key()
+                if new_key:
+                    # Обновляем глобальную переменную, чтобы цикл keep-alive (если он есть) использовал свежий ключ
+                    self._listen_key = new_key
+                    logger.info(f"🔄 Listen key успешно обновлен фоновым процессом: {new_key[:10]}...")
+                    return new_key
+            except Exception as e:
+                logger.error(f"❌ Ошибка при обновлении listen key: {e}")
+            return None
+
+        # 6. Запуск User Data Stream с переданным callback-ом
+        await self.ws.subscribe_user_data(listen_key, refresh_key_callback=refresh_listen_key_callback)
         logger.info(f"✅ User data stream subscribed: {listen_key[:10]}...")
+        
         await self.ws.subscribe_btc_streams()
 
+        # 7. Монитор здоровья (только логирование и мягкий сброс, без ручного управления ключами)
         async def user_data_health_check():
             while getattr(self, '_running', True):
                 try:
                     await asyncio.sleep(10)
                     price_age = time.time() - getattr(self, '_last_price_update_ts', time.time())
-                    has_active = bool(self.passport_manager.get_active_by_symbol(self.symbol))
                     
-                    if has_active and price_age > 60:
-                        logger.warning(f"⚠️ WS DEAD: No price updates for {price_age:.0f}s. Forcing refresh.")
-                        self._last_price_update_ts = time.time()
-                        await on_ws_reconnect()
+                    if price_age > 60:
+                        logger.warning(f"⚠️ WS DEAD: No price updates for {price_age:.0f}s. Forcing main WS reconnect.")
+                        self._last_price_update_ts = time.time() # Сброс таймера, чтобы не спамить логами
+                        
+                        # Мягко форсируем разрыв основного соединения, цикл ws.run() сам его пересоздаст
+                        if hasattr(self.ws, '_ws') and self.ws._ws:
+                            await self.ws._ws.close()
+                            
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
                     logger.error(f"Health check error: {e}")
                     await asyncio.sleep(1)
 
+        # 8. Инициализация Cold Storage для Spot тиков
         import json
         self._cold_storage_dir = Path("data/cold_storage")
         self._cold_storage_dir.mkdir(parents=True, exist_ok=True)
         self._tick_file = self._cold_storage_dir / f"{self.symbol}_trades.jsonl"
 
         async def on_spot_trade(event_type: str, data: dict):
-            # Маячок убран — данные идут стабильно, логирование каждого тика создаёт шум
-            # Если нужно проверить жив ли поток — смотри DELTA_CTX каждые 5 секунд
-            pass
-            
             normalized_payload = {
                 "price": float(data.get("p", 0)),
                 "qty": float(data.get("q", 0)),
@@ -519,7 +514,6 @@ class Platform:
                 symbol=self.symbol
             )
             
-            # Сохранение в Cold Storage (оставляем как было)
             try:
                 side = "BUY" if not data.get("m") else "SELL"
                 price = float(data.get("p", 0))
@@ -540,6 +534,7 @@ class Platform:
         async def on_spot_depth(event_type: str, data: dict):
             await self.bus.publish(event_type=event_type, source="spot_ws_adapter", payload=data, symbol=self.symbol)
 
+        # 9. Запуск фоновых задач
         self._spot_trades_task = asyncio.create_task(self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade))
         self._spot_depth_task = asyncio.create_task(self.ws.subscribe_spot_depth(self.symbol, on_spot_depth))
         
@@ -554,13 +549,13 @@ class Platform:
         await self.orchestrator.perform_startup_recovery(self.symbol)
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
 
-        # 🔥 УРОВЕНЬ 5: Удалён одноразовый расчёт ATR — теперь AtrMonitor делает это автоматически
-
+        # 10. Основной цикл платформы
         last_log_time = 0
         last_position_check_time = 0
 
         while self._running:
             try:
+                # Получение цены (приоритет WS, fallback на REST)
                 if self.ws_price > 0:
                     current_price = self.ws_price
                 else:
@@ -574,8 +569,9 @@ class Platform:
 
                 current_time = time.time()
                 
+                # 🔥 Проверка позиции закомментирована/удалена, чтобы не спамить REST
                 if current_time - last_position_check_time >= 10:
-                    #await self.rest.get_position(self.symbol)
+                    # await self.rest.get_position(self.symbol) 
                     last_position_check_time = current_time
 
                 if current_time - last_log_time >= 60:
@@ -593,7 +589,6 @@ class Platform:
                     hvn_micro = self.extensions.hvn.calculate_hvn(self.symbol, lookback_minutes=60)[:3]
                     hvn_macro = self.extensions.hvn.calculate_hvn(self.symbol, lookback_minutes=1440)[:3]
 
-                # 3. Формируем контекст
                 context = {
                     'symbol': self.symbol,
                     'current_price': current_price,
@@ -604,7 +599,6 @@ class Platform:
                     'delta': self.analytics.delta.get_metrics(),
                     'imbalance': self.analytics.imbalance.get_metrics(),
                     'trend': self.analytics.trend.get_context(),
-                    # 🔥 НОВОЕ: Передаем макро-контекст от DeltaMonitor
                     'btc_delta_context': self.delta_contexts.get("BTCUSDT", {}),
                     'sol_delta_context': self.delta_contexts.get("SOLUSDT", {})
                 }
@@ -631,6 +625,7 @@ class Platform:
                 continue
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
+                import traceback
                 logger.debug(f"Traceback:\n{traceback.format_exc()}")
                 await asyncio.sleep(1)
 
