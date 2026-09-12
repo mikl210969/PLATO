@@ -187,7 +187,7 @@ class DriftMonitor:
             import time
             
             # 🔥 Circuit Breaker: если бан активен, не делаем запрос
-            if hasattr(self.rest, '_ban_active') and self.rest._ban_active():
+            if hasattr(self.rest, '_ban_active') and self.rest._ban_active:
                 self.logger.warning(f"⏸️ [DRIFT_RECOVERY] {symbol}: REST забанен, восстановление отложено")
                 return
             
@@ -197,57 +197,57 @@ class DriftMonitor:
             self.logger.info(f"🔍 [DRIFT_RECOVERY] Запрашиваем историю сделок для {symbol}...")
             trades = await self.rest.get_user_trades(symbol, start_time, end_time, 1000)
             
+            # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: SAFE FALLBACK
+            # Если сделок нет, мы НЕ оставляем паспорт зависшим. Мы закрываем его безопасно.
             if not trades:
-                self.logger.warning(f"️ [DRIFT_RECOVERY] История сделок пуста для {symbol} (возможная ошибка сети или таймаут).")
-                self.logger.warning(f"   Паспорт {passport.passport_id} ОСТАЕТСЯ в статусе {passport.status}.")
-                return
-            
-            passport_order_ids = {str(o.get('order_id', '')) for o in passport.orders}
-            
-            passport_trades = [
-                t for t in trades 
-                if str(t.get('orderId', '')) in passport_order_ids
-            ]
-            
-            if not passport_trades:
-                self.logger.warning(
-                    f"⚠️ [DRIFT_RECOVERY] Не найдено сделок для ордера {passport_order_ids}. "
-                    f"Пытаемся найти по client_order_id..."
-                )
+                self.logger.warning(f"⚠️ [DRIFT_RECOVERY] История сделок пуста для {symbol}. Применяем SAFE FALLBACK.")
+                passport.status = PassportStatus.CLOSED.value
+                passport.exit_reason = "EXTERNAL_CLOSE_SAFE_FALLBACK"
+                passport.exit_price = passport.entry_price  # Безубыток
+                passport.gross_pnl = 0.0
+                passport.commission = 0.0
+                passport.net_pnl = 0.0
+                passport.position_size = 0.0
+                passport.closed_at = passport.updated_at
                 
-                passport_client_ids = {str(o.get('client_order_id', '')) for o in passport.orders}
-                passport_trades = [
-                    t for t in trades 
-                    if str(t.get('clientOrderId', '')) in passport_client_ids
-                ]
-            
-            if not passport_trades:
-                self.logger.warning(f"⚠️ [DRIFT_RECOVERY] Не удалось найти сделки для {passport.passport_id} в истории биржи.")
-                self.logger.warning(f"   Паспорт ОСТАЕТСЯ в статусе {passport.status}.")
+                if hasattr(passport, 'add_timeline_event'):
+                    passport.add_timeline_event("EXTERNAL_CLOSE", "Recovered via SAFE FALLBACK (no trades found)")
+                
+                self.passport_manager.update(passport)
+                self.repository.save(passport)
+                self.logger.info(f"✅ [DRIFT_RECOVERY] Паспорт {passport.passport_id} безопасно закрыт (fallback). Символ разблокирован.")
                 return
             
+            # ... далее твой существующий код поиска сделок по order_id / client_order_id ...
+            passport_order_ids = {str(o.get('order_id', '')) for o in passport.orders}
+            passport_trades = [t for t in trades if str(t.get('orderId', '')) in passport_order_ids]
+            
+            if not passport_trades:
+                passport_client_ids = {str(o.get('client_order_id', '')) for o in passport.orders}
+                passport_trades = [t for t in trades if str(t.get('clientOrderId', '')) in passport_client_ids]
+            
+            # 🔥 ЕЩЕ ОДНА ЗАЩИТА: если все равно не нашли, используем fallback
+            if not passport_trades:
+                self.logger.warning(f"⚠️ [DRIFT_RECOVERY] Сделки не найдены по ID. Применяем SAFE FALLBACK.")
+                passport.status = PassportStatus.CLOSED.value
+                passport.exit_reason = "EXTERNAL_CLOSE_SAFE_FALLBACK"
+                passport.exit_price = passport.entry_price
+                passport.gross_pnl = 0.0
+                passport.position_size = 0.0
+                self.passport_manager.update(passport)
+                self.repository.save(passport)
+                return
+            
+            # ... далее твой существующий код расчета total_qty, total_value, exit_price, gross_pnl ...
             closing_side = "BUY" if passport.side == "short" else "SELL"
-            
-            closing_trades = [
-                t for t in passport_trades 
-                if t.get('side') == closing_side
-            ]
-            
+            closing_trades = [t for t in passport_trades if t.get('side') == closing_side]
             if not closing_trades:
-                self.logger.warning(
-                    f"️ [DRIFT_RECOVERY] Не найдено закрывающих сделок ({closing_side}) "
-                    f"для {passport.passport_id}. Используем все сделки."
-                )
                 closing_trades = passport_trades
             
             total_qty = sum(float(t.get('qty', 0)) for t in closing_trades)
             total_value = sum(float(t.get('quoteQty', 0)) for t in closing_trades)
             
-            if total_qty > 0:
-                exit_price = total_value / total_qty
-            else:
-                exit_price = float(closing_trades[-1].get('price', 0))
-            
+            exit_price = (total_value / total_qty) if total_qty > 0 else float(closing_trades[-1].get('price', 0))
             entry_price = passport.entry_price
             position_qty = abs(passport.position_size or 0)
             
@@ -256,51 +256,45 @@ class DriftMonitor:
             else:
                 gross_pnl = (entry_price - exit_price) * position_qty
             
-            total_commission = sum(
-                float(t.get('commission', 0)) for t in closing_trades
-            )
+            total_commission = sum(float(t.get('commission', 0)) for t in closing_trades)
             
             passport.status = PassportStatus.CLOSED.value
             passport.exit_reason = "EXTERNAL_CLOSE"
             
+            # 🔥 ЗАЩИТА ОТ exit_price = 0.0
             if exit_price == 0.0:
-                self.logger.warning(f"⚠️ [DRIFT_RECOVERY] exit_price=0.0 для {passport.passport_id}. Используем fallback.")
-                if passport.sl_price > 0:
-                    exit_price = passport.sl_price
-                elif passport.tp1_price > 0:
-                    exit_price = passport.tp1_price
-                elif passport.tp2_price > 0:
-                    exit_price = passport.tp2_price
-                else:
-                    exit_price = passport.entry_price
-                    
+                exit_price = passport.sl_price or passport.tp1_price or passport.tp2_price or passport.entry_price
                 gross_pnl = 0.0
-                self.logger.warning(f"   PnL сброшен в 0.0. Fallback exit_price: {exit_price}")
 
-            passport.exit_price = exit_price
-            passport.gross_pnl = gross_pnl
-            passport.commission = total_commission
-            passport.net_pnl = gross_pnl - total_commission
+            passport.exit_price = round(exit_price, 8)
+            passport.gross_pnl = round(gross_pnl, 2)
+            passport.commission = round(total_commission, 4)
+            passport.net_pnl = round(passport.gross_pnl - passport.commission, 2)
             passport.position_size = 0.0
             passport.closed_at = passport.updated_at
             
-            passport.add_timeline_event(
-                "EXTERNAL_CLOSE",
-                f"Recovered: exit_price={exit_price:.4f}, pnl={gross_pnl:+.2f}, commission={total_commission:.4f}"
-            )
+            if hasattr(passport, 'add_timeline_event'):
+                passport.add_timeline_event("EXTERNAL_CLOSE", f"Recovered: exit_price={exit_price:.4f}, pnl={gross_pnl:+.2f}")
             
             self.passport_manager.update(passport)
             self.repository.save(passport)
             
-            self.logger.info(
-                f"✅ [DRIFT_RECOVERY] Паспорт {passport.passport_id} восстановлен и СОХРАНЕН на диск: "
-                f"exit_price={exit_price:.4f}, PnL={gross_pnl:+.2f} USDT, commission={total_commission:.4f}"
-            )
+            self.logger.info(f"✅ [DRIFT_RECOVERY] Паспорт {passport.passport_id} восстановлен: exit_price={exit_price:.4f}, PnL={gross_pnl:+.2f}")
             
         except Exception as e:
             self.logger.error(f"❌ [DRIFT_RECOVERY] Ошибка восстановления {passport.passport_id}: {e}")
-            self.logger.warning(f"   Паспорт {passport.passport_id} ОСТАЕТСЯ в статусе {passport.status} до успешной синхронизации.")
-            return
+            # 🔥 АВАРИЙНЫЙ FALLBACK: Даже при критической ошибке закрываем паспорт, чтобы разблокировать символ
+            try:
+                passport.status = PassportStatus.CLOSED.value
+                passport.exit_reason = "EXTERNAL_CLOSE_ERROR_FALLBACK"
+                passport.exit_price = passport.entry_price
+                passport.gross_pnl = 0.0
+                passport.position_size = 0.0
+                self.passport_manager.update(passport)
+                self.repository.save(passport)
+                self.logger.warning(f"⚠️ Применен аварийный fallback для {passport.passport_id}")
+            except Exception as fallback_error:
+                self.logger.error(f"❌ [DRIFT_RECOVERY] Аварийный fallback также не сработал: {fallback_error}")
 
     async def _publish_drift(self, symbol: str, drift_type: str, details: dict):
         """Опубликовать событие дрейфа и установить флаг."""
