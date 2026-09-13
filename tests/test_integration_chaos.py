@@ -16,9 +16,9 @@ from trading.state_manager import StateManager
 
 
 class SimplePassport:
-    """Простой паспорт для тестов с полным набором полей TradePassport."""
+    """Упрощенный паспорт для тестов — имитирует все методы реального TradePassport."""
+    
     def __init__(self, data):
-        # Основные поля
         self.passport_id = data.get('passport_id', '')
         self.symbol = data.get('symbol', '')
         self.strategy = data.get('strategy', '')
@@ -30,37 +30,36 @@ class SimplePassport:
         self.tp1_price = data.get('tp1_price', 0.0)
         self.tp2_price = data.get('tp2_price', 0.0)
         self.position_size = data.get('position_size', 0.0)
-        self.status = data.get('status', 'ORDER_SENT')
+        self.status = data.get('status', 'OPEN')
         self.timeline = data.get('timeline', [])
         self.orders = data.get('orders', [])
         self.position_entry_price = data.get('position_entry_price', 0.0)
-        
-        # Поля закрытия
         self.exit_price = data.get('exit_price', 0.0)
         self.exit_reason = data.get('exit_reason', '')
         self.gross_pnl = data.get('gross_pnl', 0.0)
         self.commission = data.get('commission', 0.0)
         self.net_pnl = data.get('net_pnl', 0.0)
         self.closed_at = data.get('closed_at', None)
+        self.created_at = data.get('created_at', None)
+        self.updated_at = data.get('updated_at', None)
         self.tp1_activated = data.get('tp1_activated', False)
         self.tp2_activated = data.get('tp2_activated', False)
         self.sl_activated = data.get('sl_activated', False)
-        self.sizing_info = data.get('sizing_info', None)
-        self.created_at = data.get('created_at', None)
-        self.updated_at = data.get('updated_at', None)
         
-        # Остальные атрибуты из data
+        # 🔥 НОВОЕ: Поля мониторинга здоровья и проектного PnL
+        self.platform_health = data.get('platform_health', 'HEALTHY')
+        self.guard_status = data.get('guard_status', 'inactive')
+        self.tp1_projected_pnl = data.get('tp1_projected_pnl', 0.0)
+        self.tp2_projected_pnl = data.get('tp2_projected_pnl', 0.0)
+        self.sl_projected_pnl = data.get('sl_projected_pnl', 0.0)
+        self.breakeven_projected_pnl = data.get('breakeven_projected_pnl', 0.0)
+        self.sizing_info = data.get('sizing_info', None)
+        
         for k, v in data.items():
             if not hasattr(self, k):
                 setattr(self, k, v)
-
-        self.tp1_projected_pnl = 0.0
-        self.tp2_projected_pnl = 0.0
-        self.sl_projected_pnl = 0.0
-        self.breakeven_projected_pnl = 0.0
-
+    
     def to_dict(self):
-        """Полная сериализация — включает ВСЕ поля TradePassport."""
         return {
             'passport_id': self.passport_id,
             'symbol': self.symbol,
@@ -83,25 +82,21 @@ class SimplePassport:
             'commission': self.commission,
             'net_pnl': self.net_pnl,
             'closed_at': self.closed_at,
+            'created_at': self.created_at,
+            'updated_at': self.updated_at,
             'tp1_activated': self.tp1_activated,
             'tp2_activated': self.tp2_activated,
             'sl_activated': self.sl_activated,
+            'platform_health': self.platform_health,
+            'guard_status': self.guard_status,
+            'tp1_projected_pnl': self.tp1_projected_pnl,
+            'tp2_projected_pnl': self.tp2_projected_pnl,
+            'sl_projected_pnl': self.sl_projected_pnl,
+            'breakeven_projected_pnl': self.breakeven_projected_pnl,
             'sizing_info': self.sizing_info,
-            'created_at': self.created_at,
-            'updated_at': self.updated_at,
         }
     
-    def calculate_projected_pnls(self):
-        """Заглушка для тестов, чтобы order_handler не падал при вызове."""
-        # В реальных тестах нам не всегда важна точная математика заглушки, 
-        # главное, чтобы метод существовал и не вызывал AttributeError
-        self.tp1_projected_pnl = 0.0
-        self.tp2_projected_pnl = 0.0
-        self.sl_projected_pnl = 0.0
-        self.breakeven_projected_pnl = 0.0
-
     def transition_to(self, new_status: str, reason: str = ""):
-        """Изменить статус паспорта (вызывается StateManager.transition)."""
         from datetime import datetime, timezone
         old_status = self.status
         self.status = new_status
@@ -118,7 +113,49 @@ class SimplePassport:
         })
         
         return True
-
+    
+    def add_timeline_event(self, event_type: str, details: str):
+        """Добавить событие в таймлайн."""
+        from datetime import datetime, timezone
+        self.timeline.append({
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'event': event_type,
+            'details': details
+        })
+        self.updated_at = datetime.now(timezone.utc).isoformat()
+    
+    def add_order(self, order: dict):
+        """Добавить ордер в паспорт."""
+        self.orders.append(order)
+        from datetime import datetime, timezone
+        self.updated_at = datetime.now(timezone.utc).isoformat()
+    
+    def calculate_projected_pnls(self):
+        """Заглушка для расчёта проектного PnL."""
+        # В тестах нам не важна точная математика, главное — метод существует
+        if self.position_size == 0:
+            return
+        
+        if self.side == "short":
+            self.tp1_projected_pnl = round((self.position_entry_price - self.tp1_price) * self.position_size, 2)
+            self.tp2_projected_pnl = round((self.position_entry_price - self.tp2_price) * self.position_size, 2)
+            self.sl_projected_pnl = round((self.position_entry_price - self.sl_price) * self.position_size, 2)
+            self.breakeven_projected_pnl = 0.0
+        else:  # long
+            self.tp1_projected_pnl = round((self.tp1_price - self.position_entry_price) * self.position_size, 2)
+            self.tp2_projected_pnl = round((self.tp2_price - self.position_entry_price) * self.position_size, 2)
+            self.sl_projected_pnl = round((self.sl_price - self.position_entry_price) * self.position_size, 2)
+            self.breakeven_projected_pnl = 0.0
+    
+    def close(self, exit_reason: str, exit_price: float = 0.0, gross_pnl: float = 0.0, commission: float = 0.0):
+        """Закрыть паспорт."""
+        self.transition_to("CLOSED", exit_reason)
+        self.exit_reason = exit_reason
+        self.exit_price = exit_price
+        self.gross_pnl = gross_pnl
+        self.commission = commission
+        self.net_pnl = gross_pnl - commission
+        self.position_size = 0.0
 
 @pytest.fixture
 def temp_dir():
