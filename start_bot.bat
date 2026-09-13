@@ -2,7 +2,7 @@
 title PLATO Watchdog
 setlocal enabledelayedexpansion
 
-set "PYTHON_EXE=C:\Users\ongul\AppData\Local\Programs\Python\Python311\python.exe"
+set "PYTHON_EXE=C:\Users\user\AppData\Local\Programs\Python\Python311\python.exe"
 set "SCRIPT_PATH=%~dp0main.py"
 set "STATE_FILE=%~dp0restart_state.txt"
 set "MAX_RESTARTS=2"
