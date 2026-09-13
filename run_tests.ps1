@@ -1,6 +1,7 @@
-# run_tests.ps1 — Полный запуск тестов с информативным выводом
+# run_tests.ps1 — Полный запуск тестов с информативным выводом (Исправленная версия)
 
-$ErrorActionPreference = "Stop"
+# Не останавливать скрипт из-за предупреждений stderr от Python (например, urllib3 warning)
+$ErrorActionPreference = "Continue"
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -31,7 +32,7 @@ Write-Host "🔍 Проверка незакоммиченных изменен�
 $gitStatus = git status --porcelain 2>$null
 
 if ($gitStatus) {
-    Write-Host "   ⚠️ Обнаружены незакоммиченные изменения:" -ForegroundColor Red
+    Write-Host "   ⚠️ Обнаружены незакоммиченные изменения:" -ForegroundColor Yellow
     Write-Host $gitStatus | ForEach-Object { "      $_" }
     Write-Host ""
     Write-Host "   Рекомендация: закоммить изменения перед запуском тестов" -ForegroundColor Yellow
@@ -54,36 +55,21 @@ $testFiles = @(
 )
 
 $allPassed = $true
-$totalTests = 0
-$failedTests = 0
 
 foreach ($testFile in $testFiles) {
     if (Test-Path $testFile) {
         Write-Host "📋 $testFile" -ForegroundColor Cyan
         
-        $output = pytest $testFile -v --tb=short 2>&1
+        # Запускаем pytest. PowerShell теперь не прервет выполнение из-за предупреждений Python
+        pytest $testFile -v --tb=short
         
-        # Подсчёт результатов
-        $passed = ($output | Select-String "passed" | Select-Object -Last 1)
-        $failed = ($output | Select-String "failed" | Select-Object -Last 1)
-        
-        if ($passed) {
-            Write-Host "   ✅ $passed" -ForegroundColor Green
-            $match = [regex]::Match($passed, '(\d+) passed')
-            if ($match.Success) {
-                $totalTests += [int]$match.Groups[1].Value
-            }
-        }
-        
-        if ($failed) {
-            Write-Host "   ❌ $failed" -ForegroundColor Red
+        # Проверяем реальный код возврата pytest (0 = успех, >0 = ошибки)
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "   ✅ Пройден успешно" -ForegroundColor Green
+        } else {
+            Write-Host "   ❌ Обнаружены ошибки (Exit code: $LASTEXITCODE)" -ForegroundColor Red
             $allPassed = $false
-            $match = [regex]::Match($failed, '(\d+) failed')
-            if ($match.Success) {
-                $failedTests += [int]$match.Groups[1].Value
-            }
         }
-        
         Write-Host ""
     } else {
         Write-Host "   ⚠️ Файл не найден: $testFile" -ForegroundColor Yellow
@@ -98,13 +84,10 @@ Write-Host ""
 
 if ($allPassed) {
     Write-Host "✅ ВСЕ ТЕСТЫ ПРОЙДЕНЫ!" -ForegroundColor Green
-    Write-Host "   Пройдено: $totalTests тестов" -ForegroundColor Green
     Write-Host ""
     Write-Host "🎉 Платформа готова к запуску!" -ForegroundColor Green
 } else {
     Write-Host "❌ ОБНАРУЖЕНЫ ОШИБКИ!" -ForegroundColor Red
-    Write-Host "   Пройдено: $totalTests тестов" -ForegroundColor Yellow
-    Write-Host "   Провалено: $failedTests тестов" -ForegroundColor Red
     Write-Host ""
     Write-Host "⚠️ НЕ РЕКОМЕНДУЕТСЯ запускать платформу!" -ForegroundColor Red
     Write-Host "   Исправьте ошибки и запустите тесты снова." -ForegroundColor Yellow
@@ -122,16 +105,12 @@ if ($allPassed) {
 } else {
     if (Test-Path $lastRunFile) {
         $lastSuccess = Get-Content $lastRunFile
-        Write-Host " Последний успешный прогон: $lastSuccess" -ForegroundColor Yellow
+        Write-Host "📅 Последний успешный прогон: $lastSuccess" -ForegroundColor Yellow
     } else {
         Write-Host "📅 Успешных прогонов ещё не было" -ForegroundColor Red
     }
 }
 
 Write-Host ""
-
-# 6. Пауза перед выходом
-if (-not $allPassed) {
-    Write-Host "Нажмите Enter для выхода..." -ForegroundColor Yellow
-    Read-Host
-}
+Write-Host "Нажмите Enter для выхода..." -ForegroundColor Gray
+Read-Host

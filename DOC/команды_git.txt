@@ -45,3 +45,5 @@ Start-Sleep -Seconds 2
 
 # Запускаем и перенаправляем ВСЕ потоки (stdout, stderr, warnings) в файл
 python main.py *> platform_run.log
+
+.\run_tests.ps1

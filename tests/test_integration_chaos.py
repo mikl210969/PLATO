@@ -53,7 +53,12 @@ class SimplePassport:
         for k, v in data.items():
             if not hasattr(self, k):
                 setattr(self, k, v)
-    
+
+        self.tp1_projected_pnl = 0.0
+        self.tp2_projected_pnl = 0.0
+        self.sl_projected_pnl = 0.0
+        self.breakeven_projected_pnl = 0.0
+
     def to_dict(self):
         """Полная сериализация — включает ВСЕ поля TradePassport."""
         return {
@@ -86,6 +91,15 @@ class SimplePassport:
             'updated_at': self.updated_at,
         }
     
+    def calculate_projected_pnls(self):
+        """Заглушка для тестов, чтобы order_handler не падал при вызове."""
+        # В реальных тестах нам не всегда важна точная математика заглушки, 
+        # главное, чтобы метод существовал и не вызывал AttributeError
+        self.tp1_projected_pnl = 0.0
+        self.tp2_projected_pnl = 0.0
+        self.sl_projected_pnl = 0.0
+        self.breakeven_projected_pnl = 0.0
+
     def transition_to(self, new_status: str, reason: str = ""):
         """Изменить статус паспорта (вызывается StateManager.transition)."""
         from datetime import datetime, timezone
