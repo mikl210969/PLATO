@@ -319,11 +319,26 @@ class PassportManager:
     
     def _handle_external_close(self, passport, payload: Dict):
         passport.status = "CLOSED"
-        passport.exit_price = payload.get("exit_price", 0)
         passport.exit_reason = "EXTERNAL_CLOSE"
-        passport.gross_pnl = payload.get("gross_pnl", 0)
-        passport.commission = payload.get("commission", 0)
-        passport.net_pnl = payload.get("net_pnl", passport.gross_pnl - passport.commission)
+        
+        exit_price = payload.get("exit_price", 0)
+        gross_pnl = payload.get("gross_pnl", 0)
+        commission = payload.get("commission", 0)
+        
+        # 🔥 ИСПРАВЛЕНИЕ: Если биржа не прислала цену и PnL, считаем сами
+        if not exit_price or exit_price <= 0:
+            # Используем entry_price как fallback (безубыток), чтобы не писать 0
+            exit_price = passport.position_entry_price
+            self.logger.warning(f"️ External close: exit_price missing, fallback to entry_price {exit_price}")
+            
+        if not gross_pnl or gross_pnl == 0:
+            # 🔥 Используем наш встроенный калькулятор, который простаивал!
+            gross_pnl = self._calculate_pnl(passport, exit_price, passport.position_size)
+            
+        passport.exit_price = round(exit_price, 8)
+        passport.gross_pnl = round(gross_pnl, 2)
+        passport.commission = commission
+        passport.net_pnl = round(passport.gross_pnl - commission, 2)
         passport.position_size = 0
         passport.closed_at = datetime.now(timezone.utc).isoformat()
     

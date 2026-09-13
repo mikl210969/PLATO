@@ -36,6 +36,8 @@ from strategies.wall_fade_v3 import WallFadeStrategyV3
 from strategies.absorption_v2 import AbsorptionStrategyV2
 from strategies.breakout_v1 import BreakoutStrategyV1
 
+from datetime import datetime, timezone
+
 from extensions.risk.position_sizer import PositionSizer
 from extensions.analytics.monitor_factory import MonitorFactory  # 🔥 НОВОЕ: Фабрика мониторов
 from extensions.analytics.atr_monitor import AtrMonitor  # 🔥 УРОВЕНЬ 5: Dynamic ATR
@@ -453,18 +455,27 @@ class Platform:
             )
         self.ws.on("BTC_AGG_TRADE", on_btc_agg_trade)
 
-        # 5. 🔥 НОВОЕ: Callback для автоматического обновления listen_key фоновым процессом
+        # 5. 🔥 ИСПРАВЛЕНО: Callback для продления listen_key (дешевый PUT-запрос)
         async def refresh_listen_key_callback():
             try:
-                new_key = await self.rest.get_listen_key()
-                if new_key:
-                    # Обновляем глобальную переменную, чтобы цикл keep-alive (если он есть) использовал свежий ключ
-                    self._listen_key = new_key
-                    logger.info(f"🔄 Listen key успешно обновлен фоновым процессом: {new_key[:10]}...")
-                    return new_key
+                if self._listen_key:
+                    # Используем renew вместо get (дешевле по лимитам)
+                    success = await self.rest.renew_listen_key(self._listen_key)
+                    if success:
+                        logger.info(f"✅ Listen key продлен: {self._listen_key[:10]}...")
+                    else:
+                        logger.warning("⚠️ renew_listen_key вернул False. Запрашиваем новый ключ...")
+                        new_key = await self.rest.get_listen_key()
+                        if new_key:
+                            self._listen_key = new_key
+                            logger.info(f"✅ Получен новый listen key: {self._listen_key[:10]}...")
+                else:
+                    logger.warning("️ listen_key is None. Запрашиваем новый...")
+                    new_key = await self.rest.get_listen_key()
+                    if new_key:
+                        self._listen_key = new_key
             except Exception as e:
                 logger.error(f"❌ Ошибка при обновлении listen key: {e}")
-            return None
 
         # 6. Запуск User Data Stream с переданным callback-ом
         await self.ws.subscribe_user_data(listen_key, refresh_key_callback=refresh_listen_key_callback)
@@ -472,21 +483,66 @@ class Platform:
         
         await self.ws.subscribe_btc_streams()
 
-        # 7. Монитор здоровья (только логирование и мягкий сброс, без ручного управления ключами)
+        # 7. Монитор здоровья платформы и Guard (обновлённая версия)
         async def user_data_health_check():
+            blind_start_time = None
+            
             while getattr(self, '_running', True):
                 try:
-                    await asyncio.sleep(10)
-                    price_age = time.time() - getattr(self, '_last_price_update_ts', time.time())
+                    await asyncio.sleep(10) # Проверка каждые 10 секунд
                     
-                    if price_age > 60:
-                        logger.warning(f"⚠️ WS DEAD: No price updates for {price_age:.0f}s. Forcing main WS reconnect.")
-                        self._last_price_update_ts = time.time() # Сброс таймера, чтобы не спамить логами
+                    # 1. Оцениваем состояние каналов
+                    ws_age = time.time() - getattr(self, '_last_user_data_ts', time.time())
+                    rest_is_banned = getattr(self.rest, '_ban_active', lambda: False)()
+                    
+                    # 2. Определяем platform_health
+                    if ws_age < 45 and not rest_is_banned:
+                        new_health = "HEALTHY"
+                    elif ws_age >= 45 and not rest_is_banned:
+                        new_health = "DEGRADED" # WS упал, но REST жив
+                    else:
+                        new_health = "BLIND"    # Оба канала мертвы или REST забанен
                         
-                        # Мягко форсируем разрыв основного соединения, цикл ws.run() сам его пересоздаст
-                        if hasattr(self.ws, '_ws') and self.ws._ws:
-                            await self.ws._ws.close()
+                    # 3. Обновляем статусы во всех активных паспортах
+                    active_passports = self.passport_manager.get_active()
+                    for passport in active_passports:
+                        old_health = getattr(passport, 'platform_health', "HEALTHY")
+                        
+                        # Обновляем health только при смене состояния, чтобы не спамить диск
+                        if old_health != new_health:
+                            passport.platform_health = new_health
+                            passport.updated_at = datetime.now(timezone.utc).isoformat()
                             
+                            # Обновляем guard_status
+                            if new_health == "HEALTHY":
+                                passport.guard_status = "active"
+                                passport.add_timeline_event("HEALTH_RESTORED", "Connection restored, Guard active")
+                            elif new_health == "DEGRADED":
+                                passport.guard_status = "suspended"
+                                passport.add_timeline_event("HEALTH_DEGRADED", "WS lost, Guard suspended (REST fallback active)")
+                            elif new_health == "BLIND":
+                                passport.guard_status = "suspended"
+                                passport.add_timeline_event("HEALTH_BLIND", "Total blindness detected, Guard suspended")
+                            
+                            # Сохраняем изменение на диск
+                            self.passport_repository.save(passport)
+                            logger.warning(f"⚠️ [{passport.passport_id}] Health changed to {new_health}, Guard: {passport.guard_status}")
+
+                    # 4. Логика безопасного перезапуска при полной слепоте
+                    if new_health == "BLIND":
+                        if blind_start_time is None:
+                            blind_start_time = time.time()
+                            logger.critical("🚨 CRITICAL: Platform went BLIND. Starting 60s countdown to safe restart...")
+                        
+                        elapsed = time.time() - blind_start_time
+                        if elapsed > 60: # Если слепота длится больше 60 секунд
+                            logger.critical("🛑 MAX BLINDNESS REACHED. Initiating SAFE RESTART (Exit Code 42).")
+                            # Здесь можно добавить отправку уведомления в Telegram
+                            self._running = False # Останавливаем циклы
+                            sys.exit(42) # Специальный код для Watchdog-скрипта
+                    else:
+                        blind_start_time = None # Сбрасываем таймер, если связь вернулась
+
                 except asyncio.CancelledError:
                     break
                 except Exception as e:

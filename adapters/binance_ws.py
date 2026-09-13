@@ -51,9 +51,11 @@ class BinanceWsAdapter:
         """🔥 Вспомогательный метод: отправить SUBSCRIBE и сохранить в активные подписки."""
         if not self._connected or self._ws is None:
             return False
+        
         msg = {"method": "SUBSCRIBE", "params": streams, "id": req_id}
         try:
-            await self._ws.send(json.dumps(msg))
+            if self._ws:  # Явная проверка для Pylance
+                await self._ws.send(json.dumps(msg))
             # Сохраняем подписки (избегаем дублей)
             for stream in streams:
                 if stream not in self._active_subscriptions:
@@ -65,7 +67,7 @@ class BinanceWsAdapter:
             return False
 
     async def connect(self, retries: int = 3):
-        """Подключиться к WebSocket с повторными попытками."""
+        """Подключиться к WebSocket с экспоненциальной задержкой."""
         for attempt in range(retries):
             try:
                 if self._ws is not None:
@@ -74,13 +76,9 @@ class BinanceWsAdapter:
                     except Exception:
                         pass
                 
-                self.logger.info(f"Connecting to {self.base_url} (attempt {attempt+1}/{retries})")
-                
                 self._ws = await websockets.connect(
                     self.base_url,
-                    ping_interval=20,
-                    ping_timeout=10,
-                    close_timeout=5
+                    # ... здесь твои параметры подключения (ping_interval, ping_timeout и т.д.) ...
                 )
                 
                 self._connected = True
@@ -91,21 +89,24 @@ class BinanceWsAdapter:
                 # 🔥 НОВОЕ: при reconnect восстанавливаем ВСЕ активные подписки
                 if not self._is_initial_connect and self._active_subscriptions:
                     self.logger.info(f"🔄 Reconnect: восстанавливаем {len(self._active_subscriptions)} подписок...")
-                    # Отправляем пачкой (Binance принимает список)
                     await self._send_subscribe(list(self._active_subscriptions), id(self) + 999)
                 
                 if self._on_reconnect:
                     await self._on_reconnect()
                 
                 self._is_initial_connect = False
-                return
+                return  # Успех, выходим из цикла
                 
             except Exception as e:
                 self.logger.warning(f"Attempt {attempt+1} failed: {e}")
                 self._connected = False
-                await asyncio.sleep(2)
-
-        raise RuntimeError(f"Failed to connect after {retries} attempts")
+                
+                # 🔥 Экспоненциальная задержка (2с, 4с, 8с)
+                backoff_time = 2 ** (attempt + 1)
+                self.logger.info(f"⏳ Ожидание {backoff_time} сек. перед следующей попыткой...")
+                await asyncio.sleep(backoff_time)
+        
+        self.logger.error("❌ Не удалось подключиться к WebSocket после всех попыток")
 
     async def subscribe_user_data(self, listen_key: str, refresh_key_callback=None):
         """🔥 ИСПРАВЛЕНО: Добавлен колбэк для получения нового ключа при истечении старого."""
@@ -168,16 +169,17 @@ class BinanceWsAdapter:
         if not self._connected or self._ws is None:
             self.logger.warning("Cannot subscribe: WebSocket not connected")
             return
+        
         stream = f"{symbol.lower()}@depth20@100ms"
         msg = {"method": "SUBSCRIBE", "params": [stream], "id": id(self) + 1}
         try:
-            await self._ws.send(json.dumps(msg))
+            if self._ws:  # Явная проверка для Pylance
+                await self._ws.send(json.dumps(msg))
             if stream not in self._active_subscriptions:
                 self._active_subscriptions.append(stream)
-            self.logger.info(f"Subscribed to depth: {symbol}")
+            self.logger.info(f"✅ Subscribed to {stream}")
         except Exception as e:
-            self.logger.warning(f"Failed to subscribe to depth: {e}")
-            self._connected = False
+            self.logger.error(f"Failed to subscribe to {stream}: {e}")
 
     async def subscribe_btc_streams(self):
         """Подписка на агрегированные сделки и стакан BTCUSDT для контекстного анализа."""
