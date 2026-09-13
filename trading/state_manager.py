@@ -149,6 +149,13 @@ class StateManager:
             reason = "Order filled"
             position_size = abs(event_data.get('executed_qty', 0))
             position_price = event_data.get('price', 0)
+            
+            # Обновляем данные в паспорте (если они ещё не установлены в order_handler)
+            if passport.position_size == 0.0 and position_size > 0:
+                passport.position_size = position_size
+                passport.position_entry_price = position_price if position_price > 0 else passport.entry_price
+                # 🔥 На всякий случай тоже считаем PnL здесь (защита от двойного вызова не страшна)
+                passport.calculate_projected_pnls()
 
         elif event_type == "ORDER_PARTIAL":
             new_status = PassportStatus.OPEN.value

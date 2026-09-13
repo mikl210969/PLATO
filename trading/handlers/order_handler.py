@@ -69,15 +69,19 @@ class OrderHandlerMixin:
             executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
             avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
             self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': executed_qty})
+            
             if executed_qty > 0:
                 passport.position_size = abs(executed_qty)
                 # 🔥 Сверяем фактический размер с биржей (защита от чанков)
                 await self._reconcile_position_from_exchange(passport, symbol)                
                 passport.position_entry_price = avg_price if avg_price > 0.0 else passport.entry_price
-                await self.bus.publish(event_type="POSITION_OPENED", source="orchestrator", payload={
-                    "passport_id": passport.passport_id, "symbol": passport.symbol, "side": passport.side,
-                    "entry_price": passport.position_entry_price, "position_size": passport.position_size
-                }, symbol=passport.symbol)
+                
+                # 🔥 НОВОЕ: Инициализация проектного PnL и активация Guard при открытии позиции
+                passport.calculate_projected_pnls()
+                passport.guard_status = "active"
+                passport.platform_health = "HEALTHY"
+                passport.add_timeline_event("POSITION_OPENED", f"Position opened: size={passport.position_size}, entry={passport.position_entry_price}")
+
             self.repository.save(passport)
         elif order_status in ('CANCELED', 'EXPIRED', 'REJECTED'):
             self.state_manager.handle_event(passport, "ORDER_CANCELED", {"details": f"Order {order_status}"})

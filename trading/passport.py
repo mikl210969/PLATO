@@ -52,21 +52,50 @@ class TradePassport:
     commission: float = 0.0
     net_pnl: float = 0.0
     
-    # 🔥 НОВОЕ: Флаги активации и срабатывания уровней защиты
+    # Флаги активации
     tp1_activated: bool = False
     tp2_activated: bool = False
     sl_activated: bool = False
     
-    # Информация о Smart Sizing и Adaptive SL
+    # Информация о Smart Sizing
     sizing_info: Optional[Dict[str, Any]] = None
+
+    # 🔥 НОВОЕ: Мониторинг состояния платформы и защиты
+    platform_health: str = "HEALTHY"  # "HEALTHY", "DEGRADED", "BLIND"
+    guard_status: str = "inactive"    # "active", "suspended", "inactive"
     
-    # 🔥 НОВОЕ: Информация о Smart Sizing и Adaptive SL
-    sizing_info: Optional[Dict[str, Any]] = None
-    
+    # 🔥 НОВОЕ: Расчётный финансовый результат по уровням
+    tp1_projected_pnl: float = 0.0
+    tp2_projected_pnl: float = 0.0
+    sl_projected_pnl: float = 0.0
+    breakeven_projected_pnl: float = 0.0
+
+    def calculate_projected_pnls(self):
+        """Пересчитывает проектный PnL для всех уровней на основе текущей position_size."""
+        if self.position_size == 0:
+            return
+        
+        if self.side == "short":
+            self.tp1_projected_pnl = round((self.position_entry_price - self.tp1_price) * self.position_size, 2)
+            self.tp2_projected_pnl = round((self.position_entry_price - self.tp2_price) * self.position_size, 2)
+            self.sl_projected_pnl = round((self.position_entry_price - self.sl_price) * self.position_size, 2)
+            self.breakeven_projected_pnl = 0.0  # Безубыток всегда 0
+        else: # long
+            self.tp1_projected_pnl = round((self.tp1_price - self.position_entry_price) * self.position_size, 2)
+            self.tp2_projected_pnl = round((self.tp2_price - self.position_entry_price) * self.position_size, 2)
+            self.sl_projected_pnl = round((self.sl_price - self.position_entry_price) * self.position_size, 2)
+            self.breakeven_projected_pnl = 0.0
+
     def transition_to(self, new_status: str, reason: str = ""):
         """Безопасный переход статуса."""
         self.status = new_status
         self.updated_at = datetime.now(timezone.utc).isoformat()
+        
+        # 🔥 Автоматическое управление guard_status при закрытии
+        if new_status == PassportStatus.CLOSED.value:
+            self.guard_status = "inactive"
+            self.closed_at = self.updated_at
+            
         self.timeline.append({
             "timestamp": self.updated_at,
             "event": f"STATUS: {new_status}",
@@ -75,9 +104,6 @@ class TradePassport:
 
     def add_timeline_event(self, event_type: str, details: str):
         """Добавить событие в таймлайн с защитой от дубликатов."""
-        from datetime import datetime, timezone
-        
-        # Защита от дубликатов
         if self.timeline:
             last_event = self.timeline[-1]
             if last_event.get('event') == event_type:
@@ -85,7 +111,7 @@ class TradePassport:
                     last_ts = datetime.fromisoformat(last_event['timestamp'])
                     now = datetime.now(timezone.utc)
                     if (now - last_ts).total_seconds() < 1.0:
-                        return  # Пропускаем дубликат
+                        return
                 except:
                     pass
         
@@ -104,12 +130,12 @@ class TradePassport:
     def close(self, exit_reason: str, exit_price: float = 0.0, gross_pnl: float = 0.0, commission: float = 0.0):
         """Закрыть паспорт."""
         self.transition_to(PassportStatus.CLOSED.value, exit_reason)
-        self.closed_at = datetime.now(timezone.utc).isoformat()
         self.exit_reason = exit_reason
         self.exit_price = exit_price
         self.gross_pnl = gross_pnl
         self.commission = commission
         self.net_pnl = gross_pnl - commission
+        self.position_size = 0.0 # Обнуляем при закрытии
     
     def to_dict(self) -> Dict[str, Any]:
         """Преобразовать в словарь."""
@@ -137,9 +163,15 @@ class TradePassport:
             "gross_pnl": self.gross_pnl,
             "commission": self.commission,
             "net_pnl": self.net_pnl,
-            # 🔥 НОВОЕ: добавляем флаги в выгрузку
             "tp1_activated": self.tp1_activated,
             "tp2_activated": self.tp2_activated,
             "sl_activated": self.sl_activated,
-            "sizing_info": self.sizing_info
+            "sizing_info": self.sizing_info,
+            # 🔥 НОВОЕ: добавляем поля здоровья и проектного PnL
+            "platform_health": self.platform_health,
+            "guard_status": self.guard_status,
+            "tp1_projected_pnl": self.tp1_projected_pnl,
+            "tp2_projected_pnl": self.tp2_projected_pnl,
+            "sl_projected_pnl": self.sl_projected_pnl,
+            "breakeven_projected_pnl": self.breakeven_projected_pnl
         }

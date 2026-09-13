@@ -311,11 +311,26 @@ class PassportManager:
     
     def _handle_partial_close(self, passport, payload: Dict):
         closed_qty = payload.get("closed_qty", 0)
-        passport.position_size = abs(passport.position_size) - closed_qty
-        passport.exit_reason = payload.get("reason", "PARTIAL_CLOSE")
-        if passport.position_size <= 0:
+        exit_price = payload.get("exit_price", 0)
+        exit_reason = payload.get("exit_reason", "MANUAL_PARTIAL")
+        
+        passport.position_size = max(0.0, passport.position_size - closed_qty)
+        
+        # Если закрытие было по TP1, переносим SL в безубыток
+        if exit_reason == "TP1_HIT":
+            passport.sl_price = passport.position_entry_price
+            passport.tp1_activated = True
+            
+        # 🔥 НОВОЕ: Пересчитываем проектный PnL для оставшегося объема!
+        passport.calculate_projected_pnls()
+        
+        if passport.position_size <= 0.01:
             passport.status = "CLOSED"
-            passport.position_size = 0
+            passport.exit_reason = exit_reason
+            passport.exit_price = exit_price
+            passport.closed_at = datetime.now(timezone.utc).isoformat()
+        else:
+            passport.status = "PARTIAL_CLOSE"
     
     def _handle_external_close(self, passport, payload: Dict):
         passport.status = "CLOSED"
@@ -343,9 +358,15 @@ class PassportManager:
         passport.closed_at = datetime.now(timezone.utc).isoformat()
     
     def _handle_recovery_open(self, passport, payload: Dict):
+        """Восстановление позиции при старте или дрейфе."""
         passport.status = "OPEN"
         passport.position_size = abs(payload.get("position_size", passport.position_size))
         passport.position_entry_price = payload.get("entry_price", passport.entry_price)
+        
+        # 🔥 НОВОЕ: При восстановлении сразу считаем проектный PnL и активируем Guard
+        passport.calculate_projected_pnls()
+        passport.guard_status = "active"
+        passport.platform_health = "HEALTHY"
     
     # Утилиты
     def _calculate_pnl(self, passport, exit_price: float, qty: float) -> float:

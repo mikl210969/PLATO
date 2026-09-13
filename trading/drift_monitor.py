@@ -126,6 +126,11 @@ class DriftMonitor:
                 local_passport.position_size = exchange_position_size
                 local_passport.position_entry_price = local_passport.entry_price 
                 
+                # 🔥 Добавить это:
+                local_passport.calculate_projected_pnls()
+                local_passport.guard_status = "active"
+                local_passport.platform_health = "HEALTHY"
+                
                 self.passport_manager.update(local_passport)
                 self.repository.save(local_passport)
                 
