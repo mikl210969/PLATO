@@ -205,7 +205,11 @@ class PassportManager:
     def _handle_order_filled(self, passport, payload: Dict):
         passport.status = "OPEN"
         passport.position_size = abs(payload.get("quantity", passport.position_size))
-        passport.position_entry_price = payload.get("price", passport.entry_price)
+        passport.position_entry_price = payload.get("price", passport.position_entry_price)
+        
+        # 🔥 ДОБАВИТЬ ЭТИ ДВЕ СТРОКИ ЗДЕСЬ:
+        passport.calculate_projected_pnls()
+        self.repository.save(passport) # Сохраняем сразу после расчета
     
     def _handle_order_cancelled(self, passport, payload: Dict):
         passport.status = "CANCELLED"
@@ -363,10 +367,14 @@ class PassportManager:
         passport.position_size = abs(payload.get("position_size", passport.position_size))
         passport.position_entry_price = payload.get("entry_price", passport.entry_price)
         
-        # 🔥 НОВОЕ: При восстановлении сразу считаем проектный PnL и активируем Guard
+        # При восстановлении считаем проектный PnL
         passport.calculate_projected_pnls()
-        passport.guard_status = "active"
-        passport.platform_health = "HEALTHY"
+        
+        # Активируем Guard только если платформа не в состоянии слепоты
+        if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
+            passport.guard_status = "active"
+        
+        self.repository.save(passport)
     
     # Утилиты
     def _calculate_pnl(self, passport, exit_price: float, qty: float) -> float:

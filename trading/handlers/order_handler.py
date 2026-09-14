@@ -80,9 +80,16 @@ class OrderHandlerMixin:
         elif order_status in ('PARTIALLY_FILLED', 'FILLED'):
             executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
             avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
+<<<<<<< HEAD
+=======
+            
+            # Передаем событие в state_manager (он обновляет статус на OPEN или PARTIAL_CLOSE)
+            self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': executed_qty})
+>>>>>>> 7a2ca543491e2058e47c1a20d009a1784bc39aba
             
             # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Не перезаписываем position_size, а накапливаем
             if executed_qty > 0:
+<<<<<<< HEAD
                 # Получаем целевой размер из ордера
                 target_qty = 0.0
                 for o in getattr(passport, 'orders', []):
@@ -128,6 +135,32 @@ class OrderHandlerMixin:
                     passport.add_timeline_event("GUARD_PENDING", f"Waiting for full fill: {passport.filled_qty}/{passport.target_size}")
                 
                 self.repository.save(passport)
+=======
+                # 🔥 ИСПРАВЛЕНО 1: Сначала обновляем цену входа
+                passport.position_entry_price = avg_price if avg_price > 0.0 else passport.entry_price
+                
+                # 🔥 ИСПРАВЛЕНО 2: Сверяем фактический размер с биржей. 
+                # Это критически важно! _reconcile_position_from_exchange должен гарантированно 
+                # записать актуальный passport.position_size ПЕРЕД расчетом PnL.
+                await self._reconcile_position_from_exchange(passport, symbol)                
+                
+                # 🔥 ИСПРАВЛЕНО 3: Пересчитываем проектный PnL СТРОГО ПОСЛЕ актуализации размера позиции
+                passport.calculate_projected_pnls()
+                
+                # 🔥 ИСПРАВЛЕНО 4: Активируем Guard только если платформа не в состоянии слепоты.
+                # Не перезаписываем platform_health, этим управляет Health Monitor!
+                if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
+                    passport.guard_status = "active"
+                
+                # 🔥 ИСПРАВЛЕНО 5: Более точное событие в таймлайн (не спамим "OPENED" при каждом чанке)
+                event_name = "POSITION_FILLED" if order_status == 'FILLED' else "POSITION_PARTIALLY_FILLED"
+                passport.add_timeline_event(
+                    event_name, 
+                    f"Size: {passport.position_size}, Entry: {passport.position_entry_price}, PnL_TP1: {passport.tp1_projected_pnl}"
+                )
+
+            self.repository.save(passport)
+>>>>>>> 7a2ca543491e2058e47c1a20d009a1784bc39aba
             
         elif order_status in ('CANCELED', 'EXPIRED', 'REJECTED'):
             # Ордер отменен - фиксируем то, что успело исполниться

@@ -47,3 +47,6 @@ Start-Sleep -Seconds 2
 python main.py *> platform_run.log
 
 .\run_tests.ps1
+
+
+   .\start_bot.bat
