@@ -70,21 +70,42 @@ class TradePassport:
     sl_projected_pnl: float = 0.0
     breakeven_projected_pnl: float = 0.0
 
+    # 🔥 НОВОЕ: Поля для корректной обработки частичных исполнений (Partial Fill)
+    target_size: float = 0.0
+    filled_qty: float = 0.0
+    remaining_order_qty: float = 0.0
+    avg_price: float = 0.0
+    real_pnl: float = 0.0
+
     def calculate_projected_pnls(self):
-        """Пересчитывает проектный PnL для всех уровней на основе текущей position_size."""
-        if self.position_size == 0:
+        """
+        Рассчитать проектный и реальный PnL.
+        🔥 НОВОЕ: Разделение на real_pnl (факт) и projected_pnl (потенциал)
+        """
+        # Если позиция не открыта - обнуляем всё
+        if self.position_size == 0.0:
+            self.tp1_projected_pnl = 0.0
+            self.tp2_projected_pnl = 0.0
+            self.sl_projected_pnl = 0.0
+            self.breakeven_projected_pnl = 0.0
+            self.real_pnl = 0.0
             return
         
+        # Используем filled_qty, если он > 0, иначе position_size (для обратной совместимости)
+        effective_filled_qty = self.filled_qty if self.filled_qty > 0 else self.position_size
+        
         if self.side == "short":
+            self.real_pnl = round((self.position_entry_price - self.tp1_price) * effective_filled_qty, 2)
             self.tp1_projected_pnl = round((self.position_entry_price - self.tp1_price) * self.position_size, 2)
             self.tp2_projected_pnl = round((self.position_entry_price - self.tp2_price) * self.position_size, 2)
             self.sl_projected_pnl = round((self.position_entry_price - self.sl_price) * self.position_size, 2)
-            self.breakeven_projected_pnl = 0.0  # Безубыток всегда 0
-        else: # long
+        else:  # long
+            self.real_pnl = round((self.tp1_price - self.position_entry_price) * effective_filled_qty, 2)
             self.tp1_projected_pnl = round((self.tp1_price - self.position_entry_price) * self.position_size, 2)
             self.tp2_projected_pnl = round((self.tp2_price - self.position_entry_price) * self.position_size, 2)
             self.sl_projected_pnl = round((self.sl_price - self.position_entry_price) * self.position_size, 2)
-            self.breakeven_projected_pnl = 0.0
+        
+        self.breakeven_projected_pnl = 0.0
 
     def transition_to(self, new_status: str, reason: str = ""):
         """Безопасный переход статуса."""
@@ -173,5 +194,11 @@ class TradePassport:
             "tp1_projected_pnl": self.tp1_projected_pnl,
             "tp2_projected_pnl": self.tp2_projected_pnl,
             "sl_projected_pnl": self.sl_projected_pnl,
-            "breakeven_projected_pnl": self.breakeven_projected_pnl
+            "breakeven_projected_pnl": self.breakeven_projected_pnl,
+            # 🔥 НОВОЕ: добавляем поля для частичных исполнений
+            "target_size": self.target_size,
+            "filled_qty": self.filled_qty,
+            "remaining_order_qty": self.remaining_order_qty,
+            "avg_price": self.avg_price,
+            "real_pnl": self.real_pnl
         }
