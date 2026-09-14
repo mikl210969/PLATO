@@ -21,15 +21,15 @@ class StateManager:
         return {
             PassportStatus.SIGNAL_GENERATED.value: {
                 PassportStatus.ORDER_SENT.value,
-                PassportStatus.ORDER_ACK.value,  # 🔥 ШАГ 7.5: WS может прийти быстрее REST
-                PassportStatus.OPEN.value,       # 🔥 ШАГ 7.5: WS FILLED может прийти до REST
+                PassportStatus.ORDER_ACK.value,
+                PassportStatus.OPEN.value,
                 PassportStatus.CANCELED.value,
                 PassportStatus.CLOSED.value,
                 PassportStatus.FAILED.value,
             },
             PassportStatus.ORDER_SENT.value: {
                 PassportStatus.ORDER_ACK.value,
-                PassportStatus.OPEN.value,  # MARKET-ордер может сразу стать OPEN
+                PassportStatus.OPEN.value,
                 PassportStatus.CANCELED.value,
                 PassportStatus.FAILED.value
             },
@@ -59,9 +59,9 @@ class StateManager:
                 PassportStatus.CLOSED.value,
                 PassportStatus.FAILED.value
             },
-            PassportStatus.CANCELED.value: set(),  # Терминальное
-            PassportStatus.CLOSED.value: set(),    # Терминальное
-            PassportStatus.FAILED.value: set(),    # Терминальное
+            PassportStatus.CANCELED.value: set(),
+            PassportStatus.CLOSED.value: set(),
+            PassportStatus.FAILED.value: set(),
         }
 
     def can_transition(self, current_status: str, new_status: str) -> bool:
@@ -120,14 +120,11 @@ class StateManager:
         status = passport.status
         
         # 🔥 АБСОЛЮТНАЯ ЗАЩИТА: Если паспорт уже закрыт, мы НИЧЕГО не меняем.
-        # Это предотвращает перезапись правильных данных от DriftMonitor запоздалыми WS-событиями.
         if status == PassportStatus.CLOSED.value:
             return False
 
         new_status = None
         reason = ""
-        position_size = None
-        position_price = None
         close_data = None
 
         # 1. Определяем целевой статус и извлекаем данные
@@ -147,21 +144,13 @@ class StateManager:
         elif event_type == "ORDER_FILLED":
             new_status = PassportStatus.OPEN.value
             reason = "Order filled"
-            position_size = abs(event_data.get('executed_qty', 0))
-            position_price = event_data.get('price', 0)
-            
-            # Обновляем данные в паспорте (если они ещё не установлены в order_handler)
-            if passport.position_size == 0.0 and position_size > 0:
-                passport.position_size = position_size
-                passport.position_entry_price = position_price if position_price > 0 else passport.entry_price
-                # 🔥 На всякий случай тоже считаем PnL здесь (защита от двойного вызова не страшна)
-                passport.calculate_projected_pnls()
+            # 🔥 ВАЖНО: order_handler.py уже обновил position_size, position_entry_price 
+            # и вызвал calculate_projected_pnls(). Мы НЕ перезаписываем их здесь.
 
         elif event_type == "ORDER_PARTIAL":
             new_status = PassportStatus.OPEN.value
             reason = f"Partial fill: {event_data.get('executed_qty', 0)}"
-            position_size = abs(event_data.get('executed_qty', 0))
-            position_price = event_data.get('price', 0)
+            # 🔥 ВАЖНО: order_handler.py уже обновил position_size и position_entry_price.
 
         elif event_type == "ORDER_CANCELED":
             new_status = PassportStatus.CANCELED.value
@@ -241,11 +230,7 @@ class StateManager:
         if new_status == status and event_type != "ORDER_PARTIAL":
             return False
 
-        # 4. Применяем данные
-        if position_size is not None:
-            passport.position_size = position_size
-            passport.position_entry_price = position_price if position_price else passport.position_entry_price
-            
+        # 4. Применяем данные закрытия (если есть)
         if close_data:
             passport.exit_price = close_data['exit_price']
             passport.gross_pnl = close_data['gross_pnl']
