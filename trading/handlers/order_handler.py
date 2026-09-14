@@ -29,8 +29,8 @@ class OrderHandlerMixin:
     async def _on_order_update(self, event):
         """
         Обработка обновлений ордеров от биржи.
-        🔥 ИСПРАВЛЕНО: Корректная обработка частичных исполнений (Partial Fill) 
-        через отслеживание КУМУЛЯТИВНОГО объема во избежание задвоения.
+        🔥 ГАРАНТИРОВАННО: Платформа берет позицию под контроль и рассчитывает PnL 
+        даже при ЧАСТИЧНОМ исполнении (Partial Fill).
         """
         payload = getattr(event, 'payload', event)
         if isinstance(payload, str):
@@ -99,34 +99,35 @@ class OrderHandlerMixin:
                 })
                 return # Прерываем обработку, чтобы не задвоить размер и PnL
 
-            # Обновляем состояние через state_manager (передаем инкрементальный объем для логики переходов)
-            self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': incremental_fill})
-            
-            # 🔥 Обновляем метрики паспорта строго на основе КУМУЛЯТИВНЫХ данных от биржи
+            # ШАГ 1: Обновляем метрики паспорта строго на основе КУМУЛЯТИВНЫХ данных от биржи
             passport.filled_qty = cumulative_executed_qty
             passport.position_size = cumulative_executed_qty
             passport.position_entry_price = avg_price if avg_price > 0.0 else passport.position_entry_price
             
-            # Пересчитываем PnL строго после актуализации размера позиции
+            # ШАГ 2: ПРИНУДИТЕЛЬНО пересчитываем проектный PnL. 
+            # Так как position_size уже > 0, поля tp1/tp2/sl_projected_pnl будут заполнены корректно.
             passport.calculate_projected_pnls()
             
-            # Логируем в таймлайн
+            # ШАГ 3: Обновляем статус Guard в зависимости от здоровья платформы
+            current_health = getattr(passport, 'platform_health', 'HEALTHY')
+            if current_health == 'HEALTHY':
+                passport.guard_status = "active"
+                passport.add_timeline_event("GUARD_ACTIVATED", f"Guard active on {passport.position_size} SOL. PnL TP1: {passport.tp1_projected_pnl}")
+            else:
+                passport.guard_status = "suspended"
+                passport.add_timeline_event("GUARD_SUSPENDED", f"Health is {current_health}. PnL calculated, but Guard suspended for safety.")
+            
+            # ШАГ 4: Логируем в таймлайн для прозрачности
             event_name = "FULLY_FILLED" if order_status == 'FILLED' else "PARTIAL_FILL"
             passport.add_timeline_event(
                 event_name,
                 f"Filled {incremental_fill:.4f} @ {avg_price:.2f}, Total: {passport.position_size:.4f}, Avg: {passport.position_entry_price:.2f}"
             )
             
-            # 🔥 Управление Guard: активируем, если исполнение полное или платформа здорова
-            target_size = getattr(passport, 'target_size', cumulative_executed_qty)
-            if order_status == 'FILLED' or cumulative_executed_qty >= target_size:
-                if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
-                    passport.guard_status = "active"
-                    passport.add_timeline_event("GUARD_ACTIVATED", f"Guard activated on {passport.position_size} SOL")
-            else:
-                passport.guard_status = "pending_full_fill"
-                passport.add_timeline_event("GUARD_PENDING", f"Waiting for full fill: {passport.filled_qty}/{target_size}")
+            # ШАГ 5: Передаем в state_manager для обновления общего статуса (OPEN / PARTIAL_CLOSE)
+            self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': incremental_fill})
             
+            # ШАГ 6: КРИТИЧЕСКИ ВАЖНО - сохраняем паспорт в репозиторий, чтобы зафиксировать рассчитанные PnL
             self.repository.save(passport)
             
         elif order_status in ('CANCELED', 'EXPIRED', 'REJECTED'):
@@ -140,6 +141,7 @@ class OrderHandlerMixin:
                 # Активируем Guard на фактически исполненный объем, если платформа не в слепоте
                 if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
                     passport.guard_status = "active"
+                # Пересчитываем PnL для оставшегося объема перед сохранением
                 passport.calculate_projected_pnls()
             else:
                 self.state_manager.handle_event(passport, "ORDER_CANCELED", {"details": f"Order {order_status}"})
@@ -147,6 +149,10 @@ class OrderHandlerMixin:
             self.repository.save(passport)
 
     async def _on_order_filled(self, event):
+        """
+        Обработка полного исполнения ордера через EventBus.
+        🔥 ИСПРАВЛЕНО: Добавлен расчет projected_pnl и защита от дубликатов.
+        """
         payload = event.payload
         client_order_id = payload.get('client_order_id')
         executed_qty = float(payload.get('executed_qty', 0) or 0)
@@ -181,6 +187,7 @@ class OrderHandlerMixin:
             self._log("filled_passport_not_found", {"client_order_id": client_order_id, "source": source})
             return
 
+        # Обработка закрывающих ордеров (TP1, TP2, SL, External)
         if close_level:
             passport.position_size -= executed_qty
             exit_reason = {'C1': 'TP1_HIT', 'C2': 'TP2_HIT', 'CS': 'SL_HIT', 'CE': 'EXTERNAL_CLOSE'}.get(close_level, 'MANUAL_CLOSE')
@@ -192,10 +199,13 @@ class OrderHandlerMixin:
                 self._log("position_fully_closed", {"passport_id": passport.passport_id, "exit_reason": exit_reason, "closed_qty": executed_qty, "gross_pnl": passport.gross_pnl})
             else:
                 self.state_manager.handle_event(passport, "PARTIAL_CLOSE", {'closed_qty': executed_qty, 'exit_price': avg_price, 'exit_reason': exit_reason})
+                # 🔥 Пересчитываем PnL после частичного закрытия
+                passport.calculate_projected_pnls()
                 self.repository.save(passport)
                 self._log("position_partially_closed", {"passport_id": passport.passport_id, "exit_reason": exit_reason, "closed_qty": executed_qty, "remaining_size": passport.position_size})
             return
 
+        # Обработка открытия позиции (не закрывающий ордер)
         transitioned = self.state_manager.handle_event(passport, "ORDER_FILLED", {'executed_qty': executed_qty, 'price': avg_price})
         if hasattr(self, 'verifier'): await self.verifier.cancel_verification(passport.passport_id)
 
@@ -206,6 +216,10 @@ class OrderHandlerMixin:
                 # 🔥 Сверяем фактический размер с биржей (защита от чанков)
                 await self._reconcile_position_from_exchange(passport, passport.symbol)                
                 if avg_price > 0: passport.position_entry_price = avg_price
+                
+                # 🔥 КРИТИЧНО: Пересчитываем проектный PnL после обновления размера
+                passport.calculate_projected_pnls()
+                
                 self.repository.save(passport)
                 self._log("volume_reconciled", {"passport_id": passport.passport_id, "old_size": old_size, "new_size": executed_qty, "source": source})
                 await self.bus.publish(event_type="POSITION_OPENED", source=source, payload={"passport_id": passport.passport_id, "symbol": passport.symbol, "side": passport.side, "entry_price": passport.position_entry_price, "position_size": passport.position_size}, symbol=passport.symbol)
@@ -216,19 +230,63 @@ class OrderHandlerMixin:
         await self.bus.publish(event_type="POSITION_OPENED", source=source, payload={"passport_id": passport.passport_id, "symbol": passport.symbol, "side": passport.side, "entry_price": passport.position_entry_price, "position_size": passport.position_size}, symbol=passport.symbol)
 
     async def _on_order_partial(self, event):
+        """
+        Обработка частичного исполнения ордера через EventBus.
+        🔥 ИСПРАВЛЕНО: Теперь обновляет position_size и рассчитывает projected_pnl.
+        """
         payload = event.payload
         client_order_id = payload.get('client_order_id')
         executed_qty = float(payload.get('executed_qty', 0) or 0)
         avg_price = float(payload.get('avg_price', 0) or 0)
-        if not client_order_id: return
+        
+        if not client_order_id:
+            return
 
         passport = next((p for p in self.passport_manager.get_all() if p.status not in ("CLOSED", "CANCELED", "FAILED") and any(o.get('client_order_id') == client_order_id for o in p.orders)), None)
-        if not passport: return
+        if not passport:
+            return
 
-        self.state_manager.handle_event(passport, "ORDER_PARTIAL", {'executed_qty': executed_qty, 'price': avg_price})
+        # 🔥 ВАЖНО: Binance присылает КУМУЛЯТИВНЫЙ объем в executed_qty
+        # Проверяем, не дубликат ли это
+        previous_filled = getattr(passport, 'filled_qty', 0.0)
+        incremental_fill = executed_qty - previous_filled
+        
+        if incremental_fill <= 0:
+            self._log("partial_fill_duplicate_ignored", {
+                "passport_id": passport.passport_id,
+                "client_order_id": client_order_id,
+                "executed_qty": executed_qty,
+                "previous_filled": previous_filled
+            })
+            return
+
+        # Обновляем состояние через state_manager
+        self.state_manager.handle_event(passport, "ORDER_PARTIAL", {'executed_qty': incremental_fill, 'price': avg_price})
+        
+        # 🔥 Обновляем метрики паспорта
+        passport.filled_qty = executed_qty
+        passport.position_size = executed_qty
+        if avg_price > 0:
+            passport.position_entry_price = avg_price
+        
+        # 🔥 КРИТИЧНО: Пересчитываем проектный PnL
+        passport.calculate_projected_pnls()
+        
+        # Логируем в таймлайн
+        passport.add_timeline_event(
+            "PARTIAL_FILL",
+            f"Filled {incremental_fill:.4f} @ {avg_price:.2f}, Total: {passport.position_size:.4f}"
+        )
+        
         self.repository.save(passport)
-        self._log("order_partial_processed", {"passport_id": passport.passport_id, "client_order_id": client_order_id, "executed_qty": executed_qty})
-
+        self._log("order_partial_processed", {
+            "passport_id": passport.passport_id, 
+            "client_order_id": client_order_id, 
+            "executed_qty": executed_qty,
+            "position_size": passport.position_size,
+            "projected_pnl_tp1": passport.tp1_projected_pnl
+        })
+        
     async def _on_ttl_expired(self, event):
         payload = event.payload
         passport_id, symbol, order_id = payload.get('passport_id'), payload.get('symbol'), payload.get('order_id')
