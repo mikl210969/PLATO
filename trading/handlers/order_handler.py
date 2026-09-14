@@ -21,6 +21,8 @@ class OrderHandlerMixin:
     verifier: "OrderVerifier"
     config: Dict[str, Any]
     _log: Any
+    logger: Any  # 🔥 ДОБАВЛЕНО: объявление logger
+    rest: Any    # 🔥 ДОБАВЛЕНО: объявление rest
 
     def get_trader(self, symbol: str) -> Any:
         raise NotImplementedError("get_trader must be implemented by the main class")
@@ -29,18 +31,16 @@ class OrderHandlerMixin:
     async def _on_order_update(self, event):
         """
         Обработка обновлений ордеров от биржи.
-        🔥 ГАРАНТИРОВАННО: Платформа берет позицию под контроль и рассчитывает PnL 
-        даже при ЧАСТИЧНОМ исполнении (Partial Fill).
+        🔥 ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Прямое и жесткое обновление размера позиции 
+        на основе кумулятивного объема от Binance.
         """
         payload = getattr(event, 'payload', event)
         if isinstance(payload, str):
             try: 
                 payload = json.loads(payload)
             except Exception:
-                self._log("order_update_payload_invalid_string", {"payload": payload})
                 return
         if not isinstance(payload, dict):
-            self._log("order_update_payload_not_dict", {"type": str(type(payload))})
             return
 
         order_data = payload.get('o', payload)
@@ -48,7 +48,6 @@ class OrderHandlerMixin:
         order_status = str(order_data.get('status') or order_data.get('X') or '')
         symbol = str(order_data.get('symbol') or order_data.get('s') or '')
         
-        self._log("order_update_received", {"client_order_id": client_order_id, "status": order_status, "symbol": symbol})
         if not client_order_id: 
             return
 
@@ -65,13 +64,10 @@ class OrderHandlerMixin:
                 }, symbol=symbol)
                 return
 
-        # 2. Поиск паспорта по client_order_id
-        passport = next((p for p in self.passport_manager.get_active() if any(isinstance(o, dict) and str(o.get('client_order_id')) == client_order_id for o in getattr(p, 'orders', []))), None)
+        # 2. Поиск паспорта
+        passport = next((p for p in self.passport_manager.get_all() if any(isinstance(o, dict) and str(o.get('client_order_id')) == client_order_id for o in getattr(p, 'orders', []))), None)
         if not passport:
-            self._log("passport_not_found_for_order", {"client_order_id": client_order_id})
             return
-
-        self._log("passport_found_for_order_update", {"passport_id": passport.passport_id, "new_status": order_status})
 
         # 3. Обработка статусов
         if order_status == 'NEW':
@@ -79,73 +75,69 @@ class OrderHandlerMixin:
             self.repository.save(passport)
             
         elif order_status in ('PARTIALLY_FILLED', 'FILLED'):
-            # ВАЖНО: Binance присылает КУМУЛЯТИВНЫЙ (общий) объем исполнения в 'z' или 'executed_qty'
+            # 1. Читаем данные из события
             cumulative_executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
             avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
             
-            # Получаем ранее известный исполненный объем из паспорта
-            previous_filled_qty = getattr(passport, 'filled_qty', 0.0)
-            
-            # Рассчитываем инкрементальный (НОВЫЙ) объем
-            incremental_fill = cumulative_executed_qty - previous_filled_qty
-            
-            # 🔥 ЗАЩИТА ОТ ДУБЛИКАТОВ: если новый объем <= 0, значит событие уже обработано
-            if incremental_fill <= 0:
-                self._log("duplicate_fill_ignored", {
-                    "passport_id": passport.passport_id,
-                    "client_order_id": client_order_id,
-                    "cumulative_qty": cumulative_executed_qty,
-                    "previous_filled": previous_filled_qty
-                })
-                return # Прерываем обработку, чтобы не задвоить размер и PnL
+            # 🔥 КРИТИЧЕСКАЯ ЗАЩИТА ОТ ОБНУЛЕНИЯ:
+            # Если биржа прислала статус FILLED, но объем = 0, мы НЕ обнуляем паспорт!
+            if cumulative_executed_qty == 0.0:
+                self.logger.warning(f"⚠️ [ORDER_HANDLER] Получен статус FILLED, но executed_qty=0 для {passport.passport_id}. Пытаемся восстановить данные через REST...")
+                
+                # Пытаемся получить реальный размер позиции с биржи, если REST не забанен
+                if not getattr(self.rest, '_ban_active', lambda: False)():
+                    try:
+                        exchange_pos = await self.rest.get_position(symbol)
+                        if exchange_pos:
+                            real_size = abs(float(exchange_pos.get('positionAmt', 0) or 0.0))
+                            real_price = float(exchange_pos.get('entryPrice', 0) or 0.0)
+                            
+                            if real_size > 0.0:
+                                cumulative_executed_qty = real_size
+                                avg_price = real_price if real_price > 0.0 else avg_price
+                                self.logger.info(f"✅ [ORDER_HANDLER] Размер успешно восстановлен из REST: {cumulative_executed_qty} @ {avg_price}")
+                            else:
+                                self.logger.warning(f"⚠️ [ORDER_HANDLER] На бирже тоже размер 0. Ждем DriftMonitor.")
+                    except Exception as e:
+                        self.logger.error(f"❌ [ORDER_HANDLER] Ошибка при запросе позиции из REST: {e}")
+                else:
+                    self.logger.warning("⚠️ [ORDER_HANDLER] REST забанен, пропускаем обновление, чтобы не занулить паспорт. DriftMonitor исправит это позже.")
+                    # Прерываем обработку, чтобы не записать 0.0 в паспорт
+                    return 
 
-            # ШАГ 1: Обновляем метрики паспорта строго на основе КУМУЛЯТИВНЫХ данных от биржи
-            passport.filled_qty = cumulative_executed_qty
-            passport.position_size = cumulative_executed_qty
-            passport.position_entry_price = avg_price if avg_price > 0.0 else passport.position_entry_price
-            
-            # ШАГ 2: ПРИНУДИТЕЛЬНО пересчитываем проектный PnL. 
-            # Так как position_size уже > 0, поля tp1/tp2/sl_projected_pnl будут заполнены корректно.
-            passport.calculate_projected_pnls()
-            
-            # ШАГ 3: Обновляем статус Guard в зависимости от здоровья платформы
-            current_health = getattr(passport, 'platform_health', 'HEALTHY')
-            if current_health == 'HEALTHY':
-                passport.guard_status = "active"
-                passport.add_timeline_event("GUARD_ACTIVATED", f"Guard active on {passport.position_size} SOL. PnL TP1: {passport.tp1_projected_pnl}")
-            else:
-                passport.guard_status = "suspended"
-                passport.add_timeline_event("GUARD_SUSPENDED", f"Health is {current_health}. PnL calculated, but Guard suspended for safety.")
-            
-            # ШАГ 4: Логируем в таймлайн для прозрачности
-            event_name = "FULLY_FILLED" if order_status == 'FILLED' else "PARTIAL_FILL"
-            passport.add_timeline_event(
-                event_name,
-                f"Filled {incremental_fill:.4f} @ {avg_price:.2f}, Total: {passport.position_size:.4f}, Avg: {passport.position_entry_price:.2f}"
-            )
-            
-            # ШАГ 5: Передаем в state_manager для обновления общего статуса (OPEN / PARTIAL_CLOSE)
-            self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': incremental_fill})
-            
-            # ШАГ 6: КРИТИЧЕСКИ ВАЖНО - сохраняем паспорт в репозиторий, чтобы зафиксировать рассчитанные PnL
-            self.repository.save(passport)
-            
-        elif order_status in ('CANCELED', 'EXPIRED', 'REJECTED'):
-            # Ордер отменен - фиксируем то, что успело исполниться
-            current_filled = getattr(passport, 'filled_qty', 0.0)
-            if current_filled > 0:
+            # 2. Если мы дошли сюда, значит cumulative_executed_qty > 0 (либо изначально, либо после REST)
+            if cumulative_executed_qty > 0:
+                # Жестко обновляем размер и цену входа
+                passport.position_size = cumulative_executed_qty
+                if avg_price > 0.0:
+                    passport.position_entry_price = avg_price
+                
+                passport.filled_qty = cumulative_executed_qty
+                
+                # 🔥 ИСПРАВЛЕНИЕ: Жестко переводим статус в OPEN, если он застрял в ORDER_SENT
+                # Это критично, чтобы Guard и RiskManager подхватили позицию при частичном исполнении
+                if passport.status in ("ORDER_SENT", "PENDING"):
+                    passport.status = "OPEN"
+                    passport.add_timeline_event("STATUS: OPEN", f"Order filled (Partial/Full: {cumulative_executed_qty})")
+
+                # 🔥 Принудительно пересчитываем PnL, теперь размер точно > 0
+                passport.calculate_projected_pnls()
+                
+                # Логируем в таймлайн с реальными цифрами
+                event_name = "FULLY_FILLED" if order_status == 'FILLED' else "PARTIAL_FILL"
                 passport.add_timeline_event(
-                    "ORDER_CANCELLED_WITH_PARTIAL_FILL",
-                    f"Order cancelled. Total filled: {current_filled}"
+                    event_name,
+                    f"Filled {cumulative_executed_qty} @ {avg_price:.2f}, Total Size: {passport.position_size}, PnL_TP1: {passport.tp1_projected_pnl}"
                 )
-                # Активируем Guard на фактически исполненный объем, если платформа не в слепоте
+                
+                # Управление Guard
                 if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
                     passport.guard_status = "active"
-                # Пересчитываем PnL для оставшегося объема перед сохранением
-                passport.calculate_projected_pnls()
-            else:
-                self.state_manager.handle_event(passport, "ORDER_CANCELED", {"details": f"Order {order_status}"})
-            
+                    passport.add_timeline_event("GUARD_ACTIVATED", f"Guard active on {passport.position_size} SOL")
+                else:
+                    passport.guard_status = "suspended"
+                    passport.add_timeline_event("GUARD_SUSPENDED", "Health is DEGRADED, Guard suspended")
+
             self.repository.save(passport)
 
     async def _on_order_filled(self, event):
@@ -232,26 +224,34 @@ class OrderHandlerMixin:
     async def _on_order_partial(self, event):
         """
         Обработка частичного исполнения ордера через EventBus.
-        🔥 ИСПРАВЛЕНО: Теперь обновляет position_size и рассчитывает projected_pnl.
+        🔥 ИСПРАВЛЕНО: Гарантированное обновление position_size и расчет projected_pnl 
+        с защитой от дубликатов и ошибок типов данных.
         """
         payload = event.payload
-        client_order_id = payload.get('client_order_id')
-        executed_qty = float(payload.get('executed_qty', 0) or 0)
-        avg_price = float(payload.get('avg_price', 0) or 0)
+        client_order_id = str(payload.get('client_order_id', ''))
+        
+        # 1. Явное приведение типов к float для избежания ошибок сравнения (например, "0.41" == 0)
+        executed_qty = float(payload.get('executed_qty', 0) or 0.0)
+        avg_price = float(payload.get('avg_price', 0) or 0.0)
         
         if not client_order_id:
             return
 
-        passport = next((p for p in self.passport_manager.get_all() if p.status not in ("CLOSED", "CANCELED", "FAILED") and any(o.get('client_order_id') == client_order_id for o in p.orders)), None)
+        # 2. Ищем активный паспорт
+        passport = next((p for p in self.passport_manager.get_all() 
+                         if p.status not in ("CLOSED", "CANCELED", "FAILED") 
+                         and any(str(o.get('client_order_id')) == client_order_id for o in getattr(p, 'orders', []))), None)
+        
         if not passport:
+            self._log("passport_not_found_for_partial", {"client_order_id": client_order_id})
             return
 
-        # 🔥 ВАЖНО: Binance присылает КУМУЛЯТИВНЫЙ объем в executed_qty
-        # Проверяем, не дубликат ли это
-        previous_filled = getattr(passport, 'filled_qty', 0.0)
-        incremental_fill = executed_qty - previous_filled
+        # 3.  ВАЖНО: Binance обычно присылает КУМУЛЯТИВНЫЙ объем. 
+        # Но мы защищаемся и на случай, если в payload уже пришел инкрементальный объем.
+        previous_filled = float(getattr(passport, 'filled_qty', 0.0))
         
-        if incremental_fill <= 0:
+        if abs(executed_qty - previous_filled) < 0.0001:
+            # Это точный дубликат события, игнорируем
             self._log("partial_fill_duplicate_ignored", {
                 "passport_id": passport.passport_id,
                 "client_order_id": client_order_id,
@@ -259,32 +259,53 @@ class OrderHandlerMixin:
                 "previous_filled": previous_filled
             })
             return
-
-        # Обновляем состояние через state_manager
-        self.state_manager.handle_event(passport, "ORDER_PARTIAL", {'executed_qty': incremental_fill, 'price': avg_price})
         
-        # 🔥 Обновляем метрики паспорта
-        passport.filled_qty = executed_qty
-        passport.position_size = executed_qty
-        if avg_price > 0:
+        if executed_qty < previous_filled:
+            # Сценарий: в событии пришел инкрементальный объем (новый кусок)
+            incremental_fill = executed_qty
+            new_cumulative_filled = previous_filled + incremental_fill
+        else:
+            # Сценарий: в событии пришел кумулятивный объем (стандарт Binance)
+            incremental_fill = executed_qty - previous_filled
+            new_cumulative_filled = executed_qty
+
+        if incremental_fill <= 0:
+            return
+
+        # 4. Обновляем состояние через state_manager (передаем именно инкремент)
+        self.state_manager.handle_event(passport, "ORDER_PARTIAL", {
+            'executed_qty': incremental_fill, 
+            'price': avg_price
+        })
+        
+        # 5. 🔥 КРИТИЧНО: Обновляем метрики паспорта строго новыми рассчитанными значениями
+        passport.filled_qty = new_cumulative_filled
+        passport.position_size = new_cumulative_filled
+        
+        if avg_price > 0.0:
             passport.position_entry_price = avg_price
         
-        # 🔥 КРИТИЧНО: Пересчитываем проектный PnL
+        # 6. 🔥 КРИТИЧНО: Пересчитываем проектный PnL сразу после обновления размера
         passport.calculate_projected_pnls()
         
-        # Логируем в таймлайн
+        # 7. Логируем в таймлайн с актуальными цифрами PnL для визуальной проверки
         passport.add_timeline_event(
             "PARTIAL_FILL",
-            f"Filled {incremental_fill:.4f} @ {avg_price:.2f}, Total: {passport.position_size:.4f}"
+            f"Filled {incremental_fill:.4f} @ {avg_price:.2f}, Total Size: {passport.position_size:.4f}, PnL_TP1: {passport.tp1_projected_pnl}"
         )
         
+        # 8. Сохраняем в репозиторий
         self.repository.save(passport)
-        self._log("order_partial_processed", {
+        
+        # 9. Финальный отладочный лог: мы ДОЛЖНЫ видеть здесь НЕ нулевые значения PnL
+        self._log("order_partial_processed_success", {
             "passport_id": passport.passport_id, 
             "client_order_id": client_order_id, 
-            "executed_qty": executed_qty,
-            "position_size": passport.position_size,
-            "projected_pnl_tp1": passport.tp1_projected_pnl
+            "incremental_fill": incremental_fill,
+            "new_position_size": passport.position_size,
+            "position_entry_price": passport.position_entry_price,
+            "projected_pnl_tp1": passport.tp1_projected_pnl,
+            "projected_pnl_sl": passport.sl_projected_pnl
         })
         
     async def _on_ttl_expired(self, event):
@@ -355,7 +376,7 @@ class OrderHandlerMixin:
             return
 
         # ====================================================================
-        # 🔥 СЛУЧАЙ 2: позиции нет нигде → безопасно отменяем и закрываем
+        #  СЛУЧАЙ 2: позиции нет нигде → безопасно отменяем и закрываем
         # ====================================================================
         cancel_result = await trader.cancel_order(symbol, order_id)
         if cancel_result.get('success') or cancel_result.get('code') == -2011:
