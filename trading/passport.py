@@ -1,5 +1,16 @@
 """
 Паспорт сделки — единый источник правды (SSOT).
+
+🔥 ИСПРАВЛЕНО 2026-09-15:
+- calculate_projected_pnls: цена входа берётся по цепочке
+  position_entry_price → avg_price → entry_price (сигнальная), поэтому проектный
+  PnL больше не считает от нуля.
+- real_pnl больше НЕ считается от цены TP1 (это давало -720.79 при entry=0).
+  Теперь: для закрытой позиции = gross_pnl; для открытой = unrealized PnL,
+  если передана current_price; иначе 0.0.
+- close(): если вызывающий код не передал gross_pnl, он вычисляется из цены входа
+  и цены выхода (защита от нулевого PnL при закрытии).
+- Добавлен helper apply_fill() для корректной обработки частичных исполнений.
 """
 
 from dataclasses import dataclass, field
@@ -77,37 +88,85 @@ class TradePassport:
     avg_price: float = 0.0
     real_pnl: float = 0.0
 
-    def calculate_projected_pnls(self):
+    # ──────────────────────────────────────────────────────────────
+    # Вспомогательные методы
+    # ──────────────────────────────────────────────────────────────
+
+    def get_effective_entry_price(self) -> float:
         """
-        Рассчитать проектный и реальный PnL.
-        🔥 ИСПРАВЛЕНО: Projected PnL считается от target_size, Real PnL — от filled_qty.
+        Фактическая цена входа по цепочке приоритетов:
+        позиция (из филлов) → avg_price → сигнальная entry_price.
         """
-        # Если позиции нет вообще
-        if self.position_size == 0.0 and self.filled_qty == 0.0:
+        if self.position_entry_price > 0.0:
+            return self.position_entry_price
+        if self.avg_price > 0.0:
+            return self.avg_price
+        return self.entry_price
+
+    def calculate_projected_pnls(self, current_price: float = 0.0):
+        """
+        Рассчитать проектный PnL по уровням и текущий/реализованный PnL.
+
+        🔥 ИСПРАВЛЕНО:
+        - Проектный PnL считается от эффективной цены входа (не от нуля).
+        - real_pnl: закрытая позиция → gross_pnl; открытая → unrealized PnL
+          по current_price (если передана); иначе 0.0.
+        """
+        entry = self.get_effective_entry_price()
+        size = self.position_size if self.position_size > 0.0 else self.filled_qty
+        target = self.target_size if self.target_size > 0.0 else size
+
+        # Позиции нет вообще и цели нет — обнуляем всё
+        if entry <= 0.0 or (size <= 0.0 and target <= 0.0):
             self.tp1_projected_pnl = 0.0
             self.tp2_projected_pnl = 0.0
             self.sl_projected_pnl = 0.0
             self.breakeven_projected_pnl = 0.0
             self.real_pnl = 0.0
             return
-        
-        # Реальный PnL считается от фактически исполненного объема
-        effective_filled = self.filled_qty if self.filled_qty > 0 else self.position_size
-        # Проектный PnL считается от целевого размера (или текущего, если целевой не задан)
-        effective_target = self.target_size if self.target_size > 0 else self.position_size
-        
+
+        # Проектный PnL по уровням — от целевого размера
         if self.side == "short":
-            self.real_pnl = round((self.position_entry_price - self.tp1_price) * effective_filled, 2)
-            self.tp1_projected_pnl = round((self.position_entry_price - self.tp1_price) * effective_target, 2)
-            self.tp2_projected_pnl = round((self.position_entry_price - self.tp2_price) * effective_target, 2)
-            self.sl_projected_pnl = round((self.position_entry_price - self.sl_price) * effective_target, 2)
+            self.tp1_projected_pnl = round((entry - self.tp1_price) * target, 2)
+            self.tp2_projected_pnl = round((entry - self.tp2_price) * target, 2)
+            self.sl_projected_pnl = round((entry - self.sl_price) * target, 2)
         else:  # long
-            self.real_pnl = round((self.tp1_price - self.position_entry_price) * effective_filled, 2)
-            self.tp1_projected_pnl = round((self.tp1_price - self.position_entry_price) * effective_target, 2)
-            self.tp2_projected_pnl = round((self.tp2_price - self.position_entry_price) * effective_target, 2)
-            self.sl_projected_pnl = round((self.sl_price - self.position_entry_price) * effective_target, 2)
-        
+            self.tp1_projected_pnl = round((self.tp1_price - entry) * target, 2)
+            self.tp2_projected_pnl = round((self.tp2_price - entry) * target, 2)
+            self.sl_projected_pnl = round((self.sl_price - entry) * target, 2)
+
         self.breakeven_projected_pnl = 0.0
+
+        # 🔥 Реальный PnL: реализованный (закрытая позиция) или unrealized (открытая)
+        if self.status == PassportStatus.CLOSED.value:
+            self.real_pnl = self.gross_pnl
+        elif current_price > 0.0 and size > 0.0:
+            if self.side == "short":
+                self.real_pnl = round((entry - current_price) * size, 2)
+            else:
+                self.real_pnl = round((current_price - entry) * size, 2)
+        else:
+            self.real_pnl = 0.0
+
+    def apply_fill(self, cumulative_qty: float, avg_price: float = 0.0):
+        """
+        Обновить состояние позиции по КУМУЛЯТИВНЫМ данным исполнения.
+        Единая точка для WS- и REST-событий филлов.
+        """
+        if cumulative_qty <= 0.0:
+            return
+
+        self.filled_qty = cumulative_qty
+        self.position_size = cumulative_qty
+
+        if avg_price > 0.0:
+            self.avg_price = avg_price
+            self.position_entry_price = avg_price
+
+        target = self.target_size if self.target_size > 0.0 else cumulative_qty
+        self.remaining_order_qty = max(0.0, target - cumulative_qty)
+
+        self.calculate_projected_pnls()
 
     def transition_to(self, new_status: str, reason: str = ""):
         """Безопасный переход статуса."""
@@ -135,7 +194,7 @@ class TradePassport:
                     now = datetime.now(timezone.utc)
                     if (now - last_ts).total_seconds() < 1.0:
                         return
-                except:
+                except Exception:
                     pass
         
         self.timeline.append({
@@ -151,14 +210,29 @@ class TradePassport:
         self.updated_at = datetime.now(timezone.utc).isoformat()
     
     def close(self, exit_reason: str, exit_price: float = 0.0, gross_pnl: float = 0.0, commission: float = 0.0):
-        """Закрыть паспорт."""
+        """
+        Закрыть паспорт.
+        🔥 ИСПРАВЛЕНО: если вызывающий код не передал gross_pnl, он вычисляется
+        из эффективной цены входа и цены выхода (защита от нулевого PnL).
+        """
+        closed_qty = self.position_size if self.position_size > 0.0 else self.filled_qty
+        entry = self.get_effective_entry_price()
+
         self.transition_to(PassportStatus.CLOSED.value, exit_reason)
         self.exit_reason = exit_reason
         self.exit_price = exit_price
+
+        if gross_pnl == 0.0 and exit_price > 0.0 and entry > 0.0 and closed_qty > 0.0:
+            if self.side == "short":
+                gross_pnl = round((entry - exit_price) * closed_qty, 2)
+            else:
+                gross_pnl = round((exit_price - entry) * closed_qty, 2)
+
         self.gross_pnl = gross_pnl
         self.commission = commission
         self.net_pnl = gross_pnl - commission
-        self.position_size = 0.0 # Обнуляем при закрытии
+        self.real_pnl = gross_pnl
+        self.position_size = 0.0  # Обнуляем при закрытии
     
     def to_dict(self) -> Dict[str, Any]:
         """Преобразовать в словарь."""

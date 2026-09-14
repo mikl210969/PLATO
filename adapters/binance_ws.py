@@ -293,6 +293,24 @@ class BinanceWsAdapter:
                     async for message in ws:
                         try:
                             await self._message_queue.put(message)
+
+                            # 🔥 НОВОЕ: диагностика пользовательских событий.
+                            # Позволяет визуально убедиться, что ORDER_TRADE_UPDATE
+                            # реально приходят через User Data Stream.
+                            try:
+                                data = json.loads(message)
+                                ev = data.get("e")
+                                if ev == "ORDER_TRADE_UPDATE":
+                                    o = data.get("o", {})
+                                    logger.info(
+                                        f"📥 [USER_DATA] ORDER_TRADE_UPDATE | "
+                                        f"symbol={o.get('s')} | status={o.get('X')} | "
+                                        f"filled={o.get('z')} | avgPrice={o.get('ap')}"
+                                    )
+                                elif ev in ("ACCOUNT_UPDATE", "listenKeyExpired"):
+                                    logger.info(f"📥 [USER_DATA] {ev}")
+                            except Exception:
+                                pass
                         except Exception as e:
                             logger.error(f"Error processing user data message: {e}")
 
@@ -306,9 +324,7 @@ class BinanceWsAdapter:
                             new_key = await refresh_key_callback()
                             if new_key:
                                 listen_key = new_key
-                                # 🔥 FIX: testnet-хост WS — это stream.binancefuture.com, но подстроки "testnet"
-                                # в "wss://stream.binancefuture.com/ws" НЕТ, поэтому старая проверка всегда
-                                # уводила на мейннет fstream.binance.com с тестнет-ключом → события не приходили.
+                                # 🔥 FIX: та же проверка хоста при переподключении
                                 if "binancefuture.com" in self.base_url or "testnet" in self.base_url:
                                     user_data_url = f"wss://stream.binancefuture.com/ws/{listen_key}"
                                 else:
