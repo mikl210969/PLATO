@@ -29,7 +29,8 @@ class OrderHandlerMixin:
     async def _on_order_update(self, event):
         """
         Обработка обновлений ордеров от биржи.
-        🔥 ИСПРАВЛЕНО: Корректная обработка частичных исполнений (Partial Fill) и расчет VWAP.
+        🔥 ИСПРАВЛЕНО: Корректная обработка частичных исполнений (Partial Fill) 
+        через отслеживание КУМУЛЯТИВНОГО объема во избежание задвоения.
         """
         payload = getattr(event, 'payload', event)
         if isinstance(payload, str):
@@ -78,65 +79,63 @@ class OrderHandlerMixin:
             self.repository.save(passport)
             
         elif order_status in ('PARTIALLY_FILLED', 'FILLED'):
-            executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
+            # ВАЖНО: Binance присылает КУМУЛЯТИВНЫЙ (общий) объем исполнения в 'z' или 'executed_qty'
+            cumulative_executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
             avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
             
-            # Сначала обновляем состояние через state_manager
-            self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': executed_qty})
+            # Получаем ранее известный исполненный объем из паспорта
+            previous_filled_qty = getattr(passport, 'filled_qty', 0.0)
             
-            if executed_qty > 0:
-                # Получаем целевой размер из ордера
-                target_qty = 0.0
-                for o in getattr(passport, 'orders', []):
-                    if isinstance(o, dict) and str(o.get('client_order_id')) == client_order_id:
-                        target_qty = float(o.get('quantity', 0.0))
-                        break
-                
-                # Если это первое исполнение - устанавливаем target_size
-                if not hasattr(passport, 'target_size') or passport.target_size == 0:
-                    passport.target_size = target_qty if target_qty > 0 else abs(executed_qty)
-                
-                # Накапливаем исполненный объем
-                passport.filled_qty = getattr(passport, 'filled_qty', 0.0) + abs(executed_qty)
-                
-                # Рассчитываем средневзвешенную цену (VWAP)
-                old_total = getattr(passport, 'avg_price', 0.0) * (passport.filled_qty - abs(executed_qty))
-                new_total = avg_price * abs(executed_qty)
-                passport.avg_price = (old_total + new_total) / passport.filled_qty if passport.filled_qty > 0 else avg_price
-                
-                # Обновляем остаток ордера и размер позиции
-                passport.remaining_order_qty = max(0.0, passport.target_size - passport.filled_qty)
-                passport.position_size = passport.filled_qty
-                passport.position_entry_price = passport.avg_price
-                
-                # Пересчитываем PnL
-                passport.calculate_projected_pnls()
-                
-                # Логируем в таймлайн
-                event_name = "FULLY_FILLED" if order_status == 'FILLED' else "PARTIAL_FILL"
-                passport.add_timeline_event(
-                    event_name,
-                    f"Filled {abs(executed_qty)} @ {avg_price:.2f}, Total: {passport.filled_qty}/{passport.target_size}, Avg: {passport.avg_price:.2f}, Remaining: {passport.remaining_order_qty}"
-                )
-                
-                # 🔥 Guard активируется только при полном исполнении ИЛИ когда остаток = 0, и если платформа не в слепоте
-                if order_status == 'FILLED' or passport.remaining_order_qty < 0.01:
-                    if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
-                        passport.guard_status = "active"
-                        passport.add_timeline_event("GUARD_ACTIVATED", f"Guard activated on {passport.position_size} SOL")
-                else:
-                    passport.guard_status = "pending_full_fill"
-                    passport.add_timeline_event("GUARD_PENDING", f"Waiting for full fill: {passport.filled_qty}/{passport.target_size}")
-                
-                self.repository.save(passport)
-                
+            # Рассчитываем инкрементальный (НОВЫЙ) объем
+            incremental_fill = cumulative_executed_qty - previous_filled_qty
+            
+            # 🔥 ЗАЩИТА ОТ ДУБЛИКАТОВ: если новый объем <= 0, значит событие уже обработано
+            if incremental_fill <= 0:
+                self._log("duplicate_fill_ignored", {
+                    "passport_id": passport.passport_id,
+                    "client_order_id": client_order_id,
+                    "cumulative_qty": cumulative_executed_qty,
+                    "previous_filled": previous_filled_qty
+                })
+                return # Прерываем обработку, чтобы не задвоить размер и PnL
+
+            # Обновляем состояние через state_manager (передаем инкрементальный объем для логики переходов)
+            self.state_manager.handle_event(passport, "ORDER_FILLED", {'price': avg_price, 'quantity': incremental_fill})
+            
+            # 🔥 Обновляем метрики паспорта строго на основе КУМУЛЯТИВНЫХ данных от биржи
+            passport.filled_qty = cumulative_executed_qty
+            passport.position_size = cumulative_executed_qty
+            passport.position_entry_price = avg_price if avg_price > 0.0 else passport.position_entry_price
+            
+            # Пересчитываем PnL строго после актуализации размера позиции
+            passport.calculate_projected_pnls()
+            
+            # Логируем в таймлайн
+            event_name = "FULLY_FILLED" if order_status == 'FILLED' else "PARTIAL_FILL"
+            passport.add_timeline_event(
+                event_name,
+                f"Filled {incremental_fill:.4f} @ {avg_price:.2f}, Total: {passport.position_size:.4f}, Avg: {passport.position_entry_price:.2f}"
+            )
+            
+            # 🔥 Управление Guard: активируем, если исполнение полное или платформа здорова
+            target_size = getattr(passport, 'target_size', cumulative_executed_qty)
+            if order_status == 'FILLED' or cumulative_executed_qty >= target_size:
+                if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
+                    passport.guard_status = "active"
+                    passport.add_timeline_event("GUARD_ACTIVATED", f"Guard activated on {passport.position_size} SOL")
+            else:
+                passport.guard_status = "pending_full_fill"
+                passport.add_timeline_event("GUARD_PENDING", f"Waiting for full fill: {passport.filled_qty}/{target_size}")
+            
+            self.repository.save(passport)
+            
         elif order_status in ('CANCELED', 'EXPIRED', 'REJECTED'):
             # Ордер отменен - фиксируем то, что успело исполниться
-            if hasattr(passport, 'filled_qty') and passport.filled_qty > 0:
-                passport.remaining_order_qty = 0.0
+            current_filled = getattr(passport, 'filled_qty', 0.0)
+            if current_filled > 0:
                 passport.add_timeline_event(
                     "ORDER_CANCELLED_WITH_PARTIAL_FILL",
-                    f"Order cancelled. Filled: {passport.filled_qty}/{passport.target_size}"
+                    f"Order cancelled. Total filled: {current_filled}"
                 )
                 # Активируем Guard на фактически исполненный объем, если платформа не в слепоте
                 if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':

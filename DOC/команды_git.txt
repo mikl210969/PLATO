@@ -46,7 +46,15 @@ Start-Sleep -Seconds 2
 # Запускаем и перенаправляем ВСЕ потоки (stdout, stderr, warnings) в файл
 python main.py *> platform_run.log
 
+# 1. Запускаем все тесты
 .\run_tests.ps1
+
+# 2. Если все зеленые ✅ - коммитим
+git add .
+git commit -m "описание изменений"
+git push origin main
+
+# 3. Если есть ошибки ❌ - чиним и повторяем пункт 1
 
 
    .\start_bot.bat
