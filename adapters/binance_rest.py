@@ -354,7 +354,8 @@ class BinanceRestClient:
         if session is None:
             raise RuntimeError("Session not initialized")
 
-        async with session.post(url, headers=headers) as resp:
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        async with session.post(url, headers=headers, timeout=timeout) as resp:
             data = await resp.json()
             self.logger.info(f" [REST] LIMIT response: {data}")
 
@@ -420,7 +421,8 @@ class BinanceRestClient:
         if session is None:
             raise RuntimeError("Session not initialized")
 
-        async with session.post(url, headers=headers) as resp:
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        async with session.post(url, headers=headers, timeout=timeout) as resp:
             data = await resp.json()
             self.logger.info(f"🔍 [REST] LIMIT response: {data}")
 
@@ -587,33 +589,28 @@ class BinanceRestClient:
     async def get_klines(self, symbol: str, interval: str = "1m", limit: int = 100) -> list:
         """Получение исторических свечей с Binance Spot REST API."""
         import logging
-        from aiohttp import ClientTimeout
-        
         logger = logging.getLogger(__name__)
-        
-        # 🔥 Circuit Breaker (для Spot API используем тот же флаг)
+
         if self._ban_active():
             logger.debug(f"⏸️ [REST] get_klines({symbol}) пропущен — активен бан")
             return []
-        
-        url = f"https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": symbol.upper(),
-            "interval": interval,
-            "limit": limit
-        }
-        
+
+        # 🔥 ИСПРАВЛЕНО: переиспользуем общую сессию вместо создания новой на каждый вызов
+        await self._ensure_session()
+        session = self._session
+        if session is None:
+            return []
+
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
         try:
-            timeout = ClientTimeout(total=10)
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=timeout) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"Binance REST Klines error {response.status}: {error_text}")
-                        return []
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.get(url, params=params, timeout=timeout) as response:
+                if response.status == 200:
+                    return await response.json()
+                error_text = await response.text()
+                logger.error(f"Binance REST Klines error {response.status}: {error_text}")
+                return []
         except Exception as e:
             logger.error(f"Exception while fetching klines for {symbol}: {e}")
             return []

@@ -51,7 +51,8 @@ $testFiles = @(
     "tests/test_bus_message_loss.py",
     "tests/test_position_lifecycle.py",
     "tests/test_chaos_real_conditions.py",
-    "tests/test_health_and_recovery.py"
+    "tests/test_health_and_recovery.py",
+    "tests/test_ws_adapter_stress.py"   # 🔥 НОВОЕ: стресс-тесты адаптера
 )
 
 $allPassed = $true
