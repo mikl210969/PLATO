@@ -124,15 +124,16 @@ class DriftMonitor:
                 
                 local_passport.status = "OPEN"
                 local_passport.position_size = exchange_position_size
+                local_passport.filled_qty = exchange_position_size  # 🔥 ДОБАВЛЕНО: для корректного расчета PnL
                 local_passport.position_entry_price = local_passport.entry_price 
                 
-                # 🔥 Добавить это:
+                # 🔥 ИСПРАВЛЕНО: Считаем PnL и активируем Guard только если платформа не в состоянии слепоты
                 local_passport.calculate_projected_pnls()
-                local_passport.guard_status = "active"
-                local_passport.platform_health = "HEALTHY"
+                if getattr(local_passport, 'platform_health', 'HEALTHY') != 'BLIND':
+                    local_passport.guard_status = "active"
                 
                 self.passport_manager.update(local_passport)
-                self.repository.save(local_passport)
+                await self.repository.save(local_passport)  # 🔥 Добавлен await
                 
                 if hasattr(self, 'risk_manager') and self.risk_manager is not None:
                     try:

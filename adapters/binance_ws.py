@@ -66,19 +66,32 @@ class BinanceWsAdapter:
             self._connected = False
             return False
 
-    async def connect(self, retries: int = 3):
-        """Подключиться к WebSocket с экспоненциальной задержкой."""
+    async def connect(self, retries: int = 5):
+        """
+        Подключиться к WebSocket с экспоненциальной задержкой и явным Keep-Alive.
+        🔥 ИСПРАВЛЕНО: Добавлены ping_interval/ping_timeout и жесткая очистка старых сокетов.
+        """
         for attempt in range(retries):
             try:
+                # 1. ЖЕСТКАЯ ОЧИСТКА: Гарантируем, что старый "зависший" сокет закрыт
                 if self._ws is not None:
                     try:
-                        await self._ws.close()
+                        # code=1000 означает нормальное закрытие
+                        await self._ws.close(code=1000, reason="Reconnecting cleanup")
                     except Exception:
                         pass
+                    self._ws = None
+
+                self.logger.info(f"Connecting to {self.base_url} (attempt {attempt+1}/{retries})")
                 
+                # 2. КРИТИЧЕСКИ ВАЖНО: Явные параметры Keep-Alive (Heartbeat)
+                # Если Binance не ответит на ping за 10 сек, websockets сам поднимет исключение,
+                # и мы не будем ждать 30 секунд впустую.
                 self._ws = await websockets.connect(
                     self.base_url,
-                    # ... здесь твои параметры подключения (ping_interval, ping_timeout и т.д.) ...
+                    ping_interval=20,   # Отправляем ping каждые 20 секунд
+                    ping_timeout=10,    # Ждем pong максимум 10 секунд
+                    close_timeout=5     # Даем 5 секунд на корректное завершение соединения
                 )
                 
                 self._connected = True
@@ -86,27 +99,30 @@ class BinanceWsAdapter:
                 self._healthy = True
                 self.logger.info("✅ WebSocket connected")
                 
-                # 🔥 НОВОЕ: при reconnect восстанавливаем ВСЕ активные подписки
+                # 3. Восстановление подписок при реконнекте
                 if not self._is_initial_connect and self._active_subscriptions:
                     self.logger.info(f"🔄 Reconnect: восстанавливаем {len(self._active_subscriptions)} подписок...")
                     await self._send_subscribe(list(self._active_subscriptions), id(self) + 999)
                 
+                # 4. Вызов колбэка (например, для обновления listen_key, если нужно)
                 if self._on_reconnect:
                     await self._on_reconnect()
                 
                 self._is_initial_connect = False
-                return  # Успех, выходим из цикла
+                return  # Успех! Выходим из цикла попыток
                 
             except Exception as e:
-                self.logger.warning(f"Attempt {attempt+1} failed: {e}")
+                self.logger.warning(f"Attempt {attempt+1} failed: {repr(e)}")
                 self._connected = False
+                self._healthy = False
                 
-                # 🔥 Экспоненциальная задержка (2с, 4с, 8с)
+                # 5. EXPONENTIAL BACKOFF: 2с, 4с, 8с, 16с, 32с
+                # Это предотвращает спам запросами и дает сети время "остыть"
                 backoff_time = 2 ** (attempt + 1)
                 self.logger.info(f"⏳ Ожидание {backoff_time} сек. перед следующей попыткой...")
                 await asyncio.sleep(backoff_time)
         
-        self.logger.error("❌ Не удалось подключиться к WebSocket после всех попыток")
+        self.logger.error("❌ Не удалось подключиться к WebSocket после всех попыток. Platform is blind.")
 
     async def subscribe_user_data(self, listen_key: str, refresh_key_callback=None):
         """🔥 ИСПРАВЛЕНО: Добавлен колбэк для получения нового ключа при истечении старого."""

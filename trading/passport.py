@@ -80,10 +80,10 @@ class TradePassport:
     def calculate_projected_pnls(self):
         """
         Рассчитать проектный и реальный PnL.
-        🔥 НОВОЕ: Разделение на real_pnl (факт) и projected_pnl (потенциал)
+        🔥 ИСПРАВЛЕНО: Projected PnL считается от target_size, Real PnL — от filled_qty.
         """
-        # Если позиция не открыта - обнуляем всё
-        if self.position_size == 0.0:
+        # Если позиции нет вообще
+        if self.position_size == 0.0 and self.filled_qty == 0.0:
             self.tp1_projected_pnl = 0.0
             self.tp2_projected_pnl = 0.0
             self.sl_projected_pnl = 0.0
@@ -91,19 +91,21 @@ class TradePassport:
             self.real_pnl = 0.0
             return
         
-        # Используем filled_qty, если он > 0, иначе position_size (для обратной совместимости)
-        effective_filled_qty = self.filled_qty if self.filled_qty > 0 else self.position_size
+        # Реальный PnL считается от фактически исполненного объема
+        effective_filled = self.filled_qty if self.filled_qty > 0 else self.position_size
+        # Проектный PnL считается от целевого размера (или текущего, если целевой не задан)
+        effective_target = self.target_size if self.target_size > 0 else self.position_size
         
         if self.side == "short":
-            self.real_pnl = round((self.position_entry_price - self.tp1_price) * effective_filled_qty, 2)
-            self.tp1_projected_pnl = round((self.position_entry_price - self.tp1_price) * self.position_size, 2)
-            self.tp2_projected_pnl = round((self.position_entry_price - self.tp2_price) * self.position_size, 2)
-            self.sl_projected_pnl = round((self.position_entry_price - self.sl_price) * self.position_size, 2)
+            self.real_pnl = round((self.position_entry_price - self.tp1_price) * effective_filled, 2)
+            self.tp1_projected_pnl = round((self.position_entry_price - self.tp1_price) * effective_target, 2)
+            self.tp2_projected_pnl = round((self.position_entry_price - self.tp2_price) * effective_target, 2)
+            self.sl_projected_pnl = round((self.position_entry_price - self.sl_price) * effective_target, 2)
         else:  # long
-            self.real_pnl = round((self.tp1_price - self.position_entry_price) * effective_filled_qty, 2)
-            self.tp1_projected_pnl = round((self.tp1_price - self.position_entry_price) * self.position_size, 2)
-            self.tp2_projected_pnl = round((self.tp2_price - self.position_entry_price) * self.position_size, 2)
-            self.sl_projected_pnl = round((self.sl_price - self.position_entry_price) * self.position_size, 2)
+            self.real_pnl = round((self.tp1_price - self.position_entry_price) * effective_filled, 2)
+            self.tp1_projected_pnl = round((self.tp1_price - self.position_entry_price) * effective_target, 2)
+            self.tp2_projected_pnl = round((self.tp2_price - self.position_entry_price) * effective_target, 2)
+            self.sl_projected_pnl = round((self.sl_price - self.position_entry_price) * effective_target, 2)
         
         self.breakeven_projected_pnl = 0.0
 
