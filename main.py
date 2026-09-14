@@ -57,6 +57,9 @@ class Platform:
         self.ws_price = 0.0
         self.ws_orderbook = {'bids': [], 'asks': []}
 
+        # 🔥 НОВОЕ: кэш последней известной цены для мягкой деградации при сбоях REST
+        self.last_known_price = 0.0
+
         # 1. Загрузка конфигов
         self.config = ConfigLoader().load_all()
         secrets = ConfigLoader().load_secrets()
@@ -111,6 +114,8 @@ class Platform:
         )
 
         # 🔥 НОВОЕ: Передаем event_bus в адаптер для нормализации событий
+        # base_url используется ТОЛЬКО для Futures User Data Stream и определения testnet/mainnet.
+        # SPOT market data идёт через внутренний spot_base_url адаптера.
         self.ws = BinanceWsAdapter(
             base_url=exchange_config.get('ws_base_url', 'wss://stream.binancefuture.com/ws'),
             event_bus=self.bus
@@ -491,18 +496,23 @@ class Platform:
                 try:
                     await asyncio.sleep(10) # Проверка каждые 10 секунд
                     
-                    # 1. Оцениваем состояние каналов
-                    ws_age = time.time() - getattr(self, '_last_user_data_ts', time.time())
+                    # 1. Оцениваем состояние каналов.
+                    # 🔥 ИСПРАВЛЕНО: здоровье считаем по СВЕЖЕСТИ РЫНОЧНЫХ ДАННЫХ
+                    # (depth-обновления идут ~10 раз/сек при живом соединении),
+                    # а НЕ по user-data событиям: user-data молчит, когда нет ордеров,
+                    # из-за чего платформа ложно уходила в DEGRADED при живом WS.
+                    md_age = time.time() - getattr(self, '_last_price_update_ts', time.time())
                     rest_is_banned = getattr(self.rest, '_ban_active', lambda: False)()
+                    ws_ok = md_age < 45
                     
                     # 2. Определяем platform_health
-                    if ws_age < 45 and not rest_is_banned:
+                    if ws_ok and not rest_is_banned:
                         new_health = "HEALTHY"
-                    elif ws_age >= 45 and not rest_is_banned:
-                        new_health = "DEGRADED" # WS упал, но REST жив
+                    elif ws_ok or not rest_is_banned:
+                        new_health = "DEGRADED"  # Один канал жив, второй мертв
                     else:
-                        new_health = "BLIND"    # Оба канала мертвы или REST забанен
-                        
+                        new_health = "BLIND"     # Мертвы оба канала
+                    
                     # 3. Обновляем статусы во всех активных паспортах
                     active_passports = self.passport_manager.get_active()
                     for passport in active_passports:
@@ -611,17 +621,27 @@ class Platform:
 
         while self._running:
             try:
-                # Получение цены (приоритет WS, fallback на REST)
+                # 🔥 ИСПРАВЛЕНО: Получение цены (приоритет WS, fallback REST с защитой от сбоев)
                 if self.ws_price > 0:
                     current_price = self.ws_price
                 else:
-                    orderbook = await self.rest.get_orderbook(self.symbol)
-                    bids = orderbook.get('bids', [])
-                    asks = orderbook.get('asks', [])
-                    if bids and asks:
-                        current_price = (float(bids[0][0]) + float(asks[0][0])) / 2
-                    else:
-                        current_price = 0.0
+                    current_price = 0.0
+                    try:
+                        orderbook = await self.rest.get_orderbook(self.symbol)
+                        bids = orderbook.get('bids', []) if orderbook else []
+                        asks = orderbook.get('asks', []) if orderbook else []
+                        if bids and asks:
+                            current_price = (float(bids[0][0]) + float(asks[0][0])) / 2
+                    except asyncio.TimeoutError:
+                        logger.warning("⚠️ [MAIN LOOP] REST orderbook timeout — используем последнюю известную цену")
+                    except Exception as e:
+                        logger.warning(f"⚠️ [MAIN LOOP] REST orderbook failed: {type(e).__name__} — используем последнюю известную цену")
+
+                # 🔥 Кэш последней известной цены: если сейчас цена недоступна — берём её из кэша
+                if current_price > 0:
+                    self.last_known_price = current_price
+                elif self.last_known_price > 0:
+                    current_price = self.last_known_price
 
                 current_time = time.time()
                 
@@ -680,9 +700,11 @@ class Platform:
                 await asyncio.sleep(1)
                 continue
             except Exception as e:
-                logger.error(f"Main loop error: {e}")
                 import traceback
-                logger.debug(f"Traceback:\n{traceback.format_exc()}")
+                logger.error(
+                    f"Main loop error: {type(e).__name__}: {e}\n"
+                    f"Traceback:\n{traceback.format_exc()}"
+                )
                 await asyncio.sleep(1)
 
     async def _keep_alive_loop(self):

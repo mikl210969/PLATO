@@ -16,13 +16,14 @@ from core.logger import get_logger
 class BinanceRestClient:
     """Клиент для работы с Binance REST API."""
 
-    def __init__(self, api_key: str, api_secret: str, base_url: str = "https://testnet.binancefuture.com", timeout: int = 30):
+    def __init__(self, api_key: str, api_secret: str, base_url: str = "https://testnet.binancefuture.com", timeout: int = 60):
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
         self.logger = get_logger(__name__)
+        self.last_known_price = 0.0
         
         # 🔥 Circuit Breaker: время, до которого REST заблокирован
         self._ban_until = 0.0
@@ -80,48 +81,72 @@ class BinanceRestClient:
         return signature
 
     async def _request(self, method: str, path: str, params: Optional[Dict] = None, signed: bool = False) -> Dict:
-        await self._ensure_session()
-        
-        if params is None:
-            params = {}
-        
-        req_params = params.copy()
-        
-        if signed:
-            req_params['timestamp'] = int(time.time() * 1000)
-            req_params['recvWindow'] = 60000
-            
-        query_string = '&'.join([f"{k}={v}" for k, v in sorted(req_params.items())])
-        
-        if signed:
-            signature = hmac.new(
-                self.api_secret.encode('utf-8'),
-                query_string.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
-            query_string += f"&signature={signature}"
-        
-        url = f"{self.base_url}{path}?{query_string}"
-        headers = {"X-MBX-APIKEY": self.api_key}
-        
-        session = self._session
-        if session is None:
-            raise RuntimeError("Session not initialized")
-            
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
-        
-        async with session.request(method, url, headers=headers, timeout=timeout) as resp:
-            data = await resp.json()
-            if isinstance(data, dict) and 'code' in data:
-                error_msg = f"Binance API error: {data.get('msg', 'Unknown error')} (code: {data.get('code')})"
-                # 🔥 Circuit Breaker: регистрируем бан при -1003
-                if data.get('code') == -1003:
-                    self._register_ban(error_msg)
-                self.logger.error(error_msg)
-                raise Exception(error_msg)
-            return data
+        # 🔥 Retry для идемпотентных GET-запросов
+        max_retries = 3 if method == 'GET' else 1
+        last_error: Optional[Exception] = None
 
-    # ─── Открытые методы ──────────────────────────────────────
+        for attempt in range(max_retries):
+            try:
+                await self._ensure_session()
+
+                if params is None:
+                    params = {}
+
+                req_params = params.copy()
+
+                if signed:
+                    req_params['timestamp'] = int(time.time() * 1000)
+                    req_params['recvWindow'] = 60000
+
+                query_string = '&'.join([f"{k}={v}" for k, v in sorted(req_params.items())])
+
+                if signed:
+                    signature = hmac.new(
+                        self.api_secret.encode('utf-8'),
+                        query_string.encode('utf-8'),
+                        hashlib.sha256
+                    ).hexdigest()
+                    query_string += f"&signature={signature}"
+
+                url = f"{self.base_url}{path}?{query_string}"
+                headers = {"X-MBX-APIKEY": self.api_key}
+
+                session = self._session
+                if session is None:
+                    raise RuntimeError("Session not initialized")
+
+                timeout = aiohttp.ClientTimeout(total=self.timeout)
+
+                async with session.request(method, url, headers=headers, timeout=timeout) as resp:
+                    data = await resp.json()
+                    if isinstance(data, dict) and 'code' in data:
+                        error_msg = f"Binance API error: {data.get('msg', 'Unknown error')} (code: {data.get('code')})"
+                        if data.get('code') == -1003:
+                            self._register_ban(error_msg)
+                        self.logger.error(error_msg)
+                        raise Exception(error_msg)
+                    return data
+
+            except asyncio.TimeoutError as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"⏳ [REST] Timeout on {method} {path}, retry {attempt + 1}/{max_retries}...")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                break
+
+            except aiohttp.ClientError as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"⏳ [REST] Network error on {method} {path}: {e!r}, retry {attempt + 1}/{max_retries}...")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                break
+
+        # 🔥 Все попытки исчерпаны. Явный raise:
+        # (а) вызывающий код гарантированно узнает о проблеме,
+        # (б) Pylance видит, что функция НЕ возвращает None.
+        raise last_error if last_error else RuntimeError(f"REST request failed: {method} {path}")
 
     async def get_position(self, symbol: str):
         """Получить позицию по символу."""
@@ -201,10 +226,33 @@ class BinanceRestClient:
             return []
 
     async def get_orderbook(self, symbol: str, limit: int = 20) -> Dict:
-        """Получить стакан."""
+        """Получить стакан с retry-логикой для транзиентных ошибок."""
         if self._ban_active():
             return {}
-        return await self._request('GET', '/fapi/v1/depth', {'symbol': symbol, 'limit': limit})
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = await self._request('GET', '/fapi/v1/depth', {'symbol': symbol, 'limit': limit})
+                return result
+            except asyncio.TimeoutError:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"⏳ [REST] get_orderbook timeout, retry {attempt+1}/{max_retries}...")
+                    await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
+                    continue
+                self.logger.error(f"❌ [REST] get_orderbook timeout after {max_retries} retries")
+                return {}
+            except Exception as e:
+                error_text = str(e)
+                if "-1003" in error_text:
+                    self._register_ban(error_text)
+                self.logger.warning(f"⚠️ [REST] get_orderbook failed: {error_text}")
+                return {}
+        
+        # 🔥 FIX Pylance reportReturnType: явный возврат после цикла.
+        # Сюда выполнение фактически не доходит, но типизатор требует
+        # гарантированный return на всех путях выхода из функции.
+        return {}
 
     async def get_order_by_client_id(self, symbol: str, client_order_id: str) -> Optional[Dict]:
         """Получить ордер по client_order_id."""

@@ -274,7 +274,10 @@ class BinanceWsAdapter:
         import logging
         logger = logging.getLogger(__name__)
 
-        if "testnet" in self.base_url:
+        # 🔥 FIX: testnet-хост WS — это stream.binancefuture.com, но подстроки "testnet"
+        # в "wss://stream.binancefuture.com/ws" НЕТ, поэтому старая проверка всегда
+        # уводила на мейннет fstream.binance.com с тестнет-ключом → события не приходили.
+        if "binancefuture.com" in self.base_url or "testnet" in self.base_url:
             user_data_url = f"wss://stream.binancefuture.com/ws/{listen_key}"
         else:
             user_data_url = f"wss://fstream.binance.com/ws/{listen_key}"
@@ -303,7 +306,10 @@ class BinanceWsAdapter:
                             new_key = await refresh_key_callback()
                             if new_key:
                                 listen_key = new_key
-                                if "testnet" in self.base_url:
+                                # 🔥 FIX: testnet-хост WS — это stream.binancefuture.com, но подстроки "testnet"
+                                # в "wss://stream.binancefuture.com/ws" НЕТ, поэтому старая проверка всегда
+                                # уводила на мейннет fstream.binance.com с тестнет-ключом → события не приходили.
+                                if "binancefuture.com" in self.base_url or "testnet" in self.base_url:
                                     user_data_url = f"wss://stream.binancefuture.com/ws/{listen_key}"
                                 else:
                                     user_data_url = f"wss://fstream.binance.com/ws/{listen_key}"
