@@ -607,7 +607,17 @@ class Platform:
         self._ws_task = asyncio.create_task(self.ws.run())
         self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
         self._health_check_task = asyncio.create_task(user_data_health_check())
-        
+
+        # 🔥 PRAGMATIC TRIO #1: Startup Prefetch
+        # Загружаем exchangeInfo ОДИН раз, синхронно, ДО старта фоновых задач.
+        # PositionSizer и стратегии будут брать данные из кэша,
+        # не создавая параллельных REST-запросов на старте.
+        try:
+            await self.rest.get_exchange_info(self.symbol, force_refresh=True)
+            logger.info(f"✅ [STARTUP PREFETCH] Exchange info loaded for {self.symbol}")
+        except Exception as e:
+            logger.warning(f"⚠️ [STARTUP PREFETCH] Failed: {type(e).__name__} — будет использован кэш/fallback")
+
         await self.drift_monitor.start(symbols=[self.symbol])        
         await self.orchestrator.start_stuck_orders_monitor()
 
