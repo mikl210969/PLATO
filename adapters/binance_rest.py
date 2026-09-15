@@ -1,5 +1,11 @@
 """
 Binance REST API клиент с Circuit Breaker (автоматический выключатель при бане).
+
+🔥 ИСПРАВЛЕНО 2026-09-15:
+- Разные таймауты для разных типов запросов (ордера 30с, справочные 10с)
+- Кэш exchangeInfo (загружается раз при старте, обновляется раз в час)
+- Fallback на хардкод если REST недоступен
+- Отдельная сессия для критических ордеров
 """
 
 import asyncio
@@ -22,11 +28,29 @@ class BinanceRestClient:
         self.base_url = base_url
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
+        self._critical_session: Optional[aiohttp.ClientSession] = None  # 🔥 НОВОЕ: отдельная сессия для ордеров
         self.logger = get_logger(__name__)
         self.last_known_price = 0.0
         
         # 🔥 Circuit Breaker: время, до которого REST заблокирован
         self._ban_until = 0.0
+        
+        # 🔥 НОВОЕ: Кэш exchangeInfo
+        self._exchange_info_cache: Dict[str, Any] = {}
+        self._exchange_info_last_update: float = 0.0
+        self._exchange_info_cache_ttl: float = 3600.0  # 1 час
+        
+        # 🔥 НОВОЕ: Хардкод для SOLUSDT на случай если REST недоступен
+        self._fallback_exchange_info = {
+            "SOLUSDT": {
+                "pricePrecision": 2,
+                "quantityPrecision": 1,
+                "stepSize": 0.1,
+                "tickSize": 0.01,
+                "minQty": 0.1,
+                "maxQty": 1000000,
+            }
+        }
 
     def _ban_active(self) -> bool:
         """True, если IP сейчас забанен и REST-запросы слать нельзя."""
@@ -66,9 +90,18 @@ class BinanceRestClient:
         except Exception:
             return False    
 
-    async def _ensure_session(self):
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+    async def _ensure_session(self, critical: bool = False):
+        """Создать или пересоздать aiohttp сессию."""
+        if critical:
+            if self._critical_session is None or self._critical_session.closed:
+                # 🔥 НОВОЕ: Отдельная сессия для критических ордеров с меньшим пулом
+                connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
+                self._critical_session = aiohttp.ClientSession(connector=connector)
+        else:
+            if self._session is None or self._session.closed:
+                # Обычная сессия для справочных запросов
+                connector = aiohttp.TCPConnector(limit=20, limit_per_host=10)
+                self._session = aiohttp.ClientSession(connector=connector)
 
     def _sign(self, params: Dict[str, Any]) -> str:
         """Создаёт подпись для запроса."""
@@ -80,14 +113,31 @@ class BinanceRestClient:
         ).hexdigest()
         return signature
 
-    async def _request(self, method: str, path: str, params: Optional[Dict] = None, signed: bool = False) -> Dict:
-        # 🔥 Retry для идемпотентных GET-запросов
+    async def _request(
+        self, 
+        method: str, 
+        path: str, 
+        params: Optional[Dict] = None, 
+        signed: bool = False,
+        critical: bool = False
+    ) -> Dict:
+        """
+        Универсальный REST-запрос с retry-логикой.
+        
+        Args:
+            critical: True для ордеров (таймаут 30с, отдельная сессия)
+                     False для справочных (таймаут 10с, общая сессия)
+        """
+        # 🔥 Retry только для идемпотентных GET-запросов
         max_retries = 3 if method == 'GET' else 1
         last_error: Optional[Exception] = None
 
+        # 🔥 НОВОЕ: Разные таймауты для разных запросов
+        request_timeout = 30 if critical else 10
+
         for attempt in range(max_retries):
             try:
-                await self._ensure_session()
+                await self._ensure_session(critical=critical)
 
                 if params is None:
                     params = {}
@@ -111,11 +161,12 @@ class BinanceRestClient:
                 url = f"{self.base_url}{path}?{query_string}"
                 headers = {"X-MBX-APIKEY": self.api_key}
 
-                session = self._session
+                # 🔥 НОВОЕ: Выбираем сессию в зависимости от critical
+                session = self._critical_session if critical else self._session
                 if session is None:
                     raise RuntimeError("Session not initialized")
 
-                timeout = aiohttp.ClientTimeout(total=self.timeout)
+                timeout = aiohttp.ClientTimeout(total=request_timeout)
 
                 async with session.request(method, url, headers=headers, timeout=timeout) as resp:
                     data = await resp.json()
@@ -144,8 +195,6 @@ class BinanceRestClient:
                 break
 
         # 🔥 Все попытки исчерпаны. Явный raise:
-        # (а) вызывающий код гарантированно узнает о проблеме,
-        # (б) Pylance видит, что функция НЕ возвращает None.
         raise last_error if last_error else RuntimeError(f"REST request failed: {method} {path}")
 
     async def get_position(self, symbol: str):
@@ -249,9 +298,7 @@ class BinanceRestClient:
                 self.logger.warning(f"⚠️ [REST] get_orderbook failed: {error_text}")
                 return {}
         
-        # 🔥 FIX Pylance reportReturnType: явный возврат после цикла.
-        # Сюда выполнение фактически не доходит, но типизатор требует
-        # гарантированный return на всех путях выхода из функции.
+        # 🔥 FIX Pylance reportReturnType: явный возврат после цикла
         return {}
 
     async def get_order_by_client_id(self, symbol: str, client_order_id: str) -> Optional[Dict]:
@@ -290,7 +337,8 @@ class BinanceRestClient:
             params['newClientOrderId'] = new_client_order_id
 
         try:
-            result = await self._request('POST', '/fapi/v1/order', params, signed=True)
+            # 🔥 НОВОЕ: critical=True для ордеров (таймаут 30с, отдельная сессия)
+            result = await self._request('POST', '/fapi/v1/order', params, signed=True, critical=True)
             return {
                 'success': True,
                 'order_id': result.get('orderId'),
@@ -334,7 +382,8 @@ class BinanceRestClient:
             params['newClientOrderId'] = new_client_order_id
 
         try:
-            result = await self._request('POST', '/fapi/v1/order', params, signed=True)
+            # 🔥 НОВОЕ: critical=True для ордеров (таймаут 30с, отдельная сессия)
+            result = await self._request('POST', '/fapi/v1/order', params, signed=True, critical=True)
             return {
                 'success': True,
                 'order_id': result.get('orderId'),
@@ -396,13 +445,13 @@ class BinanceRestClient:
 
         self.logger.info(f" [REST] Creating SL as LIMIT (Testnet workaround): {symbol} {side} @ {limit_price} (stop: {stop_price})")
 
-        if self._session is None:
-            await self._ensure_session()
-        session = self._session
+        if self._critical_session is None:
+            await self._ensure_session(critical=True)
+        session = self._critical_session
         if session is None:
             raise RuntimeError("Session not initialized")
 
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        timeout = aiohttp.ClientTimeout(total=30)
         async with session.post(url, headers=headers, timeout=timeout) as resp:
             data = await resp.json()
             self.logger.info(f" [REST] LIMIT response: {data}")
@@ -463,13 +512,13 @@ class BinanceRestClient:
 
         self.logger.info(f"🔍 [REST] Creating STOP_LIMIT as LIMIT (Testnet workaround): {symbol} {side} @ {limit_price} (stop: {stop_price})")
 
-        if self._session is None:
-            await self._ensure_session()
-        session = self._session
+        if self._critical_session is None:
+            await self._ensure_session(critical=True)
+        session = self._critical_session
         if session is None:
             raise RuntimeError("Session not initialized")
 
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        timeout = aiohttp.ClientTimeout(total=30)
         async with session.post(url, headers=headers, timeout=timeout) as resp:
             data = await resp.json()
             self.logger.info(f"🔍 [REST] LIMIT response: {data}")
@@ -567,7 +616,8 @@ class BinanceRestClient:
             'orderId': order_id
         }
         try:
-            result = await self._request('DELETE', '/fapi/v1/order', params, signed=True)
+            # 🔥 НОВОЕ: critical=True для ордеров (таймаут 30с, отдельная сессия)
+            result = await self._request('DELETE', '/fapi/v1/order', params, signed=True, critical=True)
             return {
                 'success': True,
                 'order_id': result.get('orderId'),
@@ -585,6 +635,13 @@ class BinanceRestClient:
             except Exception:
                 pass
             self._session = None
+        
+        if self._critical_session is not None:
+            try:
+                await self._critical_session.close()
+            except Exception:
+                pass
+            self._critical_session = None
 
     async def get_order_status(
         self,
@@ -615,23 +672,71 @@ class BinanceRestClient:
             self.logger.error(f"⚠️ [REST] Failed to get order status: {error_text}")
             return None
 
-    async def get_exchange_info(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        """Получить информацию о торговых правилах биржи."""
+    async def get_exchange_info(self, symbol: Optional[str] = None, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Получить информацию о торговых правилах биржи.
+        
+        🔥 ИСПРАВЛЕНО: Кэширование + fallback на хардкод
+        
+        Args:
+            symbol: Символ для получения правил (например 'SOLUSDT')
+            force_refresh: Принудительно обновить кэш (используется при старте)
+        """
         if self._ban_active():
+            # 🔥 НОВОЕ: Если REST забанен, возвращаем кэш или fallback
+            if symbol and symbol in self._exchange_info_cache:
+                return {"symbols": [self._exchange_info_cache[symbol]]}
+            elif symbol and symbol in self._fallback_exchange_info:
+                self.logger.warning(f"⚠️ [REST] Using fallback exchangeInfo for {symbol}")
+                return {"symbols": [self._fallback_exchange_info[symbol]]}
             return {}
         
+        # 🔥 НОВОЕ: Проверяем кэш
+        current_time = time.time()
+        cache_age = current_time - self._exchange_info_last_update
+        
+        if not force_refresh and cache_age < self._exchange_info_cache_ttl:
+            if symbol:
+                if symbol in self._exchange_info_cache:
+                    return {"symbols": [self._exchange_info_cache[symbol]]}
+            elif self._exchange_info_cache:
+                return {"symbols": list(self._exchange_info_cache.values())}
+        
+        # 🔥 НОВОЕ: Кэш устарел или отсутствует — загружаем с биржи
         params = {}
         if symbol:
             params['symbol'] = symbol.upper()
             
         try:
             result = await self._request('GET', '/fapi/v1/exchangeInfo', params, signed=False)
+            
+            # Обновляем кэш
+            if 'symbols' in result and isinstance(result['symbols'], list):
+                for sym_info in result['symbols']:
+                    sym_name = sym_info.get('symbol')
+                    if sym_name:
+                        self._exchange_info_cache[sym_name] = sym_info
+                
+                self._exchange_info_last_update = current_time
+                self.logger.info(f"✅ [REST] exchangeInfo cache updated ({len(self._exchange_info_cache)} symbols)")
+            
             return result
+            
         except Exception as e:
             error_text = str(e)
             if "-1003" in error_text:
                 self._register_ban(error_text)
-            self.logger.error(f"️ [REST] Failed to get exchange info: {error_text}")
+            
+            # 🔥 НОВОЕ: Fallback на кэш или хардкод
+            if symbol:
+                if symbol in self._exchange_info_cache:
+                    self.logger.warning(f"⚠️ [REST] Failed to get exchange info, using cached data for {symbol}")
+                    return {"symbols": [self._exchange_info_cache[symbol]]}
+                elif symbol in self._fallback_exchange_info:
+                    self.logger.warning(f"⚠️ [REST] Failed to get exchange info, using fallback for {symbol}")
+                    return {"symbols": [self._fallback_exchange_info[symbol]]}
+            
+            self.logger.error(f"❌ [REST] Failed to get exchange info: {error_text}")
             return {}
 
     async def get_klines(self, symbol: str, interval: str = "1m", limit: int = 100) -> list:
@@ -667,3 +772,5 @@ class BinanceRestClient:
         """Закрыть сессию."""
         if self._session and not self._session.closed:
             await self._session.close()
+        if self._critical_session and not self._critical_session.closed:
+            await self._critical_session.close()
