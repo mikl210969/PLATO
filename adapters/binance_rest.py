@@ -704,6 +704,25 @@ class BinanceRestClient:
                 pass
             self._critical_session = None
 
+    async def get_open_orders_strict(self, symbol: str) -> Optional[List[Dict]]:
+        """
+        🔥 RECONCILER: как get_open_orders, но возвращает None при ЛЮБОЙ ошибке/бане,
+        чтобы вызывающий отличал «на бирже пусто» от «биржа не ответила».
+        Решения о отменах принимаются только при реальном ответе биржи.
+        """
+        if self._ban_active():
+            return None
+        try:
+            result = await self._request('GET', '/fapi/v1/openOrders', {'symbol': symbol}, signed=True)
+            return result if isinstance(result, list) else None
+        except Exception as e:
+            error_text = str(e)
+            if "-1003" in error_text:
+                self._register_ban(error_text)
+            self.logger.warning(f"⚠️ [REST] get_open_orders_strict failed: {error_text}")
+            return None
+
+
     async def get_order_status(
         self,
         symbol: str,

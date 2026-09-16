@@ -212,6 +212,19 @@ class Platform:
         self.orchestrator.set_verifier(self.verifier)
         logger.info("✅ DriftMonitor and OrderVerifier set in Orchestrator")
 
+        # 13.5 ExchangeReconciler — непрерывный гарант «биржа = источник правды»
+        from trading.reconciler import ExchangeReconciler
+        self.reconciler = ExchangeReconciler(
+            rest_client=self.rest,
+            passport_manager=self.passport_manager,
+            repository=self.passport_repository,
+            event_bus=self.bus,
+            symbols=[self.symbol],
+            interval_sec=60.0,
+            stale_order_age_sec=120.0
+        )
+        logger.info("✅ ExchangeReconciler initialized")
+
         # 14. Стратегии
         strategies_config = self.config.get('strategies', {})
         
@@ -635,6 +648,7 @@ class Platform:
 
         await self.drift_monitor.start(symbols=[self.symbol])        
         await self.orchestrator.start_stuck_orders_monitor()
+        await self.reconciler.start()
 
         logger.info("🔄 [STARTUP] Performing exchange state recovery (blocking)...")
         await self.orchestrator.perform_startup_recovery(self.symbol)
@@ -801,6 +815,12 @@ class Platform:
                 await self.verifier.stop_all()
             except Exception as e:
                 logger.error(f"Error stopping OrderVerifier: {e}")
+
+        if hasattr(self, 'reconciler'):
+            try:
+                await self.reconciler.stop()
+            except Exception as e:
+                logger.error(f"Error stopping Reconciler: {e}")
 
         await self.rest.close()
         self.json_logger.close()
