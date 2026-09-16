@@ -59,6 +59,11 @@ class Platform:
 
         # 🔥 НОВОЕ: кэш последней известной цены для мягкой деградации при сбоях REST
         self.last_known_price = 0.0
+        # 🔥 ФАЗА 1: порог свежести WS-стакана (сек).
+        # Стакан старше этого возраста = рынок не виден = итерацию пропускаем.
+        # REST больше НЕ используется для стакана вообще.
+        self.depth_freshness_sec = 3.0
+        self._stale_skips = 0  # счётчик пропусков для диагностики        
 
         # 1. Загрузка конфигов
         self.config = ConfigLoader().load_all()
@@ -631,27 +636,23 @@ class Platform:
 
         while self._running:
             try:
-                # 🔥 ИСПРАВЛЕНО: Получение цены (приоритет WS, fallback REST с защитой от сбоев)
-                if self.ws_price > 0:
-                    current_price = self.ws_price
-                else:
-                    current_price = 0.0
-                    try:
-                        orderbook = await self.rest.get_orderbook(self.symbol)
-                        bids = orderbook.get('bids', []) if orderbook else []
-                        asks = orderbook.get('asks', []) if orderbook else []
-                        if bids and asks:
-                            current_price = (float(bids[0][0]) + float(asks[0][0])) / 2
-                    except asyncio.TimeoutError:
-                        logger.warning("⚠️ [MAIN LOOP] REST orderbook timeout — используем последнюю известную цену")
-                    except Exception as e:
-                        logger.warning(f"⚠️ [MAIN LOOP] REST orderbook failed: {type(e).__name__} — используем последнюю известную цену")
+                # 🔥 ФАЗА 1: цена ТОЛЬКО из живого WS-стакана. REST-fallback УДАЛЁН.
+                # Если стакан протух (> depth_freshness_sec) — пропускаем итерацию:
+                # решения на протухших данных запрещены, REST бережём только под ордера.
+                depth_age = time.time() - getattr(self, '_last_price_update_ts', 0)
 
-                # 🔥 Кэш последней известной цены: если сейчас цена недоступна — берём её из кэша
-                if current_price > 0:
+                if self.ws_price > 0 and depth_age <= self.depth_freshness_sec:
+                    current_price = self.ws_price
                     self.last_known_price = current_price
-                elif self.last_known_price > 0:
-                    current_price = self.last_known_price
+                else:
+                    self._stale_skips += 1
+                    if self._stale_skips % 20 == 1:
+                        logger.warning(
+                            f"⚠️ [MAIN LOOP] WS-стакан протух ({depth_age:.1f}с) — "
+                            f"итерация пропущена без REST. Всего пропусков: {self._stale_skips}"
+                        )
+                    await asyncio.sleep(0.5)
+                    continue
 
                 current_time = time.time()
                 
