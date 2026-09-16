@@ -204,7 +204,7 @@ class Platform:
             passport_repository=self.passport_repository,  # 🔥 ДОБАВИТЬ ЭТО
             event_bus=self.bus,
             risk_manager=self.risk_manager,  # 🔥 ДОБАВИТЬ ЭТУ СТРОКУ
-            poll_interval=30.0
+            poll_interval=300.0  # 🔥 ФАЗА 2: 300 сек вместо 30 сек (разгрузка REST)
         )
         logger.info("✅ DriftMonitor initialized")
 

@@ -65,9 +65,21 @@ class DriftMonitor:
 
     async def _check_drift(self, symbol: str):
         """
-        Проверить дрейф для одного символа.
-        🔥 ИСПРАВЛЕНО: get_open_orders вызывается ТОЛЬКО после успешного get_position.
+        🔥 ФАЗА 2: пропускаем проверку при HEALTHY (WS сам рассказывает про ордера).
+        REST вызываем только если платформа DEGRADED/BLIND или есть активные паспорта.
         """
+        # 🔥 ФАЗА 2: Проверяем platform_health через активные паспорта
+        active_passports = self.passport_manager.get_active_by_symbol(symbol)
+        if not active_passports:
+            # Нет активных паспортов — нечего мониторить, пропускаем REST
+            self.logger.debug(f"⏭️ [DRIFT_MONITOR] {symbol}: нет активных паспортов, пропуск")
+            return
+        
+        # 🔥 ФАЗА 2: Если платформа HEALTHY и нет дрейфа в памяти — пропускаем REST
+        if getattr(active_passports, 'platform_health', 'HEALTHY') == 'HEALTHY':
+            self.logger.debug(f"⏭️ [DRIFT_MONITOR] {symbol}: HEALTHY, пропуск REST")
+            return
+        
         try:
             # 1. Получаем данные о позиции с биржи
             position_data = await self.rest.get_position(symbol)
