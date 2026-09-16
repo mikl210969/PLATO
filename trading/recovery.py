@@ -19,6 +19,9 @@ class RecoveryMixin(BaseMixin):
         3. Сверка сумм: локально vs биржа
         4. Создание RECOVERY или закрытие призраков
         """
+        # 🔥 ФАЗА 4: помечаем REST-запросы стартовой реконсиляции
+        from adapters.binance_rest import REST_CALLER
+        REST_CALLER.set("startup_recovery")
         self._log("startup_recovery_started", {"symbol": symbol})
         
         if not symbol:

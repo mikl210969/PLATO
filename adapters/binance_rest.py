@@ -19,6 +19,12 @@ import traceback
 
 from core.logger import get_logger
 
+# 🔥 ФАЗА 4: контекстная метка источника REST-запроса.
+# Каждая фоновая задача один раз ставит своё имя — и все её запросы
+# видны в логе с пометкой caller. Спаммер определяется мгновенно.
+import contextvars
+REST_CALLER = contextvars.ContextVar("rest_caller", default="unknown")
+
 class BinanceRestClient:
     """Клиент для работы с Binance REST API."""
 
@@ -173,9 +179,15 @@ class BinanceRestClient:
                 timeout = aiohttp.ClientTimeout(total=request_timeout)
 
                 # 🔥 PRAGMATIC TRIO #2: не более 3 параллельных запросов
+                t0 = time.time()
                 async with self._request_semaphore:
                     async with session.request(method, url, headers=headers, timeout=timeout) as resp:
                         data = await resp.json()
+                        # 🔥 ФАЗА 4: каждый REST-запрос виден: кто, куда, сколько мс
+                        self.logger.info(
+                            f"📡 [REST] {method} {path} | caller={REST_CALLER.get()} | "
+                            f"{int((time.time() - t0) * 1000)}ms"
+                        )
                         if isinstance(data, dict) and 'code' in data:
                             error_msg = f"Binance API error: {data.get('msg', 'Unknown error')} (code: {data.get('code')})"
                             if data.get('code') == -1003:

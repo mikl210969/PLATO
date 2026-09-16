@@ -104,6 +104,9 @@ class OrderVerifier:
         return 0.0, 'unresolved'
 
     async def _verify_loop(self, passport_id: str, order_id: str, symbol: str, client_order_id: str):
+        # 🔥 ФАЗА 4: помечаем запросы верификатора (с хвостом ID паспорта)
+        from adapters.binance_rest import REST_CALLER
+        REST_CALLER.set(f"order_verifier:{passport_id[-6:]}")
         try:
             for attempt in range(1, self.max_attempts + 1):
                 try:

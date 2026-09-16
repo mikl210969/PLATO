@@ -34,6 +34,9 @@ class MonitorMixin(BaseMixin):
         (при HEALTHY WS-события должны сами закрыть статус).
         """
         from core.types import PassportStatus
+        # 🔥 ФАЗА 4: помечаем все REST-запросы этого цикла
+        from adapters.binance_rest import REST_CALLER
+        REST_CALLER.set("stuck_orders_monitor")
         
         while getattr(self, '_running', True):
             await asyncio.sleep(30)  # 🔥 ФАЗА 3: было 5, стало 30

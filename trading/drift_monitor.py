@@ -50,6 +50,9 @@ class DriftMonitor:
 
     async def _monitor_loop(self, symbols: list):
         """Основной цикл проверки дрейфа."""
+        # 🔥 ФАЗА 4: помечаем все REST-запросы этого цикла
+        from adapters.binance_rest import REST_CALLER
+        REST_CALLER.set("drift_monitor")
         while self._running:
             try:
                 await asyncio.sleep(self.poll_interval)
