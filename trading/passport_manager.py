@@ -37,6 +37,11 @@ class PassportManager:
         self._passports[passport.passport_id] = passport
         return passport
 
+    def _save(self, passport):
+        """🔥 Безопасное сохранение: repository может быть None."""
+        if self.repository is not None:
+            self.repository.save(passport)
+
     def get(self, passport_id: str) -> Optional[TradePassport]:
         """Получить паспорт по ID."""
         return self._passports.get(passport_id)
@@ -209,7 +214,7 @@ class PassportManager:
         
         # 🔥 ДОБАВИТЬ ЭТИ ДВЕ СТРОКИ ЗДЕСЬ:
         passport.calculate_projected_pnls()
-        self.repository.save(passport) # Сохраняем сразу после расчета
+        self._save(passport)  # Сохраняем сразу после расчета
     
     def _handle_order_cancelled(self, passport, payload: Dict):
         passport.status = "CANCELLED"
@@ -228,34 +233,51 @@ class PassportManager:
         passport._guard_registered = True
 
     def _handle_sl_hit(self, passport, payload: Dict):
+        """
+        🔥 SL_HIT: слой данных. Вся работа с биржей (отмена входного ордера)
+        выполняется в async-слое risk_manager ДО этого вызова.
+        transition_to("CLOSED") обнуляет guard_status и пишет STATUS в timeline.
+        """
         passport.sl_activated = True
-        
-        # 🔥 1. ГАРАНТИРОВАННО ОБНУЛЯЕМ РАЗМЕР (никаких отрицательных значений)
-        passport.position_size = 0.0
-        passport.status = "CLOSED"
-        passport.exit_reason = "SL_HIT"
-        
+
+        # 🔥 1. Факт закрытого количества берём из payload (результат market-ордера)
+        # и синхронизируем filled_qty — паспорт не должен отставать от биржи
+        closed_qty = (
+            abs(float(payload.get("closed_qty", 0) or 0))
+            or abs(float(passport.filled_qty or 0))
+            or abs(float(passport.position_size or 0))
+        )
+        if closed_qty > 0:
+            passport.filled_qty = closed_qty
+
         # 🔥 2. ЗАЩИТА ОТ exit_price = 0.0
         exit_price = payload.get("price", 0)
         if not exit_price or exit_price <= 0:
-            # Fallback: если цена не пришла из-за обрыва сети, используем цену SL как наименьшее зло
             exit_price = passport.sl_price or passport.position_entry_price or passport.entry_price
             self.logger.warning(f"⚠️ SL_HIT: exit_price=0, используем fallback: {exit_price}")
-            
-        passport.exit_price = round(exit_price, 8)
-        
-        # 🔥 3. БЕЗОПАСНЫЙ РАСЧЕТ PnL
-        closed_qty = abs(payload.get("closed_qty", 0)) or abs(passport.position_size) or 7.0
-        
+        passport.exit_price = round(float(exit_price), 8)
+
+        # 🔥 3. PnL из фактических данных
         if passport.side == "short":
-            gross_pnl = (passport.position_entry_price - exit_price) * closed_qty
+            gross_pnl = (passport.position_entry_price - passport.exit_price) * closed_qty
         else:
-            gross_pnl = (exit_price - passport.position_entry_price) * closed_qty
-            
+            gross_pnl = (passport.exit_price - passport.position_entry_price) * closed_qty
+
         passport.gross_pnl = round(gross_pnl, 2)
         passport.commission = round(payload.get("commission", 0) or getattr(passport, 'commission', 0), 2)
         passport.net_pnl = round(passport.gross_pnl - passport.commission, 2)
+        passport.real_pnl = passport.gross_pnl  # 🔥 FIX: real_pnl у закрытого паспорта
+
+        # 🔥 4. Обнуляем размер и переходим в CLOSED через transition_to
+        passport.position_size = 0.0
+        passport.exit_reason = "SL_HIT"
+        passport.transition_to("CLOSED", "SL_HIT")
         passport.closed_at = datetime.now(timezone.utc).isoformat()
+
+        self.logger.info(
+            f"✅ SL_HIT complete: {passport.passport_id} | qty={closed_qty} | "
+            f"exit={passport.exit_price} | PnL={passport.gross_pnl}"
+        )
 
     def _handle_tp1_hit(self, passport, payload: Dict):
         passport.tp1_activated = True
@@ -374,7 +396,7 @@ class PassportManager:
         if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
             passport.guard_status = "active"
         
-        self.repository.save(passport)
+        self._save(passport)
     
     # Утилиты
     def _calculate_pnl(self, passport, exit_price: float, qty: float) -> float:

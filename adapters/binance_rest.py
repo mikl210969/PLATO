@@ -263,6 +263,55 @@ class BinanceRestClient:
         ).hexdigest()
         return signature
 
+    def get_position_sync(self, symbol: str) -> Optional[Dict]:
+        """Синхронная версия для вызова из синхронных handler'ов."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Мы в async контексте — используем run_until_complete
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self.get_position(symbol))
+                    return future.result(timeout=5)
+            else:
+                return asyncio.run(self.get_position(symbol))
+        except Exception as e:
+            self.logger.warning(f"⚠️ get_position_sync failed: {e}")
+            return None
+
+    def get_open_orders_sync(self, symbol: str) -> Optional[List[Dict]]:
+        """Синхронная версия для вызова из синхронных handler'ов."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self.get_open_orders_strict(symbol))
+                    return future.result(timeout=5)
+            else:
+                return asyncio.run(self.get_open_orders_strict(symbol))
+        except Exception as e:
+            self.logger.warning(f"⚠️ get_open_orders_sync failed: {e}")
+            return None
+
+    def cancel_order_sync(self, symbol: str, order_id: str) -> Dict:
+        """Синхронная версия для вызова из синхронных handler'ов."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self.cancel_order(symbol, order_id))
+                    return future.result(timeout=5)
+            else:
+                return asyncio.run(self.cancel_order(symbol, order_id))
+        except Exception as e:
+            self.logger.warning(f"⚠️ cancel_order_sync failed: {e}")
+            return {"success": False, "error": str(e)}
+
     async def get_position(self, symbol: str):
         """Получить позицию по символу."""
         if self._ban_active():

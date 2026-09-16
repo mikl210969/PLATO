@@ -475,6 +475,9 @@ class RiskManager:
                     ok = await self._close_market(passport, guard, qty, 'SL_HIT')
                     if ok:
                         guard['remaining'] = 0.0
+                        # 🔥 БИРЖА-ЦЕНТРИЧНО: гасим входной лимитник сразу после закрытия,
+                        # чтобы остаток не исполнился в пустую позицию
+                        await self._cancel_entry_orders(passport)
                         # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ
                         await self.passport_manager.apply_change(
                             passport_id=passport.passport_id,
@@ -573,6 +576,41 @@ class RiskManager:
         })
         
         return bool(result.get('success'))
+
+    async def _cancel_entry_orders(self, passport):
+        """
+        🔥 БИРЖА-ЦЕНТРИЧНО: после полного закрытия позиции отменяем входные
+        ордера паспорта (не reduceOnly), живые на бирже. Protect-ордера не трогаем.
+        """
+        try:
+            open_orders = await self.trader.rest.get_open_orders_strict(passport.symbol)
+            if not open_orders:
+                return
+            passport_cids = {
+                str(o.get('client_order_id', '')) for o in (getattr(passport, 'orders', []) or [])
+            }
+            for o in open_orders:
+                if str(o.get('status', '')) not in ('NEW', 'PARTIALLY_FILLED'):
+                    continue
+                if bool(o.get('reduceOnly', False)):
+                    continue
+                cid = str(o.get('clientOrderId', '') or '')
+                if cid in passport_cids:
+                    order_id = str(o.get('orderId', '') or '')
+                    res = await self.trader.cancel_order(passport.symbol, order_id)
+                    self._log("entry_order_canceled_after_close", {
+                        "passport_id": passport.passport_id,
+                        "order_id": order_id,
+                        "client_order_id": cid,
+                        "success": res.get('success', False),
+                        "error": res.get('error', '')
+                    })
+        except Exception as e:
+            self._log("entry_order_cancel_failed", {
+                "passport_id": passport.passport_id,
+                "error": str(e)
+            })
+
 
     async def _full_close_qty(self, passport: TradePassport, guard: Dict) -> float:
         qty = round(float(guard['remaining']), 2)
