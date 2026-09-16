@@ -27,11 +27,16 @@ class MonitorMixin(BaseMixin):
                 pass
 
     async def _check_stuck_orders_loop(self):
-        """Фоновая проверка зависших ордеров в ORDER_SENT или ORDER_ACK."""
+        """
+        Фоновая проверка зависших ордеров в ORDER_SENT или ORDER_ACK.
+        🔥 ФАЗА 3: интервал увеличен с 5 до 30 сек; REST-проверка запускается
+        только для ордеров старше 30 сек и когда платформа не HEALTHY
+        (при HEALTHY WS-события должны сами закрыть статус).
+        """
         from core.types import PassportStatus
         
         while getattr(self, '_running', True):
-            await asyncio.sleep(5)
+            await asyncio.sleep(30)  # 🔥 ФАЗА 3: было 5, стало 30
             
             for passport in self.passport_manager.get_active():
                 # Проверяем и ORDER_SENT, и ORDER_ACK
@@ -47,8 +52,18 @@ class MonitorMixin(BaseMixin):
                 except AttributeError:
                     continue
                     
-                # Проверяем ордеры, которые висят дольше 10 секунд
-                if age < 10:
+                # 🔥 ФАЗА 3: даём WS-событиям 30 секунд вместо 10
+                if age < 30:
+                    continue
+                
+                # 🔥 ФАЗА 3: если платформа HEALTHY и ордеру меньше 2 минут —
+                # ждём WS-событие, REST не дёргаем
+                if getattr(passport, 'platform_health', 'HEALTHY') == 'HEALTHY' and age < 120:
+                    self._log("stuck_order_deferred_ws_expected", {
+                        "passport_id": passport.passport_id,
+                        "status": passport.status,
+                        "age_sec": round(age, 1)
+                    })
                     continue
                 
                 self._log("stuck_order_check", {
