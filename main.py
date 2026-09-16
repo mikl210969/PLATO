@@ -641,6 +641,11 @@ class Platform:
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
 
         # 10. Основной цикл платформы
+        # 🔥 FIX: сбрасываем caller-тег после recovery, иначе он "заражает"
+        # все запросы main loop (ордера помечались как startup_recovery)
+        from adapters.binance_rest import REST_CALLER
+        REST_CALLER.set("main_loop")
+
         last_log_time = 0
         last_position_check_time = 0
 

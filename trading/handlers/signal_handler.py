@@ -385,13 +385,58 @@ class SignalHandlerMixin:
 
         print(f"🚀 [ПЕРЕД ОТПРАВКОЙ] Символ: {signal.symbol} | Количество (quantity): {quantity} | Цена: {signal.entry_price}")
         
+        # 🔥 УРОВЕНЬ 1: ИНВАРИАНТ «1 символ = 1 живой ордер» (биржа-centric).
+        # Паспорт может ошибаться (сбой, рестарт, гонка), биржа — никогда.
+        # Перед отправкой входного ордера запрашиваем живые ордера с биржи.
+        # Если там есть ордер в статусе NEW/PARTIALLY_FILLED — отменяем его.
+        # Каждый новый сигнал ЗАМЕЩАЕТ предыдущий ордер на бирже.
+        try:
+            open_orders = await trader.rest.get_open_orders(signal.symbol)
+            if open_orders:
+                superseded_count = 0
+                for o in open_orders:
+                    order_status = str(o.get('status', ''))
+                    if order_status in ('NEW', 'PARTIALLY_FILLED'):
+                        order_id = str(o.get('orderId', ''))
+                        client_id = o.get('clientOrderId', '')
+                        
+                        cancel_result = await trader.cancel_order(signal.symbol, order_id)
+                        superseded_count += 1
+                        
+                        self._log("order_superseded", {
+                            "new_passport_id": passport.passport_id,
+                            "new_signal_id": signal.signal_id,
+                            "old_order_id": order_id,
+                            "old_client_id": client_id,
+                            "old_status": order_status,
+                            "cancel_success": cancel_result.get('success', False),
+                            "cancel_error": cancel_result.get('error', '')
+                        })
+                
+                if superseded_count > 0:
+                    print(
+                        f"🔄 [INVARIANT] Замещено {superseded_count} старых ордеров на бирже "
+                        f"перед новым сигналом {signal.signal_id}"
+                    )
+                    self._log("invariant_superseded", {
+                        "passport_id": passport.passport_id,
+                        "signal_id": signal.signal_id,
+                        "superseded_count": superseded_count
+                    })
+        except Exception as e:
+            print(f"⚠️ [INVARIANT] Не удалось проверить живые ордера: {e}")
+            self._log("invariant_check_failed", {
+                "passport_id": passport.passport_id,
+                "error": str(e)
+            })
+            # Продолжаем отправку — лучше рискнуть дублем, чем потерять сигнал
+        
         result = await trader.execute_order(
             symbol=signal.symbol,  
             side=signal.side, 
             quantity=quantity, 
             order_type=order_type,
             client_order_id=rich_client_order_id,
-            passport_id=passport.passport_id,
             limit_price=signal.entry_price if order_type == 'limit' else None
         )
 
