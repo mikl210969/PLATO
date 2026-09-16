@@ -207,7 +207,13 @@ class OrderHandlerMixin:
                 passport.position_size = abs(executed_qty)
                 # 🔥 Сверяем фактический размер с биржей (защита от чанков)
                 await self._reconcile_position_from_exchange(passport, passport.symbol)                
-                if avg_price > 0: passport.position_entry_price = avg_price
+                # 🔥 Testnet шлёт avg_price=0: цепочка fallback — last_price → лимитная цена сигнала
+                if avg_price <= 0:
+                    avg_price = float(payload.get('last_price', 0) or 0)
+                if avg_price <= 0:
+                    avg_price = float(getattr(passport, 'entry_price', 0) or 0)
+                if avg_price > 0:
+                    passport.position_entry_price = avg_price
                 
                 # 🔥 КРИТИЧНО: Пересчитываем проектный PnL после обновления размера
                 passport.calculate_projected_pnls()
@@ -282,6 +288,11 @@ class OrderHandlerMixin:
         passport.filled_qty = new_cumulative_filled
         passport.position_size = new_cumulative_filled
         
+        # 🔥 Testnet шлёт avg_price=0: цепочка fallback — last_price → лимитная цена сигнала
+        if avg_price <= 0.0:
+            avg_price = float(payload.get('last_price', 0) or 0)
+        if avg_price <= 0.0:
+            avg_price = float(getattr(passport, 'entry_price', 0) or 0)
         if avg_price > 0.0:
             passport.position_entry_price = avg_price
         

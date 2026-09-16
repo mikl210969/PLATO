@@ -215,6 +215,17 @@ class TradePassport:
         🔥 ИСПРАВЛЕНО: если вызывающий код не передал gross_pnl, он вычисляется
         из эффективной цены входа и цены выхода (защита от нулевого PnL).
         """
+        # 🔥 ИДЕМПОТЕНТНОСТЬ: паспорт можно закрыть только один раз.
+        # Повторные close() (поздние события с ценой 0) не затирают факт закрытия.
+        if self.status == PassportStatus.CLOSED.value:
+            return
+
+        # 🔥 ЗАЩИТА exit_price: никогда не пишем 0 — берём ближайшую осмысленную цену
+        if not exit_price or exit_price <= 0:
+            exit_price = (
+                self.sl_price or self.tp1_price or self.position_entry_price or self.entry_price
+            )
+
         closed_qty = self.position_size if self.position_size > 0.0 else self.filled_qty
         entry = self.get_effective_entry_price()
 
@@ -233,6 +244,7 @@ class TradePassport:
         self.net_pnl = gross_pnl - commission
         self.real_pnl = gross_pnl
         self.position_size = 0.0  # Обнуляем при закрытии
+        self.calculate_projected_pnls()  # 🔥 пересчёт после закрытия: real_pnl = gross_pnl
     
     def to_dict(self) -> Dict[str, Any]:
         """Преобразовать в словарь."""
