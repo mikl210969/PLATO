@@ -455,6 +455,16 @@ class Platform:
             except Exception as e:
                 logger.error(f"Error processing depth update: {e}")
         self.ws.on("depthUpdate", on_depth_update)
+        # 🔥 FIX: используем цену из Spot aggTrade (работает стабильно)
+        # Diff depth stream требует initial snapshot — это сложная правка.
+        # Trades уже работают и дают актуальную цену.
+        async def on_normalized_trade(event: Event):
+            price = event.payload.get('price', 0.0)
+            if price > 0:
+                self.ws_price = price
+                self._last_price_update_ts = time.time()
+        
+        self.bus.subscribe("TRADE_NORMALIZED_SOLUSDT", on_normalized_trade)
 
         async def on_btc_agg_trade(data):
             await self.bus.publish(
