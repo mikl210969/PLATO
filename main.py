@@ -59,6 +59,7 @@ class Platform:
 
         # 🔥 НОВОЕ: кэш последней известной цены для мягкой деградации при сбоях REST
         self.last_known_price = 0.0
+        self._last_user_data_ts = time.time()  # 🔥 свежесть User Data (для health-check)        
         # 🔥 ФАЗА 1: порог свежести WS-стакана (сек).
         # Стакан старше этого возраста = рынок не виден = итерацию пропускаем.
         # REST больше НЕ используется для стакана вообще.
@@ -441,6 +442,14 @@ class Platform:
             )
         self.ws.on("ACCOUNT_UPDATE", on_account_update)
 
+        # 🔥 Обновляем timestamp при каждом User Data событии (для health-check)
+        original_user_data_handler = self.ws._handlers.get("USER_DATA", None)
+        if original_user_data_handler:
+            async def user_data_timestamp_updater(data):
+                self._last_user_data_ts = time.time()
+                await original_user_data_handler(data)
+            self.ws._handlers["USER_DATA"] = user_data_timestamp_updater
+
         async def on_depth_update(data):
             try:
                 bids = data.get('b', [])
@@ -450,13 +459,6 @@ class Platform:
                     # 🔥 ЦЕНА НЕ ИЗ DIFF-СТАКАНА: без snapshot его mid даёт фантом (кейс 103.095).
                     # Источник цены — только сделки. Стакан обслуживает детекторы.
                     self._last_price_update_ts = time.time()
-                    
-                    await self.bus.publish(
-                        event_type="MARKET_ORDERBOOK",
-                        source="ws_adapter",
-                        payload={"bids": bids, "asks": asks, "E": data.get('E', int(time.time() * 1000))},
-                        symbol=self.symbol
-                    )
             except Exception as e:
                 logger.error(f"Error processing depth update: {e}")
         self.ws.on("depthUpdate", on_depth_update)
@@ -513,7 +515,16 @@ class Platform:
         await self.ws.subscribe_user_data(listen_key, refresh_key_callback=refresh_listen_key_callback)
         logger.info(f"✅ User data stream subscribed: {listen_key[:10]}...")
 
+        # 🔥 LIVE RECOVERY: после каждого reconnect User Data запускаем сверку
+        async def on_user_data_reconnected():
+            logger.warning("🔁 [LIVE_RECOVERY] User Data reconnected — запускаем сверку")
+            try:
+                await self.orchestrator.perform_live_recovery(self.symbol, minutes_back=30)
+            except Exception as e:
+                logger.error(f"❌ [LIVE_RECOVERY] Failed: {e}")
         
+        self.ws.set_on_reconnect(on_user_data_reconnected)
+        logger.info("✅ Live recovery callback registered")        
         
         await self.ws.subscribe_btc_streams()
 
@@ -534,9 +545,16 @@ class Platform:
                     rest_is_banned = getattr(self.rest, '_ban_active', lambda: False)()
                     ws_ok = md_age < 45
                     
+                    # 🔥 НОВОЕ: проверяем живость User Data отдельно
+                    user_data_age = time.time() - getattr(self, '_last_user_data_ts', time.time())
+                    has_active = self.passport_manager.get_active_by_symbol(self.symbol) is not None
+                    user_data_dead = user_data_age > 180 and has_active  # > 3 мин при активных паспортах
+                    
                     # 2. Определяем platform_health
-                    if ws_ok and not rest_is_banned:
+                    if ws_ok and not rest_is_banned and not user_data_dead:
                         new_health = "HEALTHY"
+                    elif user_data_dead:
+                        new_health = "BLIND"  # User Data мёртв при активных паспортах
                     elif ws_ok or not rest_is_banned:
                         new_health = "DEGRADED"  # Один канал жив, второй мертв
                     else:
@@ -636,6 +654,25 @@ class Platform:
         self._ws_task = asyncio.create_task(self.ws.run())
         self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
         self._health_check_task = asyncio.create_task(user_data_health_check())
+
+        # 🔥 WATCHDOG: следит за живостью фоновых задач
+        async def tasks_watchdog():
+            while getattr(self, '_running', True):
+                await asyncio.sleep(60)
+                dead_tasks = []
+                
+                if hasattr(self, 'reconciler') and self.reconciler._task and self.reconciler._task.done():
+                    dead_tasks.append("reconciler")
+                    await self.reconciler.start()
+                
+                if hasattr(self, 'drift_monitor') and self.drift_monitor._task and self.drift_monitor._task.done():
+                    dead_tasks.append("drift_monitor")
+                    await self.drift_monitor.start(symbols=[self.symbol])
+                
+                if dead_tasks:
+                    logger.warning(f"🚨 [WATCHDOG] Перезапущены мёртвые задачи: {', '.join(dead_tasks)}")
+        
+        self._watchdog_task = asyncio.create_task(tasks_watchdog())
 
         # 🔥 PRAGMATIC TRIO #1: Startup Prefetch
         # Загружаем exchangeInfo ОДИН раз, синхронно, ДО старта фоновых задач.

@@ -10,7 +10,9 @@ import traceback
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
+from core.logger import get_logger
 
+logger = get_logger(__name__)
 
 @dataclass
 class Event:
@@ -45,9 +47,11 @@ class EventBus:
             try:
                 await handler(event)
             except Exception as e:
-                print(f"❌ [EVENT_BUS] Handler error: {e}")
-                print("🔥 ПОЛНАЯ ТРАССИРОВКА ОШИБКИ (TRACEBACK):")
-                traceback.print_exc()
+                tb = traceback.format_exc()
+                logger.error(
+                    f"❌ [EVENT_BUS] Handler error | event={event.type} | source={event.source} | "
+                    f"error={type(e).__name__}: {e}\n{tb}"
+                )
 
         if event_type not in self._handlers:
             self._handlers[event_type] = []

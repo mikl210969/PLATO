@@ -334,6 +334,7 @@ class RecoveryMixin(BaseMixin):
         self._log("live_recovery_completed", {"symbol": symbol})
 
 
+
     async def _create_recovery_passport(
         self,
         symbol: str,
