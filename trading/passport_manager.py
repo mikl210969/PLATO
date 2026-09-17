@@ -169,6 +169,7 @@ class PassportManager:
             "TP1_HIT": ["OPEN"],
             "TP2_HIT": ["OPEN", "PARTIAL_CLOSE"],
             "SL_HIT": ["OPEN", "PARTIAL_CLOSE"],
+            "SL_MOVED_TO_BREAKEVEN": ["OPEN", "PARTIAL_CLOSE"],
             "PARTIAL_CLOSE": ["OPEN"],
             "EXTERNAL_CLOSE": ["OPEN", "PARTIAL_CLOSE"],
             "RECOVERY_OPEN": ["ORDER_SENT", "OPEN"]
@@ -188,6 +189,7 @@ class PassportManager:
             "TP1_HIT": self._handle_tp1_hit,
             "TP2_HIT": self._handle_tp2_hit,
             "SL_HIT": self._handle_sl_hit,
+            "SL_MOVED_TO_BREAKEVEN": self._handle_sl_moved_to_breakeven,
             "PARTIAL_CLOSE": self._handle_partial_close,
             "EXTERNAL_CLOSE": self._handle_external_close,
             "RECOVERY_OPEN": self._handle_recovery_open
@@ -238,6 +240,11 @@ class PassportManager:
         выполняется в async-слое risk_manager ДО этого вызова.
         transition_to("CLOSED") обнуляет guard_status и пишет STATUS в timeline.
         """
+        # 🔥 ИДЕМПОТЕНТНОСТЬ: если паспорт уже CLOSED, не пересчитываем PnL
+        # (защита от двойного вызова через state_manager и apply_change)
+        if passport.status == "CLOSED":
+            return
+        
         passport.sl_activated = True
 
         # 🔥 1. Факт закрытого количества берём из payload (результат market-ордера)
@@ -263,6 +270,15 @@ class PassportManager:
         else:
             gross_pnl = (passport.exit_price - passport.position_entry_price) * closed_qty
 
+        # 🔥 ДИАГНОСТИКА: логируем все значения в момент расчёта PnL
+        self.logger.info(
+            f"🧮 [SL_HIT PnL] {passport.passport_id} | entry={passport.position_entry_price} | "
+            f"exit={passport.exit_price} | qty={closed_qty} | side={passport.side} | "
+            f"formula=({passport.position_entry_price} - {passport.exit_price}) * {closed_qty}"
+        )
+        
+        passport.gross_pnl = round(gross_pnl, 2)
+
         passport.gross_pnl = round(gross_pnl, 2)
         passport.commission = round(payload.get("commission", 0) or getattr(passport, 'commission', 0), 2)
         passport.net_pnl = round(passport.gross_pnl - passport.commission, 2)
@@ -278,6 +294,17 @@ class PassportManager:
             f"✅ SL_HIT complete: {passport.passport_id} | qty={closed_qty} | "
             f"exit={passport.exit_price} | PnL={passport.gross_pnl}"
         )
+
+    def _handle_sl_moved_to_breakeven(self, passport, payload: Dict):
+        """Перенос SL в безубыток после TP1."""
+        new_sl = payload.get("price", 0)
+        if new_sl > 0:
+            passport.sl_price = round(float(new_sl), 8)
+            self.logger.info(
+                f"🛡️ [SL BREAKEVEN] {passport.passport_id} | new_sl={new_sl} | "
+                f"reason={payload.get('reason', '')}"
+            )
+
 
     def _handle_tp1_hit(self, passport, payload: Dict):
         passport.tp1_activated = True
