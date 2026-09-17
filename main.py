@@ -442,14 +442,6 @@ class Platform:
             )
         self.ws.on("ACCOUNT_UPDATE", on_account_update)
 
-        # 🔥 Обновляем timestamp при каждом User Data событии (для health-check)
-        original_user_data_handler = self.ws._handlers.get("USER_DATA", None)
-        if original_user_data_handler:
-            async def user_data_timestamp_updater(data):
-                self._last_user_data_ts = time.time()
-                await original_user_data_handler(data)
-            self.ws._handlers["USER_DATA"] = user_data_timestamp_updater
-
         async def on_depth_update(data):
             try:
                 bids = data.get('b', [])
@@ -546,7 +538,7 @@ class Platform:
                     ws_ok = md_age < 45
                     
                     # 🔥 НОВОЕ: проверяем живость User Data отдельно
-                    user_data_age = time.time() - getattr(self, '_last_user_data_ts', time.time())
+                    user_data_age = time.time() - getattr(self.ws, '_last_user_data_ts', time.time())
                     has_active = self.passport_manager.get_active_by_symbol(self.symbol) is not None
                     user_data_dead = user_data_age > 180 and has_active  # > 3 мин при активных паспортах
                     

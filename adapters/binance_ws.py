@@ -13,6 +13,7 @@ Binance WebSocket адаптер (Production-Ready).
 - Диагностика: при таймауте логируется количество активных подписок.
 """
 import asyncio
+import time
 import json
 import websockets
 from typing import Dict, Any, Optional, Callable, Awaitable, List
@@ -42,6 +43,8 @@ class BinanceWsAdapter:
         self._ws = None
 
         self._running = False
+        self._last_user_data_ts = time.time()  # 🔥 для health-check
+
         self._connected = False
         self._healthy = False
 
@@ -552,6 +555,16 @@ class BinanceWsAdapter:
                 f" | {data['o'].get('c')} | {data['o'].get('X')}" if "o" in data else ""
             )
             print(f"📥 [WS_EVENT] {event_type}{extra}")
+
+        if event_type in ("ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE"):
+            extra = (
+                f" | {data['o'].get('c')} | {data['o'].get('X')}" if "o" in data else ""
+            )
+            print(f"📥 [WS_EVENT] {event_type}{extra}")
+            # 🔥 Обновляем timestamp живости User Data для health-check
+            self._last_user_data_ts = time.time()
+
+        handler = self._handlers.get(event_type)
 
         handler = self._handlers.get(event_type)
         if handler:
