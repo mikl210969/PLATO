@@ -107,10 +107,16 @@ class OrderHandlerMixin:
 
             # 2. Если мы дошли сюда, значит cumulative_executed_qty > 0 (либо изначально, либо после REST)
             if cumulative_executed_qty > 0:
+                # 🔥 Testnet шлёт avg_price=0: цепочка fallback — last_price → лимитная цена сигнала
+                if avg_price <= 0.0:
+                    avg_price = float(order_data.get('last_price', 0) or order_data.get('l', 0) or 0)
+                if avg_price <= 0.0:
+                    avg_price = float(getattr(passport, 'entry_price', 0) or 0)
                 # Жестко обновляем размер и цену входа
                 passport.position_size = cumulative_executed_qty
                 if avg_price > 0.0:
                     passport.position_entry_price = avg_price
+                    passport.avg_price = round(avg_price, 8)
                 
                 passport.filled_qty = cumulative_executed_qty
                 
