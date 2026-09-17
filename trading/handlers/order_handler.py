@@ -223,8 +223,12 @@ class OrderHandlerMixin:
                     avg_price = float(getattr(passport, 'entry_price', 0) or 0)
                 if avg_price > 0:
                     passport.position_entry_price = avg_price
-                
                 # 🔥 КРИТИЧНО: Пересчитываем проектный PnL после обновления размера
+                passport.calculate_projected_pnls()
+            elif abs(float(passport.position_size or 0)) < 0.001:
+                # 🔥 WS-филлы не дошли (паспорт стал OPEN через REST-путь верификатора).
+                # Биржа = правда: размер и цена входа берутся из позиции на бирже абсолютом.
+                await self._reconcile_position_from_exchange(passport, passport.symbol)
                 passport.calculate_projected_pnls()
                 
                 self.repository.save(passport)

@@ -543,14 +543,16 @@ class Platform:
                     user_data_dead = user_data_age > 180 and has_active  # > 3 мин при активных паспортах
                     
                     # 2. Определяем platform_health
+                    # 🔥 BLIND = полная слепота: market data МЁРТВА и REST недоступен.
+                    # Тишина User Data при живом REST — это DEGRADED: drift-монитор
+                    # сверяет позицию через REST, guard живёт на ценах сделок.
                     if ws_ok and not rest_is_banned and not user_data_dead:
                         new_health = "HEALTHY"
-                    elif user_data_dead:
-                        new_health = "BLIND"  # User Data мёртв при активных паспортах
-                    elif ws_ok or not rest_is_banned:
-                        new_health = "DEGRADED"  # Один канал жив, второй мертв
+                    elif not ws_ok and rest_is_banned:
+                        new_health = "BLIND"
                     else:
-                        new_health = "BLIND"     # Мертвы оба канала
+                        new_health = "DEGRADED"
+
                     
                     # 3. Обновляем статусы во всех активных паспортах
                     active_passports = self.passport_manager.get_active()

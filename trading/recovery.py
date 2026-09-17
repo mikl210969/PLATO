@@ -82,7 +82,29 @@ class RecoveryMixin(BaseMixin):
                 return
 
             if diff > 0.01:
-                # Сирота на бирже: exchange > local
+                # 🔥 FIX B: ОДНА позиция = ОДИН паспорт.
+                # Живой паспорт того же символа и стороны УСЫНОВЛЯЕТ правду биржи
+                # (размер и вход абсолютом). RECOVERY-паспорт создаётся ТОЛЬКО если
+                # живого паспорта нет — иначе дубль с вторым guard на ту же позицию.
+                active = self.passport_manager.get_active_by_symbol(symbol)
+                if active is not None and str(active.side).lower() == str(exchange_side).lower():
+                    self._log("recovery_adopted_into_existing_passport", {
+                        "passport_id": active.passport_id,
+                        "local_size_was": local_sum,
+                        "exchange_size": exchange_size,
+                        "exchange_entry": exchange_entry,
+                    })
+                    active.position_size = exchange_size
+                    active.filled_qty = exchange_size
+                    if exchange_entry > 0:
+                        active.position_entry_price = exchange_entry
+                        active.avg_price = round(exchange_entry, 8)
+                    active.calculate_projected_pnls()
+                    if getattr(self, 'repository', None) is not None:
+                        self.repository.save(active)
+                    return
+
+                # Сирота на бирже: exchange > local, живого паспорта нет
                 # Создаём RECOVERY паспорт на разницу
                 await self._create_recovery_passport(
                     symbol=symbol,
