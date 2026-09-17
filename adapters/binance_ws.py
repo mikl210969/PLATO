@@ -232,8 +232,8 @@ class BinanceWsAdapter:
     # ──────────────────────────────────────────────────────────────
 
     async def subscribe_depth(self, symbol: str):
-        """Подписаться на стакан символа (SPOT depth20@100ms)."""
-        stream = f"{symbol.lower()}@depth20@100ms"
+        """Подписаться на стакан символа (SPOT depth@100ms - diff book)."""
+        stream = f"{symbol.lower()}@depth@100ms"
 
         if not self._connected or self._ws is None:
             # 🔥 ИСПРАВЛЕНО: добавляем в pending, а не игнорируем

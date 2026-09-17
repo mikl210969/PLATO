@@ -76,6 +76,9 @@ class OrderHandlerMixin:
             
         elif order_status in ('PARTIALLY_FILLED', 'FILLED'):
             # 1. Читаем данные из события
+
+
+            
             cumulative_executed_qty = float(order_data.get('executed_qty') or order_data.get('z') or 0.0)
             avg_price = float(order_data.get('price') or order_data.get('ap') or 0.0)
             

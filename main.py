@@ -447,17 +447,9 @@ class Platform:
                 asks = data.get('a', [])
                 self.ws_orderbook = {'bids': bids, 'asks': asks}
                 if bids and asks:
-                    best_bid = float(bids[0][0])
-                    best_ask = float(asks[0][0])
-                    self.ws_price = (best_bid + best_ask) / 2
+                    # 🔥 ЦЕНА НЕ ИЗ DIFF-СТАКАНА: без snapshot его mid даёт фантом (кейс 103.095).
+                    # Источник цены — только сделки. Стакан обслуживает детекторы.
                     self._last_price_update_ts = time.time()
-
-                    await self.bus.publish(
-                        event_type="PRICE_UPDATE",
-                        source="main",
-                        payload={'symbol': self.symbol, 'price': self.ws_price, 'ts': time.time()},
-                        symbol=self.symbol
-                    )
                     
                     await self.bus.publish(
                         event_type="MARKET_ORDERBOOK",
@@ -476,6 +468,13 @@ class Platform:
             if price > 0:
                 self.ws_price = price
                 self._last_price_update_ts = time.time()
+                # 🔥 ЕДИНСТВЕННЫЙ источник PRICE_UPDATE для RiskManager — сделки
+                await self.bus.publish(
+                    event_type="PRICE_UPDATE",
+                    source="main",
+                    payload={'symbol': self.symbol, 'price': price, 'ts': time.time()},
+                    symbol=self.symbol
+                )
         
         self.bus.subscribe("TRADE_NORMALIZED_SOLUSDT", on_normalized_trade)
 
@@ -513,6 +512,8 @@ class Platform:
         # 6. Запуск User Data Stream с переданным callback-ом
         await self.ws.subscribe_user_data(listen_key, refresh_key_callback=refresh_listen_key_callback)
         logger.info(f"✅ User data stream subscribed: {listen_key[:10]}...")
+
+        
         
         await self.ws.subscribe_btc_streams()
 

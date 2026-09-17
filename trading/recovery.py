@@ -280,6 +280,60 @@ class RecoveryMixin(BaseMixin):
         else:
             return (exit_price - passport.position_entry_price) * quantity
 
+    async def perform_live_recovery(self, symbol: str, minutes_back: int = 30):
+        """
+        🔥 LIVE RECOVERY: сверка после реконнекта User Data.
+        Биржа = правда: абсолютный размер и цена входа позиции переносятся
+        в активный паспорт. Абсолютная перезапись идемпотентна по построению.
+        Guard перерегистрируется RiskManager'ом на ближайшем PRICE_UPDATE.
+        """
+        from adapters.binance_rest import REST_CALLER
+        REST_CALLER.set("live_recovery")
+        self._log("live_recovery_started", {"symbol": symbol})
+
+        trader = self.get_trader(symbol)
+        if not trader:
+            return
+
+        try:
+            pos = await trader.rest.get_position(symbol)
+            exchange_size = abs(float(pos.get('size', 0) or 0)) if pos else 0.0
+            exchange_entry = float(pos.get('entryPrice', 0) or 0) if pos else 0.0
+
+            active = self.passport_manager.get_active_by_symbol(symbol)
+            if active and exchange_size > 0.001:
+                local_size = abs(float(active.position_size or 0))
+                drift = abs(exchange_size - local_size) > 0.01
+                entry_drift = exchange_entry > 0 and abs(
+                    exchange_entry - float(active.position_entry_price or 0)
+                ) > 1e-9
+                if drift or entry_drift:
+                    self._log("live_recovery_sync", {
+                        "passport_id": active.passport_id,
+                        "exchange_size": exchange_size,
+                        "local_size": local_size,
+                        "exchange_entry": exchange_entry,
+                    })
+                    active.position_size = exchange_size
+                    active.filled_qty = exchange_size
+                    if exchange_entry > 0:
+                        active.position_entry_price = exchange_entry
+                        active.avg_price = round(exchange_entry, 8)
+                    active.calculate_projected_pnls()
+                    if getattr(self, 'repository', None) is not None:
+                        self.repository.save(active)
+            elif active is None and exchange_size > 0.001:
+                self._log("live_recovery_orphan_position", {
+                    "symbol": symbol,
+                    "exchange_size": exchange_size,
+                    "note": "нет активного паспорта — усыновление на следующем старте",
+                })
+        except Exception as e:
+            self._log("live_recovery_failed", {"error": str(e)})
+
+        self._log("live_recovery_completed", {"symbol": symbol})
+
+
     async def _create_recovery_passport(
         self,
         symbol: str,
