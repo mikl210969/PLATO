@@ -569,11 +569,12 @@ class Platform:
                                 passport.guard_status = "active"
                                 passport.add_timeline_event("HEALTH_RESTORED", "Connection restored, Guard active")
                             elif new_health == "DEGRADED":
-                                passport.guard_status = "suspended"
-                                passport.add_timeline_event("HEALTH_DEGRADED", "WS lost, Guard suspended (REST fallback active)")
+                                # 🔥 FIX: Guard не спит при обрыве — переходит на REST-цену
+                                passport.guard_status = "active_rest"
+                                passport.add_timeline_event("HEALTH_DEGRADED", "WS lost, Guard switched to REST price feed")
                             elif new_health == "BLIND":
-                                passport.guard_status = "suspended"
-                                passport.add_timeline_event("HEALTH_BLIND", "Total blindness detected, Guard suspended")
+                                passport.guard_status = "active_rest"
+                                passport.add_timeline_event("HEALTH_BLIND", "Total blindness, Guard on REST price feed")
                             
                             # Сохраняем изменение на диск
                             self.passport_repository.save(passport)
@@ -681,6 +682,63 @@ class Platform:
         await self.drift_monitor.start(symbols=[self.symbol])        
         await self.orchestrator.start_stuck_orders_monitor()
         await self.reconciler.start()
+
+        # 🔥 FIX: Guard на REST-цене во время обрывов WS.
+        # Работает ТОЛЬКО когда health != HEALTHY и есть открытая позиция.
+        # Один вызов positionRisk даёт mark price (для SL/TP) и размер (усыновление правды).
+        async def _degraded_guard_loop():
+            from adapters.binance_rest import REST_CALLER
+            REST_CALLER.set("degraded_guard")
+            POLL_SEC = 3.0
+            rest_fail_streak = 0
+            while self._running:
+                await asyncio.sleep(POLL_SEC)
+                if getattr(self, 'platform_health', 'HEALTHY') == "HEALTHY":
+                    rest_fail_streak = 0
+                    continue
+                passport = self.passport_manager.get_active_by_symbol(self.symbol)
+                if not passport or passport.status not in ("OPEN", "PARTIAL_CLOSE"):
+                    continue
+                try:
+                    pos = await self.rest.get_position(self.symbol)
+                    if pos is None:
+                        raise RuntimeError("position=None (ban or error)")
+                    mark = float(pos.get('markPrice', 0) or pos.get('mark_price', 0) or 0)
+                    size = abs(float(pos.get('size', 0) or 0))
+                    if mark <= 0:
+                        ob = await self.rest.get_orderbook(self.symbol, limit=5)
+                        bids, asks = ob.get('bids', []), ob.get('asks', [])
+                        if bids and asks:
+                            mark = (float(bids[0][0]) + float(asks[0][0])) / 2
+                    if mark <= 0:
+                        raise RuntimeError("no price from REST")
+                    rest_fail_streak = 0
+                    # Усыновляем размер с биржи: лечит дрейф filled_qty во время обрыва
+                    if size > 0 and abs(size - float(passport.position_size or 0)) > 0.001:
+                        passport.position_size = size
+                        passport.filled_qty = size
+                        self.passport_repository.save(passport)
+                        logger.warning(
+                            f"🔧 [{passport.passport_id}] DEGRADED: размер усыновлён с биржи = {size}"
+                        )
+                    await self.bus.publish(
+                        event_type="PRICE_UPDATE",
+                        source="rest_poll",
+                        payload={'symbol': self.symbol, 'price': mark, 'ts': time.time()},
+                        symbol=self.symbol
+                    )
+                except Exception as e:
+                    rest_fail_streak += 1
+                    logger.warning(f"⚠️ [DEGRADED_GUARD] poll failed ({rest_fail_streak}): {type(e).__name__}")
+                    if rest_fail_streak == 3:
+                        passport.guard_status = "suspended"
+                        passport.add_timeline_event(
+                            "GUARD_SUSPENDED", "REST price feed failed 3 times - true blindness"
+                        )
+                        self.passport_repository.save(passport)
+
+        self._degraded_guard_task = asyncio.create_task(_degraded_guard_loop())
+        logger.info("✅ DegradedGuard poller started (REST price on WS outage)")
 
         logger.info("🔄 [STARTUP] Performing exchange state recovery (blocking)...")
         await self.orchestrator.perform_startup_recovery(self.symbol)
@@ -853,6 +911,12 @@ class Platform:
                 await self.reconciler.stop()
             except Exception as e:
                 logger.error(f"Error stopping Reconciler: {e}")
+
+        if hasattr(self, '_degraded_guard_task'):
+            try:
+                self._degraded_guard_task.cancel()
+            except Exception:
+                pass
 
         await self.rest.close()
         self.json_logger.close()
