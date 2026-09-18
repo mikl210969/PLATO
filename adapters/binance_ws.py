@@ -290,7 +290,7 @@ class BinanceWsAdapter:
         while getattr(self, "_running", True):
             try:
                 async with websockets.connect(
-                    user_data_url, ping_interval=20, ping_timeout=20
+                    user_data_url, ping_interval=30, ping_timeout=60  # 🔥 FIX: testnet ленив, ждём дольше
                 ) as ws:
                     logger.info("✅ Futures User Data WS connected")
                     async for message in ws:
