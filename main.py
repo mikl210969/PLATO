@@ -721,6 +721,17 @@ class Platform:
                         logger.warning(
                             f"🔧 [{passport.passport_id}] DEGRADED: размер усыновлён с биржи = {size}"
                         )
+
+                    # 🔥 FIX: DegradedGuard регистрирует guard если его нет
+                    # Это страховка: даже если все пути регистрации провалились,
+                    # поллинг закроет дыру за 3 секунды
+                    if hasattr(self, 'risk_manager') and self.risk_manager:
+                        if passport.passport_id not in self.risk_manager._guards:
+                            logger.warning(
+                                f"🔧 [{passport.passport_id}] DEGRADED: guard отсутствует, принудительная регистрация"
+                            )
+                            await self.risk_manager.ensure_guard_registered(passport)
+
                     await self.bus.publish(
                         event_type="PRICE_UPDATE",
                         source="rest_poll",
@@ -736,6 +747,11 @@ class Platform:
                             "GUARD_SUSPENDED", "REST price feed failed 3 times - true blindness"
                         )
                         self.passport_repository.save(passport)
+
+        # Передаём risk_manager в DegradedGuard для принудительной регистрации guard
+        if hasattr(self, 'risk_manager'):
+            # DegradedGuard получает доступ к risk_manager через self
+            pass
 
         self._degraded_guard_task = asyncio.create_task(_degraded_guard_loop())
         logger.info("✅ DegradedGuard poller started (REST price on WS outage)")
