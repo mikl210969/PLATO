@@ -4,7 +4,8 @@ MonitorFactory — Фабрика для создания и управлени�
 """
 from typing import List, Dict
 from extensions.analytics.delta_monitor import DeltaMonitor
-
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 class MonitorFactory:
     @staticmethod
@@ -22,15 +23,15 @@ class MonitorFactory:
                 publish_interval=5.0
             )
             monitors[symbol.upper()] = monitor
-            print(f"🏭 [Factory] Created DeltaMonitor for {symbol.upper()}")
+            logger.info(f"🏭 [Factory] Created DeltaMonitor for {symbol.upper()}")
         return monitors
 
     @staticmethod
     async def start_all(monitors: Dict[str, DeltaMonitor]):
-        print(f"🚀 [Factory] Starting {len(monitors)} monitors...")
+        logger.info(f"🚀 [Factory] Starting {len(monitors)} monitors...")
         for symbol, monitor in monitors.items():
             await monitor.start()
-            print(f"✅ [Factory] Started monitor for {symbol}")
+            logger.info(f"✅ [Factory] Started monitor for {symbol}")
 
     @staticmethod
     async def stop_all(monitors: Dict[str, DeltaMonitor]):

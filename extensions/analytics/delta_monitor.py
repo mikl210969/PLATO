@@ -7,7 +7,8 @@ import asyncio
 import time
 from collections import deque
 from typing import Dict, Any, Optional
-
+from core.logger import get_logger
+logger = get_logger(__name__)
 
 class DeltaMonitor:
     def __init__(self, symbol: str, event_bus, timeframe_sec: int = 300, publish_interval: float = 5.0):
@@ -36,14 +37,14 @@ class DeltaMonitor:
         self._last_regime = "NORMAL"
 
     async def start(self):
-        print(f"▶️  [DeltaMonitor {self.symbol}] Starting...")
+        logger.info(f"▶️  [DeltaMonitor {self.symbol}] Starting...")
         self._is_running = True
         self._current_bar["start_time"] = time.time()
         self.bus.subscribe(f"TRADE_NORMALIZED_{self.symbol}", self._on_trade)
-        print(f"📡 [DeltaMonitor {self.symbol}] Subscribed to TRADE_NORMALIZED_{self.symbol}")
+        logger.info(f"📡 [DeltaMonitor {self.symbol}] Subscribed to TRADE_NORMALIZED_{self.symbol}")
         
         self._task = asyncio.create_task(self._publish_loop())
-        print(f"✅ [DeltaMonitor {self.symbol}] Started (TF: {self.timeframe_sec}s)")
+        logger.info(f"✅ [DeltaMonitor {self.symbol}] Started (TF: {self.timeframe_sec}s)")
 
     async def stop(self):
         self._is_running = False

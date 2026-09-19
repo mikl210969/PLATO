@@ -205,7 +205,7 @@ class Platform:
             passport_repository=self.passport_repository,  # 🔥 ДОБАВИТЬ ЭТО
             event_bus=self.bus,
             risk_manager=self.risk_manager,  # 🔥 ДОБАВИТЬ ЭТУ СТРОКУ
-            poll_interval=300.0  # 🔥 ФАЗА 2: 300 сек вместо 30 сек (разгрузка REST)
+            poll_interval=900.0  # 🔥 ЧИСТКА: 15-минутный heartbeat в HEALTHY (Reconciler и так сверяет каждую минуту)
         )
         logger.info("✅ DriftMonitor initialized")
 
@@ -254,27 +254,57 @@ class Platform:
             "SOLUSDT": {"trend": "FLAT", "delta_strength": 0.0, "current_price": 0.0}
         }        
         # Подписчик для логирования и сохранения контекста
+        # 🔥 ЧИСТКА ЛОГА: DELTA_CTX печатается только когда что-то реально меняется:
+        # смена тренда, смена знака дельты, сдвиг цены >0.5% или пульс раз в 60 сек.
+        # Информативность та же, шума в ~10 раз меньше.
+        self._delta_log_state = {}
+
         async def update_and_log_delta_context(event):
             payload = event.payload
             symbol = getattr(event, 'symbol', 'UNKNOWN')
-            
-            # Сохраняем актуальное состояние в платформу
+
+            trend = payload.get('trend', 'FLAT')
+            delta = float(payload.get('delta_strength', 0.0) or 0.0)
+            price = float(payload.get('current_price', 0.0) or 0.0)
+
+            # Сохраняем актуальное состояние в платформу (всегда, без throttling)
             if symbol in self.delta_contexts:
                 self.delta_contexts[symbol] = {
-                    "trend": payload.get('trend', 'FLAT'),
-                    "delta_strength": payload.get('delta_strength', 0.0),
-                    "current_price": payload.get('current_price', 0.0)
+                    "trend": trend,
+                    "delta_strength": delta,
+                    "current_price": price
                 }
-            
-            # Логируем
-            if "CONTEXT" in event.type or event.type == "BTC_CONTEXT_UPDATED":
-                logger.info(
-                    f"📊 [DELTA_CTX {symbol}] Trend: {payload.get('trend'):<5} | "
-                    f"Delta: {payload.get('delta_strength'):>8} | "
-                    f"Price: {payload.get('current_price')}"
-                )
-            elif event.type == "DIVERGENCE_DETECTED":
+
+            if event.type == "DIVERGENCE_DETECTED":
                 logger.warning(f"🚨 [DIVERGENCE {symbol}] ОБНАРУЖЕНА ДИВЕРГЕНЦИЯ: {payload.get('type')} @ {payload.get('price')}")
+                return
+
+            if "CONTEXT" not in event.type and event.type != "BTC_CONTEXT_UPDATED":
+                return
+
+            now = time.time()
+            st = self._delta_log_state.get(symbol)
+            sign = 1 if delta > 0 else (-1 if delta < 0 else 0)
+
+            should_log = False
+            if st is None:
+                should_log = True                                   # первое появление символа
+            elif trend != st["trend"]:
+                should_log = True                                   # сменился режим рынка
+            elif sign != st["sign"]:
+                should_log = True                                   # дельта сменила знак
+            elif st["price"] > 0 and abs(price - st["price"]) / st["price"] > 0.005:
+                should_log = True                                   # цена ушла на >0.5%
+            elif now - st["ts"] >= 60.0:
+                should_log = True                                   # пульс: поток жив
+
+            if should_log:
+                self._delta_log_state[symbol] = {"trend": trend, "sign": sign, "price": price, "ts": now}
+                logger.info(
+                    f"📊 [DELTA_CTX {symbol}] Trend: {trend:<5} | "
+                    f"Delta: {delta:>8} | "
+                    f"Price: {price}"
+                )
 
         self.bus.subscribe("BTC_CONTEXT_UPDATED", update_and_log_delta_context)
         self.bus.subscribe("CONTEXT_UPDATED_SOLUSDT", update_and_log_delta_context)

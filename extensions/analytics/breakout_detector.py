@@ -38,7 +38,7 @@ class BreakoutDetector:
         self.event_bus.subscribe("SPOT_ORDERBOOK_UPDATE", self._on_orderbook_update)
         
         logger.info(f"✅ BreakoutDetector initialized for {symbol}")
-        print("🚨 [ПРЯМОЙ PRINT] BreakoutDetector класс создан и подписан на события!")        
+        logger.info("🚨 [ПРЯМОЙ PRINT] BreakoutDetector класс создан и подписан на события!")        
 
     async def _on_wall_confirmed(self, event: Any):
         """Запоминаем новую подтвержденную стену для отслеживания."""

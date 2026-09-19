@@ -39,7 +39,7 @@ class AbsorptionDetector:
         self.event_bus.subscribe("SPOT_ORDERBOOK_UPDATE", self._on_orderbook_update)
         
         logger.info(f"✅ AbsorptionDetector initialized for {symbol}")
-        print("🚨 [ПРЯМОЙ PRINT] AbsorptionDetector класс создан и подписан на события!")
+        logger.info("🚨 [ПРЯМОЙ PRINT] AbsorptionDetector класс создан и подписан на события!")
         
     async def _on_price_update(self, event: Any):
         """Записывает цену и проверяет условия поглощения."""

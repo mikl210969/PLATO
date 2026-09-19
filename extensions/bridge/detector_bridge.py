@@ -135,7 +135,12 @@ class DetectorBridge:
                 if e.event_type in ("WHALE_BUY", "WHALE_SELL", "WHALE_CLUSTER"):
                     logger.debug(f"🐋 [DETECTOR] {e.event_type} | Цена: {e.price} | Объём: {e.value_usdt:.0f} USDT | Cluster: {e.cluster_size}")
                 elif e.event_type in ("WALL_DETECTED", "WALL_CONFIRMED", "SPOOFING_CONFIRMED", "REPOSITIONING"):
-                    print(f"🧱 [DETECTOR] {e.event_type} | {e.side} @ {e.price} | Vol: {e.volume:.0f} | {e.detail}")
+                    # 🔥 ЧИСТКА ЛОГА: процесс детектора (стены/перемещения) — в DEBUG,
+                    # в консоль остаётся только РЕЗУЛЬТАТ: подтверждённый спуфинг
+                    if e.event_type == "SPOOFING_CONFIRMED":
+                        logger.info(f"🧱 [DETECTOR] {e.event_type} | {e.side} @ {e.price} | Vol: {e.volume:.0f} | {e.detail}")
+                    else:
+                        logger.debug(f"🧱 [DETECTOR] {e.event_type} | {e.side} @ {e.price} | Vol: {e.volume:.0f} | {e.detail}")
                 
                 # Публикуем в шину для стратегий
                 await self._publish(e.event_type, e.to_dict())

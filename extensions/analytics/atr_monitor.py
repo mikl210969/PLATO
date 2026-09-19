@@ -35,7 +35,7 @@ class AtrMonitor:
 
     async def start(self):
         """Запустить фоновый мониторинг ATR."""
-        print(f"▶️  [AtrMonitor {self.symbol}] Starting...")
+        logger.info(f"▶️  [AtrMonitor {self.symbol}] Starting...")
         self._is_running = True
         
         # Первый расчёт сразу
@@ -43,7 +43,7 @@ class AtrMonitor:
         
         # Запускаем фоновую задачу
         self._task = asyncio.create_task(self._monitor_loop())
-        print(f"✅ [AtrMonitor {self.symbol}] Started (interval: {self.update_interval_sec}s)")
+        logger.info(f"✅ [AtrMonitor {self.symbol}] Started (interval: {self.update_interval_sec}s)")
 
     async def stop(self):
         """Остановить мониторинг."""
