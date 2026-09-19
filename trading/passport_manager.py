@@ -212,7 +212,10 @@ class PassportManager:
     def _handle_order_filled(self, passport, payload: Dict):
         passport.status = "OPEN"
         passport.position_size = abs(payload.get("quantity", passport.position_size))
-        passport.position_entry_price = payload.get("price", passport.position_entry_price)
+        # 🔥 ZERO-GUARD: .get(key, default) возвращает 0, если ключ ЕСТЬ и равен 0
+        _px = float(payload.get("price", 0) or 0)
+        if _px > 0:
+            passport.position_entry_price = _px
         
         # 🔥 ДОБАВИТЬ ЭТИ ДВЕ СТРОКИ ЗДЕСЬ:
         passport.calculate_projected_pnls()

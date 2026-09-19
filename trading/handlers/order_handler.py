@@ -211,6 +211,14 @@ class OrderHandlerMixin:
         if hasattr(self, 'verifier'): await self.verifier.cancel_verification(passport.passport_id)
 
         if not transitioned and passport.status == "OPEN" and executed_qty > 0:
+
+            # 🔥 ЗАЩИТА ОТ ДУБЛЕЙ: события после терминального статуса не меняют размер/PnL
+            if passport.status in ("CLOSED", "CANCELED", "FAILED"):
+                self._log("fill_ignored_passport_closed", {
+                    "passport_id": passport.passport_id, "client_order_id": client_order_id
+                })
+                return
+
             old_size = passport.position_size
             if abs(executed_qty - old_size) > 0.001:
                 passport.position_size = abs(executed_qty)
@@ -500,5 +508,14 @@ class OrderHandlerMixin:
             })
 
     def _calculate_pnl(self, passport, exit_price: float, quantity: float) -> float:
-        if not passport.position_entry_price or passport.position_entry_price == 0: return 0.0
+        if not passport.position_entry_price or passport.position_entry_price == 0:
+            return 0.0
+        # 🔥 ZERO-GUARD: нулевая цена выхода = фантомный PnL
+        if not exit_price or exit_price <= 0:
+            exit_price = float(
+                passport.exit_price or passport.sl_price or passport.tp1_price
+                or passport.position_entry_price or 0.0
+            )
+            if exit_price <= 0:
+                return 0.0
         return (passport.position_entry_price - exit_price) * quantity if passport.side == 'short' else (exit_price - passport.position_entry_price) * quantity

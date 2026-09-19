@@ -279,7 +279,11 @@ class PositionMonitor(BaseMixin):
             passport.tp2_activated = True
         elif reason == "SL_HIT":
             passport.sl_activated = True
-        
+
+        # 🔥 ЗАЩИТА ОТ ДУБЛЕЙ: закрытый паспорт не вычитает размер повторно
+        if passport.status in ("CLOSED", "CANCELED", "FAILED"):
+            return
+
         if is_partial:
             passport.position_size = abs(passport.position_size) - quantity
             passport.exit_reason = reason

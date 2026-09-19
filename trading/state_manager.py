@@ -166,6 +166,17 @@ class StateManager:
             
             # Безопасное извлечение
             exit_price = float(event_data.get('exit_price', 0.0) or 0.0)
+
+            # 🔥 ZERO-GUARD: выход по цене 0 даёт фантом PnL = entry × qty
+            if exit_price <= 0:
+                exit_price = float(
+                    passport.sl_price or passport.tp1_price
+                    or passport.position_entry_price or passport.entry_price or 0.0
+                )
+                logger.warning(
+                    f"⚠️ [STATE] POSITION_CLOSED с exit_price=0 → fallback {exit_price}"
+                )
+
             gross_pnl = float(event_data.get('gross_pnl', 0.0) or 0.0)
             commission = float(event_data.get('commission', 0.0) or 0.0)
             

@@ -723,7 +723,10 @@ class Platform:
             rest_fail_streak = 0
             while self._running:
                 await asyncio.sleep(POLL_SEC)
-                if getattr(self, 'platform_health', 'HEALTHY') == "HEALTHY":
+                # 🔥 FIX: гейт по свежести цены, а не по несуществующему self.platform_health
+                # (health живёт на паспортах; getattr всегда возвращал HEALTHY, поллер не работал)
+                price_fresh = (time.time() - getattr(self, '_last_price_update_ts', 0)) < 5.0
+                if price_fresh:
                     rest_fail_streak = 0
                     continue
                 passport = self.passport_manager.get_active_by_symbol(self.symbol)
