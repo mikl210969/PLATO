@@ -213,7 +213,7 @@ class OrderHandlerMixin:
         if not transitioned and passport.status == "OPEN" and executed_qty > 0:
 
             # 🔥 ЗАЩИТА ОТ ДУБЛЕЙ: события после терминального статуса не меняют размер/PnL
-            if passport.status in ("CLOSED", "CANCELED", "FAILED"):
+            if passport.status in ("CLOSED", "CANCELED", "FAILED", "EXTERNAL_CLOSE"):
                 self._log("fill_ignored_passport_closed", {
                     "passport_id": passport.passport_id, "client_order_id": client_order_id
                 })

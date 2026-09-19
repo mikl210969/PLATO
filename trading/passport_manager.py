@@ -52,8 +52,7 @@ class PassportManager:
 
     def get_active(self) -> List[TradePassport]:
         """Получить все активные паспорта."""
-        return [p for p in self._passports.values() if p.status not in (PassportStatus.CLOSED.value, PassportStatus.CANCELED.value, PassportStatus.FAILED.value)]
-
+        return [p for p in self._passports.values() if p.status not in (PassportStatus.CLOSED.value, PassportStatus.CANCELED.value, PassportStatus.FAILED.value, "EXTERNAL_CLOSE")]
     def get_by_symbol(self, symbol: str) -> List[TradePassport]:
         """Получить все паспорта по символу."""
         return [p for p in self._passports.values() if p.symbol == symbol]
@@ -61,7 +60,7 @@ class PassportManager:
     def get_active_by_symbol(self, symbol: str) -> Optional[TradePassport]:
         """Получить активный паспорт по символу."""
         for p in self._passports.values():
-            if p.symbol == symbol and p.status not in (PassportStatus.CLOSED.value, PassportStatus.CANCELED.value, PassportStatus.FAILED.value):
+            if p.symbol == symbol and p.status not in (PassportStatus.CLOSED.value, PassportStatus.CANCELED.value, PassportStatus.FAILED.value, "EXTERNAL_CLOSE"):
                 return p
         return None
 
@@ -75,7 +74,8 @@ class PassportManager:
             if p.symbol == symbol and p.status not in (
                 PassportStatus.CLOSED.value,
                 PassportStatus.CANCELED.value,
-                PassportStatus.FAILED.value
+                PassportStatus.FAILED.value,
+                "EXTERNAL_CLOSE"
             )
         ]
 

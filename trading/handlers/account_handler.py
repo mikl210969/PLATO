@@ -34,11 +34,18 @@ class AccountHandlerMixin:
             pos_amt = float(pos.get('pa', 0))
             if abs(pos_amt) < 0.01:
                 passport = self.passport_manager.get_active_by_symbol(symbol)
-                if passport and passport.status in ["OPEN", "ORDER_ACK", "ORDER_SENT"]:
+                # 🔥 «Нет позиции» ≠ «позицию закрыли»: ORDER_SENT/ORDER_ACK без филлов
+                # не получают внешнее закрытие (входной ордер ещё работает в стакане)
+                _had_pos = float(getattr(passport, 'filled_qty', 0) or 0) > 0.001 if passport else False
+                if passport and (
+                    passport.status in ("OPEN", "PARTIAL_CLOSE")
+                    or (passport.status in ("ORDER_ACK", "ORDER_SENT") and _had_pos)
+                ):
                     self._log("external_close_detected", {"passport_id": passport.passport_id, "symbol": symbol, "previous_size": passport.position_size})
                     passport.position_size = 0.0
-                    passport.status = "EXTERNAL_CLOSE"
+                    passport.status = "CLOSED"
                     passport.exit_reason = "EXTERNAL_CLOSE"
+                    passport.closed_at = datetime.now(timezone.utc).isoformat()
                     passport.timeline.append({"timestamp": datetime.now(timezone.utc).isoformat(), "event": "STATUS: EXTERNAL_CLOSE", "details": "Position closed manually or liquidated on exchange"})
                     self.repository.save(passport)
                     self._log("passport_marked_as_external_close", {"passport_id": passport.passport_id})
