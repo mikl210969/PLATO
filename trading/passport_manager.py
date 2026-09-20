@@ -313,6 +313,9 @@ class PassportManager:
 
 
     def _handle_tp1_hit(self, passport, payload: Dict):
+        # 🔥 ИДЕМПОТЕНТНОСТЬ: повторное событие по уже закрытому паспорту не пересчитывает деньги
+        if passport.status == "CLOSED":
+            return
         passport.tp1_activated = True
         closed_qty = abs(payload.get("closed_qty", 0))
         
@@ -347,12 +350,14 @@ class PassportManager:
 
             # 🔥 ПУНКТ 5: финальный PnL включает накопленное частичными закрытиями
             gross_pnl = round(gross_pnl + float(getattr(passport, 'realized_pnl', 0) or 0), 2)
-
             passport.gross_pnl = round(gross_pnl, 2)
             passport.net_pnl = round(passport.gross_pnl - (getattr(passport, 'commission', 0) or 0), 2)
             passport.closed_at = datetime.now(timezone.utc).isoformat()
 
     def _handle_tp2_hit(self, passport, payload: Dict):
+        # 🔥 ИДЕМПОТЕНТНОСТЬ: повторное событие по уже закрытому паспорту не пересчитывает деньги
+        if passport.status == "CLOSED":
+            return
         passport.tp1_activated = True
         passport.tp2_activated = True
         

@@ -50,7 +50,10 @@ class PositionMonitor(BaseMixin):
                 pass
 
     async def _position_monitor_loop(self):
-        """Основной цикл мониторинга позиций."""
+        """🔥 ОТКЛЮЧЕНО: RiskManager — единственный исполнительный guard.
+        Дублирование проверок TP/SL давало двойные закрывающие ордера
+        и гонку записей в паспорт (кейс 07:50:41, двойной TP1)."""
+        return
         while getattr(self, '_position_running', True):
             await asyncio.sleep(1)
             

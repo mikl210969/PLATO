@@ -94,8 +94,8 @@ class RecoveryMixin(BaseMixin):
                         "exchange_size": exchange_size,
                         "exchange_entry": exchange_entry,
                     })
-                    active.position_size = exchange_size
-                    active.filled_qty = exchange_size
+                    active.position_size = abs(exchange_size)
+                    active.filled_qty = abs(exchange_size)
                     if exchange_entry > 0:
                         active.position_entry_price = exchange_entry
                         active.avg_price = round(exchange_entry, 8)
