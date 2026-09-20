@@ -67,6 +67,15 @@ class AccountHandlerMixin:
                         })
                         continue
 
+                    # 🔥 H3: размер уже ноль, но филлы были = размер обнулил наш внутренний
+                    # SL/TP-хендлер. Ноль с биржи — следствие нашего ордера, не внешнее событие.
+                    if abs(float(passport.position_size or 0)) < 0.001 and float(getattr(passport, 'filled_qty', 0) or 0) > 0.001:
+                        self._log("external_close_ignored_size_already_zero", {
+                            "passport_id": passport.passport_id,
+                            "filled_qty": passport.filled_qty
+                        })
+                        continue
+
                     # 🔥 H2 GRACE: внутренний SL/TP мог отправить закрытие на миллисекунды
                     # раньше этого события. Ждём 2 сек и перечитываем паспорт:
                     # если exit_reason/терминальный статус появились — уступаем внутреннему учёту.
