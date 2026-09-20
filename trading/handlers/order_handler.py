@@ -277,7 +277,7 @@ class OrderHandlerMixin:
         # Но мы защищаемся и на случай, если в payload уже пришел инкрементальный объем.
         previous_filled = float(getattr(passport, 'filled_qty', 0.0))
         
-        if abs(executed_qty - previous_filled) < 0.0001:
+        if executed_qty <= float(passport.filled_qty or 0) + 1e-9:
             # Это точный дубликат события, игнорируем
             self._log("partial_fill_duplicate_ignored", {
                 "passport_id": passport.passport_id,
@@ -286,6 +286,11 @@ class OrderHandlerMixin:
                 "previous_filled": previous_filled
             })
             return
+        # 🔥 SYNC-TRUTH: кумулятив с биржи — правда. Размер ставится СИНХРОННО
+        # (семантика «установить», не «прибавить») и СТРОГО ДО любого await:
+        # шторм событий не должен переплетаться в учёте (кейс 0ea2f5: 25.79 при ордере 7.0)
+        passport.filled_qty = executed_qty
+        passport.position_size = executed_qty
         
         if executed_qty < previous_filled:
             # Сценарий: в событии пришел инкрементальный объем (новый кусок)

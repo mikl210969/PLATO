@@ -55,6 +55,16 @@ class AccountHandlerMixin:
                                 "exchange_size": _ex_size
                             })
                             continue
+
+                    # 🔥 НЕ перезаписываем уже закрытые паспорта:
+                    # exit_reason != "" = паспорт уже закрыт другим путём (SL/TP1/TP2)
+                    if getattr(passport, 'exit_reason', '') and passport.exit_reason != "":
+                        self._log("external_close_ignored_already_closed", {
+                            "passport_id": passport.passport_id,
+                            "existing_exit_reason": passport.exit_reason
+                        })
+                        continue
+
                     self._log("external_close_detected", {"passport_id": passport.passport_id, "symbol": symbol, "previous_size": passport.position_size})
                     passport.position_size = 0.0
                     passport.status = "CLOSED"

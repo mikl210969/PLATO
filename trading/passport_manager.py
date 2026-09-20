@@ -268,10 +268,14 @@ class PassportManager:
         passport.exit_price = round(float(exit_price), 8)
 
         # 🔥 3. PnL из фактических данных
+        # 🔥 ZERO-GUARD входа: нулевая position_entry_price давала фантом -758.1
+        _entry_px = float(passport.position_entry_price or passport.avg_price or passport.entry_price or 0)
+        # 🔥 ZERO-GUARD входа: цепочка position_entry_price → avg_price → entry_price
+        _entry_px = float(passport.position_entry_price or passport.avg_price or passport.entry_price or 0)
         if passport.side == "short":
-            gross_pnl = (passport.position_entry_price - passport.exit_price) * closed_qty
+            gross_pnl = (_entry_px - passport.exit_price) * closed_qty
         else:
-            gross_pnl = (passport.exit_price - passport.position_entry_price) * closed_qty
+            gross_pnl = (passport.exit_price - _entry_px) * closed_qty
 
         # 🔥 ПУНКТ 5: финальный PnL включает накопленное частичными закрытиями
         gross_pnl = round(gross_pnl + float(getattr(passport, 'realized_pnl', 0) or 0), 2)
@@ -343,10 +347,12 @@ class PassportManager:
             exit_price = payload.get("price", 0) or passport.sl_price or passport.position_entry_price
             passport.exit_price = round(exit_price, 8)
             
+            # 🔥 ZERO-GUARD входа
+            _entry_px = float(passport.position_entry_price or passport.avg_price or passport.entry_price or 0)
             if passport.side == "short":
-                gross_pnl = (passport.position_entry_price - exit_price) * closed_qty
+                gross_pnl = (_entry_px - exit_price) * closed_qty
             else:
-                gross_pnl = (exit_price - passport.position_entry_price) * closed_qty
+                gross_pnl = (exit_price - _entry_px) * closed_qty
 
             # 🔥 ПУНКТ 5: финальный PnL включает накопленное частичными закрытиями
             gross_pnl = round(gross_pnl + float(getattr(passport, 'realized_pnl', 0) or 0), 2)
@@ -373,10 +379,12 @@ class PassportManager:
             
         passport.exit_price = round(exit_price, 8)
         
+        # 🔥 ZERO-GUARD входа
+        _entry_px = float(passport.position_entry_price or passport.avg_price or passport.entry_price or 0)
         if passport.side == "short":
-            gross_pnl = (passport.position_entry_price - exit_price) * closed_qty
+            gross_pnl = (_entry_px - exit_price) * closed_qty
         else:
-            gross_pnl = (exit_price - passport.position_entry_price) * closed_qty
+            gross_pnl = (exit_price - _entry_px) * closed_qty
 
         # 🔥 ПУНКТ 5: финальный PnL включает накопленное частичными закрытиями
         gross_pnl = round(gross_pnl + float(getattr(passport, 'realized_pnl', 0) or 0), 2)
