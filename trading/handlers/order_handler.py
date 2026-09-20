@@ -188,22 +188,23 @@ class OrderHandlerMixin:
             self._log("filled_passport_not_found", {"client_order_id": client_order_id, "source": source})
             return
 
-        # Обработка закрывающих ордеров (TP1, TP2, SL, External)
+        # Обработка закрывающих ордеров (TP1, TP2, SL, External): ТОЛЬКО наблюдение.
+        # 🔥 H1: учёт закрытий владеют:
+        #   - passport_manager через apply_change (SL_HIT/TP1_HIT/TP2_HIT) — внутренние закрытия,
+        #   - account_handler/reconciler через сверку позиции — внешние закрытия.
+        # Вычитание размера здесь считало закрытие ВТОРОЙ раз: после TP1 (7→3.5 в хендлере)
+        # филл 3.5 давал size=0 → close() насильно закрывал паспорт, половина позиции
+        # оставалась сиротой на бирже (кейс 25426d); на SL: 0−7=−7 → отрицательный размер
+        # (кейс ad71f7). Ветка else списывала размер ТРЕТИЙ раз через state_manager.
         if close_level:
-            passport.position_size -= executed_qty
             exit_reason = {'C1': 'TP1_HIT', 'C2': 'TP2_HIT', 'CS': 'SL_HIT', 'CE': 'EXTERNAL_CLOSE'}.get(close_level, 'MANUAL_CLOSE')
-            
-            if passport.position_size < 0.01:
-                passport.close(exit_reason=exit_reason, exit_price=avg_price, gross_pnl=self._calculate_pnl(passport, avg_price, executed_qty), commission=0.0)
-                self.repository.save(passport)
-                await self.bus.publish(event_type="POSITION_CLOSED", source="order_filled", payload={"passport_id": passport.passport_id, "symbol": passport.symbol, "exit_reason": exit_reason, "gross_pnl": passport.gross_pnl}, symbol=passport.symbol)
-                self._log("position_fully_closed", {"passport_id": passport.passport_id, "exit_reason": exit_reason, "closed_qty": executed_qty, "gross_pnl": passport.gross_pnl})
-            else:
-                self.state_manager.handle_event(passport, "PARTIAL_CLOSE", {'closed_qty': executed_qty, 'exit_price': avg_price, 'exit_reason': exit_reason})
-                # 🔥 Пересчитываем PnL после частичного закрытия
-                passport.calculate_projected_pnls()
-                self.repository.save(passport)
-                self._log("position_partially_closed", {"passport_id": passport.passport_id, "exit_reason": exit_reason, "closed_qty": executed_qty, "remaining_size": passport.position_size})
+            self._log("close_fill_observed", {
+                "passport_id": passport.passport_id,
+                "close_level": close_level,
+                "exit_reason": exit_reason,
+                "executed_qty": executed_qty,
+                "avg_price": avg_price
+            })
             return
 
         # Обработка открытия позиции (не закрывающий ордер)
