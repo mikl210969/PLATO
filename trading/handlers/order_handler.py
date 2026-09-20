@@ -487,8 +487,8 @@ class OrderHandlerMixin:
 
             if exchange_size > 0.001:
                 old_size = float(passport.position_size or 0)
-                if abs(exchange_size - old_size) > 0.001:
-                    passport.position_size = exchange_size
+                if abs(abs(exchange_size) - old_size) > 0.001:
+                    passport.position_size = abs(exchange_size)
                     self._log("position_size_reconciled", {
                         "passport_id": passport.passport_id,
                         "old_size": old_size,

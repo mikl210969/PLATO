@@ -174,6 +174,21 @@ class RiskManager:
             "tp1_done": tp1_done
         })
 
+    def has_guard(self, passport_id: str) -> bool:
+        """🔥 Публичная проверка: есть ли внутренняя защита у паспорта."""
+        return passport_id in self._guards
+
+    def sync_guard_remaining(self, passport_id: str, size: float):
+        """🔥 Приводит guard['remaining'] к размеру позиции с биржи:
+        TP1/TP2 закрывают настоящую половину, а не половину фантазии."""
+        guard = self._guards.get(passport_id)
+        if guard is None:
+            return
+        old = float(guard.get('remaining', 0) or 0)
+        if abs(old - size) > 0.001:
+            guard['remaining'] = size
+            self._log("guard_remaining_synced", {"passport_id": passport_id, "old": old, "new": size})
+
     async def ensure_guard_registered(self, passport):
         """Гарантированная регистрация guard через REST-фоллбэк."""
         # 🔥 ЗАЩИТА 1: asyncio.Lock для атомарности операции

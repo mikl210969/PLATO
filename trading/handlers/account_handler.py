@@ -41,6 +41,20 @@ class AccountHandlerMixin:
                     passport.status in ("OPEN", "PARTIAL_CLOSE")
                     or (passport.status in ("ORDER_ACK", "ORDER_SENT") and _had_pos)
                 ):
+                    # 🔥 КОНТРОЛЬ: событие в шторм реконнектов может врать —
+                    # перед внешним закрытием подтверждаем отсутствие позиции
+                    # прямым вопросом бирже (пункт 3)
+                    _trader = self.get_trader(symbol)
+                    if _trader:
+                        _pos = await _trader.get_position_from_exchange(symbol)
+                        _ex_size = abs(float(_pos.get('size', 0) or 0)) if _pos else 0.0
+                        if _ex_size > 0.001:
+                            self._log("external_close_cancelled_position_exists", {
+                                "passport_id": passport.passport_id,
+                                "symbol": symbol,
+                                "exchange_size": _ex_size
+                            })
+                            continue
                     self._log("external_close_detected", {"passport_id": passport.passport_id, "symbol": symbol, "previous_size": passport.position_size})
                     passport.position_size = 0.0
                     passport.status = "CLOSED"
@@ -49,7 +63,7 @@ class AccountHandlerMixin:
                     passport.timeline.append({"timestamp": datetime.now(timezone.utc).isoformat(), "event": "STATUS: EXTERNAL_CLOSE", "details": "Position closed manually or liquidated on exchange"})
                     self.repository.save(passport)
                     self._log("passport_marked_as_external_close", {"passport_id": passport.passport_id})
-
+                    
     async def _on_position_closed(self, event):
         self._log("position_closed_event", {"event": event.payload})
 

@@ -273,6 +273,9 @@ class PassportManager:
         else:
             gross_pnl = (passport.exit_price - passport.position_entry_price) * closed_qty
 
+        # 🔥 ПУНКТ 5: финальный PnL включает накопленное частичными закрытиями
+        gross_pnl = round(gross_pnl + float(getattr(passport, 'realized_pnl', 0) or 0), 2)
+
         # 🔥 ДИАГНОСТИКА: логируем все значения в момент расчёта PnL
         self.logger.info(
             f"🧮 [SL_HIT PnL] {passport.passport_id} | entry={passport.position_entry_price} | "
@@ -316,7 +319,14 @@ class PassportManager:
         # 🔥 БЕЗОПАСНОЕ ВЫЧИТАНИЕ С ИСПОЛЬЗОВАНИЕМ abs()
         current_size = abs(passport.position_size or 0)
         passport.position_size = round(max(0.0, current_size - closed_qty), 4)
-        
+
+        # 🔥 Накопление реализованного PnL закрытой части
+        _exit = float(payload.get("price", 0) or 0) or float(passport.tp1_price or 0)
+        _entry = float(passport.position_entry_price or passport.entry_price or 0)
+        if _exit > 0 and _entry > 0 and closed_qty > 0:
+            _part = (_entry - _exit) * closed_qty if passport.side == "short" else (_exit - _entry) * closed_qty
+            passport.realized_pnl = round(float(getattr(passport, 'realized_pnl', 0) or 0) + _part, 2)
+
         if passport.position_size > 0:
             passport.status = "PARTIAL_CLOSE"
             be = payload.get("sl_breakeven") or passport.position_entry_price or passport.entry_price
@@ -334,7 +344,10 @@ class PassportManager:
                 gross_pnl = (passport.position_entry_price - exit_price) * closed_qty
             else:
                 gross_pnl = (exit_price - passport.position_entry_price) * closed_qty
-                
+
+            # 🔥 ПУНКТ 5: финальный PnL включает накопленное частичными закрытиями
+            gross_pnl = round(gross_pnl + float(getattr(passport, 'realized_pnl', 0) or 0), 2)
+
             passport.gross_pnl = round(gross_pnl, 2)
             passport.net_pnl = round(passport.gross_pnl - (getattr(passport, 'commission', 0) or 0), 2)
             passport.closed_at = datetime.now(timezone.utc).isoformat()
@@ -359,7 +372,10 @@ class PassportManager:
             gross_pnl = (passport.position_entry_price - exit_price) * closed_qty
         else:
             gross_pnl = (exit_price - passport.position_entry_price) * closed_qty
-            
+
+        # 🔥 ПУНКТ 5: финальный PnL включает накопленное частичными закрытиями
+        gross_pnl = round(gross_pnl + float(getattr(passport, 'realized_pnl', 0) or 0), 2)
+
         passport.gross_pnl = round(gross_pnl, 2)
         passport.commission = round(payload.get("commission", 0) or getattr(passport, 'commission', 0), 2)
         passport.net_pnl = round(passport.gross_pnl - passport.commission, 2)
@@ -371,7 +387,13 @@ class PassportManager:
         exit_reason = payload.get("exit_reason", "MANUAL_PARTIAL")
         
         passport.position_size = max(0.0, passport.position_size - closed_qty)
-        
+
+        _exit = float(exit_price or 0) or float(passport.tp1_price or 0)
+        _entry = float(passport.position_entry_price or passport.entry_price or 0)
+        if _exit > 0 and _entry > 0 and closed_qty > 0:
+            _part = (_entry - _exit) * closed_qty if passport.side == "short" else (_exit - _entry) * closed_qty
+            passport.realized_pnl = round(float(getattr(passport, 'realized_pnl', 0) or 0) + _part, 2)
+
         # Если закрытие было по TP1, переносим SL в безубыток
         if exit_reason == "TP1_HIT":
             passport.sl_price = passport.position_entry_price

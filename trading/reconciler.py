@@ -56,6 +56,7 @@ class ExchangeReconciler:
         symbols: List[str],
         interval_sec: float = 60.0,
         stale_order_age_sec: float = 120.0,
+        risk_manager=None,
     ):
         self.rest = rest_client
         self.passport_manager = passport_manager
@@ -64,6 +65,7 @@ class ExchangeReconciler:
         self.symbols = symbols
         self.interval_sec = interval_sec
         self.stale_order_age_sec = stale_order_age_sec
+        self.risk_manager = risk_manager
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
@@ -124,6 +126,22 @@ class ExchangeReconciler:
 
         passports = self.passport_manager.get_by_symbol(symbol)
         active = [p for p in passports if p.status not in TERMINAL_STATUSES]
+
+        # 🔥 GUARD-ИМПЕРАТИВ: регистрация и правда remaining с биржи каждый цикл (60 сек)
+        if self.risk_manager is not None:
+            size = await self._safe_position_size(symbol)
+            if size is not None:
+                for p in active:
+                    if p.status not in ("OPEN", "PARTIAL_CLOSE"):
+                        continue
+                    if abs(float(p.filled_qty or 0) - size) > 0.001:
+                        p.filled_qty = size
+                        self.repository.save(p)
+                        logger.warning(f"🔧 [RECONCILER] {symbol}: filled_qty синхронизирован с биржей = {size}")
+                    if not self.risk_manager.has_guard(p.passport_id):
+                        await self.risk_manager.ensure_guard_registered(p)
+                    else:
+                        self.risk_manager.sync_guard_remaining(p.passport_id, size)
 
         active_cids: Set[str] = set()
         for p in active:

@@ -222,7 +222,8 @@ class Platform:
             event_bus=self.bus,
             symbols=[self.symbol],
             interval_sec=60.0,
-            stale_order_age_sec=120.0
+            stale_order_age_sec=120.0,
+            risk_manager=self.risk_manager
         )
         logger.info("✅ ExchangeReconciler initialized")
 
@@ -751,6 +752,16 @@ class Platform:
                         passport.position_size = size
                         passport.filled_qty = size
                         self.passport_repository.save(passport)
+                    # 🔥 Усыновление цены входа с биржи: честный PnL при потерянных филлах
+                    ex_entry = float(pos.get('entryPrice', 0) or 0)
+                    if ex_entry > 0 and float(passport.position_entry_price or 0) <= 0:
+                        passport.position_entry_price = ex_entry
+                        passport.avg_price = ex_entry
+                        self.passport_repository.save(passport)
+                    # 🔥 Синхронизация remaining guard'а с биржей (каждые 3 сек в аварии)
+                    _rm = getattr(self, 'risk_manager', None)
+                    if _rm is not None and hasattr(_rm, 'sync_guard_remaining') and size > 0:
+                        _rm.sync_guard_remaining(passport.passport_id, size)
                         logger.warning(
                             f"🔧 [{passport.passport_id}] DEGRADED: размер усыновлён с биржи = {size}"
                         )

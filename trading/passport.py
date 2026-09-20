@@ -87,6 +87,7 @@ class TradePassport:
     remaining_order_qty: float = 0.0
     avg_price: float = 0.0
     real_pnl: float = 0.0
+    realized_pnl: float = 0.0  # 🔥 ПУНКТ 5: накопленный PnL частичных закрытий
 
     # ──────────────────────────────────────────────────────────────
     # Вспомогательные методы
@@ -108,7 +109,7 @@ class TradePassport:
         Рассчитать проектный PnL по уровням и текущий/реализованный PnL.
 
         🔥 ИСПРАВЛЕНО:
-        - Проектный PnL считается от эффективной цены входа (не от нуля).
+- Проектный PnL считается от эффективной цены входа (не от нуля).
         - real_pnl: закрытая позиция → gross_pnl; открытая → unrealized PnL
           по current_price (если передана); иначе 0.0.
         """
@@ -288,5 +289,6 @@ class TradePassport:
             "filled_qty": self.filled_qty,
             "remaining_order_qty": self.remaining_order_qty,
             "avg_price": self.avg_price,
-            "real_pnl": self.real_pnl
+            "real_pnl": self.real_pnl,
+            "realized_pnl": self.realized_pnl  # 🔥 ПУНКТ 5: сериализация накопленного PnL
         }
