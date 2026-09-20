@@ -1,3 +1,5 @@
+import asyncio
+
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Dict, Any
 
@@ -62,6 +64,20 @@ class AccountHandlerMixin:
                         self._log("external_close_ignored_already_closed", {
                             "passport_id": passport.passport_id,
                             "existing_exit_reason": passport.exit_reason
+                        })
+                        continue
+
+                    # 🔥 H2 GRACE: внутренний SL/TP мог отправить закрытие на миллисекунды
+                    # раньше этого события. Ждём 2 сек и перечитываем паспорт:
+                    # если exit_reason/терминальный статус появились — уступаем внутреннему учёту.
+                    await asyncio.sleep(2.0)
+                    _fresh = self.passport_manager.get_active_by_symbol(symbol)
+                    _ref = _fresh if _fresh is not None else passport
+                    if getattr(_ref, 'exit_reason', '') or _ref.status in ("CLOSED", "CANCELED", "FAILED"):
+                        self._log("external_close_ignored_race_with_internal", {
+                            "passport_id": passport.passport_id,
+                            "status": _ref.status,
+                            "exit_reason": getattr(_ref, 'exit_reason', '')
                         })
                         continue
 
