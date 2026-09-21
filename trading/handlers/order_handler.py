@@ -205,6 +205,14 @@ class OrderHandlerMixin:
                 "executed_qty": executed_qty,
                 "avg_price": avg_price
             })
+            # 🔥 M1 ЗЕРКАЛО: каждый закрывающий филл биржи отражается в таймлайне
+            # паспорта. Только запись-отражение: ни размер, ни деньги, ни статус
+            # здесь не меняются (учёт по-прежнему владеет passport_manager).
+            passport.add_timeline_event(
+                f"CLOSE_FILL: {close_level}",
+                f"Closed {executed_qty} @ {float(avg_price or 0):.4f} ({exit_reason})"
+            )
+            self.repository.save(passport)
             return
 
         # Обработка открытия позиции (не закрывающий ордер)
