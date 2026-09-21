@@ -88,6 +88,9 @@ class TradePassport:
     avg_price: float = 0.0
     real_pnl: float = 0.0
     realized_pnl: float = 0.0  # 🔥 ПУНКТ 5: накопленный PnL частичных закрытий
+    tp1_pnl: float = 0.0  # 🔥 PnL части, закрытой на TP1
+    tp2_pnl: float = 0.0  # 🔥 PnL части, закрытой на TP2
+    sl_pnl: float = 0.0   # 🔥 PnL части, закрытой на SL    
 
     # ──────────────────────────────────────────────────────────────
     # Вспомогательные методы
@@ -290,5 +293,8 @@ class TradePassport:
             "remaining_order_qty": self.remaining_order_qty,
             "avg_price": self.avg_price,
             "real_pnl": self.real_pnl,
-            "realized_pnl": self.realized_pnl  # 🔥 ПУНКТ 5: сериализация накопленного PnL
+            "realized_pnl": self.realized_pnl,  # 🔥 ПУНКТ 5: сериализация накопленного PnL
+            "tp1_pnl": self.tp1_pnl,
+            "tp2_pnl": self.tp2_pnl,
+            "sl_pnl": self.sl_pnl,            
         }
