@@ -27,6 +27,7 @@ from trading.passport_manager import PassportManager
 from trading.passport_repository import PassportRepository
 from trading.trader import Trader
 from trading.orchestrator import Orchestrator
+from features.factory import FeatureRegistry
 from trading.state_manager import StateManager
 from trading.lifecycle_manager import LifecycleManager
 from trading.risk_manager import RiskManager
@@ -166,6 +167,12 @@ class Platform:
             config=self.config
         )
         self.orchestrator.register_trader(self.symbol, self.trader)
+        # 9. Features (слой анализа рынка)
+        self.features = FeatureRegistry(self.config, logger)
+        logger.info("✅ FeatureRegistry initialized")
+        
+        # Запускаем периодическое логирование OUTPUT
+        self._features_output_task = asyncio.create_task(self.features.start())
 
         # 10. LifecycleManager
         self.lifecycle_manager = LifecycleManager(
@@ -229,15 +236,28 @@ class Platform:
 
         # 14. Стратегии
         strategies_config = self.config.get('strategies', {})
+        debug_mode = self.config.get('debug_mode', {})
+        strategies_debug = debug_mode.get('strategies', {})
         
-        self.wall_fade = WallFadeStrategyV3(strategies_config.get('wall_fade', {}), atr_value=0.5)
+        # 🔥 ИСПРАВЛЕНО: merge базового конфига стратегии с debug-настройками
+        # (bypass_filters, log_input_stream и др. лежат в debug_mode.strategies.<имя>)
+        wall_fade_config = strategies_config.get('wall_fade', {})
+        wall_fade_debug = strategies_debug.get('wall_fade_v3', {})
+        wall_fade_merged = {**wall_fade_config, **wall_fade_debug}
+        self.wall_fade = WallFadeStrategyV3(wall_fade_merged, atr_value=0.5)
         self.wall_fade.subscribe_to_events(self.bus)
 
-        self.absorption = AbsorptionStrategyV2(strategies_config.get('absorption', {}), atr_value=0.5)
+        absorption_config = strategies_config.get('absorption', {})
+        absorption_debug = strategies_debug.get('absorption_v2', {})
+        absorption_merged = {**absorption_config, **absorption_debug}
+        self.absorption = AbsorptionStrategyV2(absorption_merged, atr_value=0.5)
         self.absorption.subscribe_to_events(self.bus)
 
-        self.breakout = BreakoutStrategyV1(strategies_config.get('breakout', {}), atr_value=0.5)
-        self.breakout.subscribe_to_events(self.bus)        
+        breakout_config = strategies_config.get('breakout', {})
+        breakout_debug = strategies_debug.get('breakout_v1', {})
+        breakout_merged = {**breakout_config, **breakout_debug}
+        self.breakout = BreakoutStrategyV1(breakout_merged, atr_value=0.5)
+        self.breakout.subscribe_to_events(self.bus)    
 
         # ========================================================================
         # 🔥 15. НОВОЕ: DeltaMonitor Factory (Универсальный мониторинг + Дивергенции)
@@ -259,6 +279,14 @@ class Platform:
         # смена тренда, смена знака дельты, сдвиг цены >0.5% или пульс раз в 60 сек.
         # Информативность та же, шума в ~10 раз меньше.
         self._delta_log_state = {}
+
+        # 🔥 Объявление задач для корректной остановки и устранения предупреждений Pylance
+        self._ws_task = None
+        self._keep_alive_task = None
+        self._health_check_task = None
+        self._spot_trades_task = None
+        self._spot_depth_task = None
+        self._features_output_task = None
 
         async def update_and_log_delta_context(event):
             payload = event.payload
@@ -653,6 +681,19 @@ class Platform:
                 symbol=self.symbol
             )
             
+            # 🔥 Features v2: кормим FeatureSet спот-лентой (синхронный on_trade)
+            # Обёрнуто в свой try/except, чтобы падение Features не ломало ни шину,
+            # ни cold storage. Семантика Binance: m=True → taker is buyer → is_buy=True.
+            try:
+                self.features.get(self.symbol).on_trade(
+                    price=float(data.get("p", 0)),
+                    qty=float(data.get("q", 0)),
+                    is_buy=bool(data.get("m", False)),
+                    ts=float(data.get("T", 0)) / 1000.0
+                )
+            except Exception as e:
+                logger.warning(f"🔸 [FEATURES] on_trade упал (лента продолжает идти): {e}")
+
             try:
                 side = "BUY" if not data.get("m") else "SELL"
                 price = float(data.get("p", 0))
@@ -671,17 +712,37 @@ class Platform:
                 logger.warning(f"Не удалось сохранить тик в Cold Storage: {e}")
 
         async def on_spot_depth(event_type: str, data: dict):
+            # 1. Штатная публикация в шину (оставляем без изменений для совместимости)
             await self.bus.publish(event_type=event_type, source="spot_ws_adapter", payload=data, symbol=self.symbol)
 
-        # 9. Запуск фоновых задач
-        self._spot_trades_task = asyncio.create_task(self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade))
-        self._spot_depth_task = asyncio.create_task(self.ws.subscribe_spot_depth(self.symbol, on_spot_depth))
-        
-        self._ws_task = asyncio.create_task(self.ws.run())
-        self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
-        self._health_check_task = asyncio.create_task(user_data_health_check())
-
+            # 2. 🔥 Features v2: кормим FeatureSet стаканом
+            try:
+                # Binance depth payload: "b" = bids, "a" = asks. Формат: [[price, qty], ...]
+                bids = [(float(p), float(q)) for p, q in data.get("b", [])]
+                asks = [(float(p), float(q)) for p, q in data.get("a", [])]
+                # "E" - это время события в миллисекундах, переводим в секунды
+                ts = float(data.get("E", time.time() * 1000)) / 1000.0
+                
+                self.features.get(self.symbol).on_orderbook(bids, asks, ts)
+            except Exception as e:
+                logger.warning(f"🔸 [FEATURES] on_orderbook упал (стакан пропущен): {e}")
         # 🔥 WATCHDOG: следит за живостью фоновых задач
+
+        # ==========================================
+        # 🔥 3. Запуск фоновых задач СПОТ (Вернули на место!)
+        # ==========================================
+        logger.info("🚀 Запускаю задачи сбора спот-данных (aggTrade + depth)...")
+        
+        self._spot_trades_task = asyncio.create_task(
+            self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade)
+        )
+        self._spot_depth_task = asyncio.create_task(
+            self.ws.subscribe_spot_depth(self.symbol, on_spot_depth)
+        )
+        
+        logger.info("✅ Задачи спота успешно созданы и запущены!")
+        # ==========================================
+
         async def tasks_watchdog():
             while getattr(self, '_running', True):
                 await asyncio.sleep(60)
@@ -926,21 +987,32 @@ class Platform:
         self._running = False
         
         tasks_to_cancel = []
-        if hasattr(self, '_ws_task') and not self._ws_task.done():
+        
+        # 🔥 Исправлено: добавлена проверка на None для всех задач
+        if self._ws_task is not None and not self._ws_task.done():
             self._ws_task.cancel()
             tasks_to_cancel.append(self._ws_task)
-        if hasattr(self, '_keep_alive_task') and not self._keep_alive_task.done():
+            
+        if self._keep_alive_task is not None and not self._keep_alive_task.done():
             self._keep_alive_task.cancel()
             tasks_to_cancel.append(self._keep_alive_task)
-        if hasattr(self, '_health_check_task') and not self._health_check_task.done():
+            
+        if self._health_check_task is not None and not self._health_check_task.done():
             self._health_check_task.cancel()
             tasks_to_cancel.append(self._health_check_task)
-        if hasattr(self, '_spot_trades_task') and not self._spot_trades_task.done():
+            
+        if self._spot_trades_task is not None and not self._spot_trades_task.done():
             self._spot_trades_task.cancel()
             tasks_to_cancel.append(self._spot_trades_task)
-        if hasattr(self, '_spot_depth_task') and not self._spot_depth_task.done():
+            
+        if self._spot_depth_task is not None and not self._spot_depth_task.done():
             self._spot_depth_task.cancel()
-            tasks_to_cancel.append(self._spot_depth_task)            
+            tasks_to_cancel.append(self._spot_depth_task)
+            
+        # 🔥 Features v2: отмена задачи периодического логирования OUTPUT
+        if self._features_output_task is not None and not self._features_output_task.done():
+            self._features_output_task.cancel()
+            tasks_to_cancel.append(self._features_output_task)
         
         if tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
