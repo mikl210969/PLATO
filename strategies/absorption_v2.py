@@ -213,6 +213,7 @@ class AbsorptionStrategyV2:
             atr=atr,
             volatility_mode="normal",
             basis=0.0,
+            order_type="limit",
             execution_params={
                 "quantity": self.fixed_lot_size,
                 "sl_price": sl_price,

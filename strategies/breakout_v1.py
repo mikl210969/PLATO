@@ -1,12 +1,12 @@
-"""Breakout Strategy V1 — торгует на пробой уровня с гибридным исполнением и динамическим Delta-фильтром."""
+"""Breakout Strategy V1 — торгует пробой стены после 70% съедения с подтверждением агрессии."""
 import time
-from typing import Optional, Dict, Any, List
+import logging
+from collections import deque
+from typing import Optional, Dict, Any
 
 from strategies.wall_fade_v3 import EnrichedSignal
 
-import logging
-from core.logger import get_logger
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class BreakoutStrategyV1:
@@ -16,349 +16,294 @@ class BreakoutStrategyV1:
         self._last_signal_time = 0.0
         self.cooldown_sec = config.get('cooldown_sec', 60.0)
         
-        self._recent_detector_events: List[Dict[str, Any]] = []
-        self._events_window_sec = 30.0
-        self._last_breakout_event: Optional[Dict[str, Any]] = None
-        self._event_valid_for_sec = 10.0
-        self.btc_trend = "FLAT"
-        self._event_bus = None
-        self._last_divergence = None
-        self._divergence_valid_for_sec = 900.0
-
-        # 🔥 ПРАВИЛЬНОЕ ЧТЕНИЕ: читаем напрямую из переданного конфига стратегии
+        # 🔥 Тестовый режим
         self.force_test_signal = config.get('force_test_signal', False)
         self.test_signal_interval = config.get('test_signal_interval', 60)
         self.fixed_lot_size = config.get('fixed_lot_size', 7.0)
-        self.fixed_sl_distance = config.get('fixed_sl_distance', 0.25)
-        self.fixed_tp1_distance = config.get('fixed_tp1_distance', 0.25)
-        self.fixed_tp2_distance = config.get('fixed_tp2_distance', 0.50)
         
-        self.log_input_stream = config.get('log_input_stream', False)
+        # 🔥 Параметры пробоя
+        self.min_eaten_pct = config.get('min_eaten_pct', 0.70)  # Ждем 70% съедения
+        self.min_wall_age_sec = config.get('min_wall_age_sec', 30)  # Минимальный возраст стены
+        self.max_wall_exposure_pct = config.get('max_wall_exposure_pct', 0.15)  # Макс 15% от остатка стены
+        self.min_wall_updates = config.get('min_wall_updates', 30)  # Минимум обновлений для зрелости
+        self.max_wall_cv = config.get('max_wall_cv', 0.15)  # Максимальный CV для стабильности
+        
+        # 🔥 Фильтры
         self.bypass_filters = config.get('bypass_filters', False)
+        self.min_confidence = config.get('min_confidence', 0.6)
+        self.delta_spike_ratio = config.get('delta_spike_ratio', 3.0)  # Порог всплеска дельты
         
-        self.bypass_btc_filter = config.get('bypass_btc_filter', self.bypass_filters)
-        self.bypass_adaptive_sl = config.get('bypass_adaptive_sl', False)
-        self.bypass_smart_sizing = config.get('bypass_smart_sizing', False)
-        self.bypass_macro_hvn_filter = config.get('bypass_macro_hvn_filter', self.bypass_filters)
-        self.bypass_wall_distance_filter = config.get('bypass_wall_distance_filter', self.bypass_filters)
-        self.bypass_confidence_threshold = config.get('bypass_confidence_threshold', self.bypass_filters)
-
-        # Инициализация параметров пробоя из локального конфига
-        self.liquidity_void_threshold = config.get('liquidity_void_threshold', 5000.0)
-        self.max_attempts = config.get('max_attempts', 2)
-        self.timeout_sec = config.get('timeout_sec', 5.0)
-        self.price_offset = config.get('price_offset', 0.01)
-
-        print(f"🔥 [DEBUG INIT] BreakoutV1: log_input_stream={self.log_input_stream}, force_test_signal={self.force_test_signal}")
+        # 🔥 Ring buffers для анализа
+        self._delta_history = deque(maxlen=10)  # История дельты за последние 10 секунд
+        self._price_history = deque(maxlen=10)  # История цен для расчета скорости
+        
+        print(f"🔥 [DEBUG INIT] BreakoutV1: force_test_signal={self.force_test_signal}, min_eaten={self.min_eaten_pct}")
         self._last_test_signal_time = 0.0
 
     def subscribe_to_events(self, event_bus):
-        self._event_bus = event_bus
-        self._event_bus.subscribe("BREAKOUT_OPPORTUNITY", self._on_breakout_event)
-        self._event_bus.subscribe("BTC_CONTEXT_UPDATED", self._on_btc_context_updated)
-        
-        # 🔥 НОВОЕ: Подписка на дивергенции
-        self._event_bus.subscribe("DIVERGENCE_DETECTED", self._on_divergence_detected)
-        
-        logger.info("✅ BreakoutStrategyV1 subscribed to BREAKOUT_OPPORTUNITY, BTC_CONTEXT_UPDATED & DIVERGENCE_DETECTED")
-
-        # 🔥 АДАПТИВНЫЙ ATR: Подписка на обновления
-        self._event_bus.subscribe("ATR_UPDATED", self._on_atr_updated)
-        
-        logger.info("✅ breakout_v1 subscribed to detector events, BTC_CONTEXT_UPDATED, DIVERGENCE_DETECTED & ATR_UPDATED")
-
-    async def _on_btc_context_updated(self, event):
-        self.btc_trend = event.payload.get("trend", "FLAT")
-
-    async def _on_divergence_detected(self, event):
-        """🔥 НОВОЕ: Сохраняем информацию о дивергенции."""
-        payload = getattr(event, "payload", {})
-        self._last_divergence = {
-            "type": payload.get("type"),
-            "price": payload.get("price", 0.0),
-            "timestamp": time.time()
-        }
-        logger.info(f"🚨 [BreakoutV1] Запомнена дивергенция: {self._last_divergence['type']} @ {self._last_divergence['price']:.2f}")
-
-    async def _on_atr_updated(self, event):
-        """🔥 АДАПТИВНЫЙ ATR: Обновляем значение ATR при получении события."""
-        payload = getattr(event, 'payload', {})
-        symbol = payload.get('symbol', '')
-        new_atr = payload.get('atr', 0.0)
-        
-        # Обновляем только если символ совпадает
-        # (стратегия может работать с несколькими символами)
-        if new_atr > 0:
-            old_atr = self.atr_value
-            self.atr_value = new_atr
-            logger.info(f"📊 [breakout_v1] ATR обновлён: {old_atr:.4f} → {new_atr:.4f}")
-
-    async def _on_breakout_event(self, event):
-        payload = getattr(event, "payload", {})
-        self._last_breakout_event = {
-            "wall_price": payload.get("wall_price", 0.0),
-            "side": payload.get("side", "BID"),
-            "consumption_pct": payload.get("consumption_pct", 0.0),
-            "consumption_rate_pct": payload.get("consumption_rate_pct", 0.0),
-            "initial_volume": payload.get("initial_volume", 0.0),
-            "current_volume": payload.get("current_volume", 0.0),
-            "timestamp": time.time()
-        }
+        pass
 
     def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
-        # 🔥 1. ТУМБЛЕР ВХОДНОГО ПОТОКА
-        if self.log_input_stream:
-            logger.info(f"📥 [ВХОДНОЙ ПОТОК] {self.__class__.__name__}: вызван generate_signal | Цена: {context.get('current_price', 0)} | Бидов: {len(context.get('orderbook', {}).get('bids', []))}")
-
+        now = time.time()
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
-        orderbook = context.get('orderbook', {'bids': [], 'asks': []})
-        atr = self.atr_value
         
-        now = time.time()
-
-        # 🔥 2. ТЕСТОВЫЙ РЕЖИМ (Фиксированные параметры)
+        # ========================================================================
+        # 1. ТЕСТОВЫЙ РЕЖИМ
+        # ========================================================================
         if self.force_test_signal and (now - self._last_test_signal_time >= self.test_signal_interval):
             self._last_test_signal_time = now
-            side = 'short' 
-            
-            # 🔥 ИСПРАВЛЕНИЕ: Округляем цену входа до 2 знаков (tick size биржи)
-            safe_entry_price = round(current_price, 2)
-            
-            if side == 'short':
-                sl_price = round(safe_entry_price + self.fixed_sl_distance, 2)
-                tp1_price = round(safe_entry_price - self.fixed_tp1_distance, 2)
-                tp2_price = round(safe_entry_price - self.fixed_tp2_distance, 2)
-            else:
-                sl_price = round(safe_entry_price - self.fixed_sl_distance, 2)
-                tp1_price = round(safe_entry_price + self.fixed_tp1_distance, 2)
-                tp2_price = round(safe_entry_price + self.fixed_tp2_distance, 2)
+            side = 'short'
+            sl_price = round(current_price + self.atr_value * 0.5, 2)
+            tp_price = round(current_price - (sl_price - current_price) * 2.5, 2)
 
-            logger.info(f"✅ [{self.__class__.__name__}] ТЕСТОВЫЙ СИГНАЛ (таймер {self.test_signal_interval}с) | Side: {side}, Price: {safe_entry_price}, SL: {sl_price}, TP1: {tp1_price}, TP2: {tp2_price}, Lot: {self.fixed_lot_size}")
-            
+            logger.info(f"✅ [{self.__class__.__name__}] ТЕСТОВЫЙ СИГНАЛ | Side: {side}, Price: {current_price}")
             return EnrichedSignal(
                 signal_id=f"{self.__class__.__name__}_TEST_{int(now)}",
-                symbol=symbol, 
-                side=side, 
-                entry_price=safe_entry_price,  # <-- Передаем округленную цену
-                strategy=self.__class__.__name__,
-                confidence=0.99, 
-                edge_price=safe_entry_price, 
-                rr_ratio=2.0, 
-                atr=0.1,
-                volatility_mode="normal", 
-                basis=0.0, 
-                order_type="limit",
-                execution_params={
-                    "quantity": self.fixed_lot_size,
-                    "sl_price": sl_price,
-                    "tp1_price": tp1_price,
-                    "tp2_price": tp2_price
-                }
+                symbol=symbol, side=side, entry_price=current_price, strategy=self.__class__.__name__,
+                confidence=0.99, edge_price=current_price, rr_ratio=2.5, atr=self.atr_value,
+                volatility_mode="normal", basis=0.0, order_type="limit",
+                execution_params={"quantity": self.fixed_lot_size, "sl_price": sl_price, "tp1_price": tp_price, "tp2_price": tp_price}
             )
 
         # ========================================================================
-        # ШТАТНАЯ ЛОГИКА (ВРЕМЕННО ВОЗВРАЩАЕМ NONE ДЛЯ ТЕСТА)
+        # 2. ПРОВЕРКА СВЕЖЕСТИ ДАННЫХ
         # ========================================================================
-        
-        if now - self._last_signal_time < self.cooldown_sec:
+        features = context.get('features')
+        if not features or not features.is_fresh(now):
             return None
 
-        # ========================================================================
-        #  УРОВЕНЬ 4: REGIME FILTER (Блокировка пробоев во флэте)
-        # ========================================================================
-        btc_regime = context.get('btc_delta_context', {}).get('regime', 'NORMAL')
+        snap = features.snapshot(now)
+        atr = self.atr_value if self.atr_value > 0 else 0.15
+        market_regime = context.get('market_regime', 'NORMAL')
         
-        if btc_regime == 'FLAT':
-            if self.bypass_btc_filter:
-                logger.info(f"⚠️ [DEBUG MODE] Пропускаем блокировку режима FLAT (bypass_btc_filter=True)")
-            else:
-                logger.info(f"🚫 [{self.__class__.__name__}] Сигнал отклонен: режим FLAT (высокий риск ложного пробоя)")
-                return None
-        # ========================================================================
-
-        if not self._last_breakout_event:
+        # Во флэте не торгуем пробои
+        if not self.bypass_filters and market_regime == 'FLAT':
             return None
+
+        # Обновляем ring buffers
+        delta_v3 = snap['delta']['windows'][3]['velocity']
+        self._delta_history.append(delta_v3)
+        self._price_history.append(current_price)
+
+        walls_bid = snap['walls'].get('walls_bid', [])
+        walls_ask = snap['walls'].get('walls_ask', [])
+        hvn_below = snap['volume_profile'].get('nearest_hvn_below')
+        hvn_above = snap['volume_profile'].get('nearest_hvn_above')
+
+        best_signal = None
+        best_confidence = 0.0
+
+        # ========================================================================
+        # 3. ПРОВЕРКА КАЧЕСТВА АГРЕССИИ (delta_spike_ratio)
+        # ========================================================================
+        if len(self._delta_history) >= 3:
+            delta_median = sorted(self._delta_history)[len(self._delta_history) // 2]
+            if abs(delta_median) < 1.0:
+                delta_median = 1.0  # Защита от деления на ноль
+            delta_spike = abs(delta_v3) / abs(delta_median)
+        else:
+            delta_spike = 0.0
+
+        # ========================================================================
+        # 4. ПОИСК ПРОБОЯ
+        # ========================================================================
+        
+        # --- LONG: Пробой ASK-стены вверх ---
+        for wall in walls_ask:
+            if wall.get('confidence', 0) < self.min_confidence:
+                continue
             
-        event_age = now - self._last_breakout_event["timestamp"]
-        if event_age > self._event_valid_for_sec:
-            self._last_breakout_event = None
-            return None
+            # Фильтр зрелости и стабильности
+            if wall.get('update_count', 0) < self.min_wall_updates:
+                continue
+            if wall.get('cv', 1.0) > self.max_wall_cv:
+                continue
+            
+            # Проверка съедения
+            if wall.get('eaten_pct', 0.0) < self.min_eaten_pct:
+                continue
+            
+            # Проверка агрессии (для LONG дельта должна быть положительной и с всплеском)
+            if delta_v3 < 0 or delta_spike < self.delta_spike_ratio:
+                continue
 
-        event = self._last_breakout_event
-        wall_price = event["wall_price"]
-        wall_side = event["side"]
-        self._last_breakout_event = None
+            # Ограничение размера позиции
+            max_allowed_qty = wall['size'] * self.max_wall_exposure_pct
+            qty = min(self.fixed_lot_size, max_allowed_qty)
+            if qty < 0.1:
+                continue
 
-        # 1. ОПРЕДЕЛЕНИЕ НАПРАВЛЕНИЯ
-        if wall_side == "ASK":
-            signal_side = "long"
-        elif wall_side == "BID":
-            signal_side = "short"
-        else:
-            return None
-
-        # 2. ПРОВЕРКА TRENDCONTEXT
-        trend_data = context.get('trend', {})
-        trend_state = trend_data.get('state', 'RANGING')
-        
-        if signal_side == "long" and trend_data.get('is_continuation_for_long'):
-            trade_type = "CONTINUATION (Long in Uptrend)"
-            trend_bonus = 0.15
-        elif signal_side == "short" and trend_data.get('is_continuation_for_short'):
-            trade_type = "CONTINUATION (Short in Downtrend)"
-            trend_bonus = 0.15
-        elif signal_side == "long" and trend_data.get('is_reversal_for_long'):
-            trade_type = "REVERSAL (Long in Downtrend)"
-            trend_bonus = -0.15
-        elif signal_side == "short" and trend_data.get('is_reversal_for_short'):
-            trade_type = "REVERSAL (Short in Uptrend)"
-            trend_bonus = -0.15
-        else:
-            trade_type = f"NEUTRAL ({trend_state})"
-            trend_bonus = 0.0
-
-        if "REVERSAL" in trade_type:
-            return None # Пробой против тренда слишком рискован
-
-        # ========================================================================
-        # 🔥 УРОВЕНЬ 4: Динамическая корректировка Confidence (Delta Context)
-        # ========================================================================
-        btc_context = context.get('btc_delta_context', {})
-        sol_context = context.get('sol_delta_context', {})
-        
-        btc_trend = btc_context.get('trend', self.btc_trend)
-        sol_delta = sol_context.get('delta_strength', 0.0)
-        
-        base_confidence = 0.55
-        
-        # Бонусы за скорость и объем
-        if event["consumption_rate_pct"] > 10.0: base_confidence += 0.10
-        if event["consumption_pct"] > 80.0: base_confidence += 0.10
-        base_confidence += trend_bonus
-
-        # Логика для пробоев: Совпадение с трендом = БОНУС, Против тренда = СУРОВЫЙ ШТРАФ
-        if not self.bypass_btc_filter:
-            if signal_side == 'long' and btc_trend == 'UP':
-                base_confidence += 0.15  # Бонус за подтверждение трендом BTC
-                logger.info(f"✅ [BreakoutV1] Бонус к confidence: LONG пробой подтвержден UP трендом BTC")
-            elif signal_side == 'long' and btc_trend == 'DOWN':
-                base_confidence *= 0.4   # Суровый штраф (высокий риск fakeout)
-                logger.warning(f"⚠️ [BreakoutV1] Штраф к confidence: LONG пробой против DOWN тренда BTC")
+            # Расчет смещения лимитки (адаптивно)
+            tick_size = 0.01  # Для SOLUSDT
+            volatility = atr / current_price if current_price > 0 else 0
+            offset_ticks = 1 if volatility < 0.001 else 2
+            offset = tick_size * offset_ticks
+            
+            # Вход: лимитка на тик выше стены (для LONG покупаем чуть выше сопротивления)
+            entry_price = round(wall['price'] + offset, 2)
+            sl_price = round(wall['price'] - (atr * 0.5), 2)  # Стоп ниже стены
+            tp_price = 0.0  # 🔥 Инициализация для Pylance
+            
+            # Проверка второй стены в пределах 3 ATR
+            second_wall_found = False
+            for other_wall in walls_ask:
+                if other_wall['price'] == wall['price']:
+                    continue
+                distance = other_wall['price'] - wall['price']
+                if 0 < distance <= 3 * atr:
+                    # Вторая стена найдена, проверяем HVN между ними
+                    if hvn_above and wall['price'] < hvn_above['price'] < other_wall['price']:
+                        # HVN между стенами — торгуем
+                        tp_price = round(hvn_above['price'] - (atr * 0.1), 2)
+                    else:
+                        # Нет HVN между стенами — пропускаем
+                        second_wall_found = True
+                        break
+                elif distance > 3 * atr:
+                    break  # Дальше не сканируем
+            
+            if second_wall_found:
+                continue
+            
+            # Если второй стены нет или HVN между ними — рассчитываем TP
+            if not second_wall_found:
+                reward_distance = (entry_price - sl_price) * 2.5
+                tp_price_candidate = round(entry_price + reward_distance, 2)
                 
-            elif signal_side == 'short' and btc_trend == 'DOWN':
-                base_confidence += 0.15
-                logger.info(f"✅ [BreakoutV1] Бонус к confidence: SHORT пробой подтвержден DOWN трендом BTC")
-            elif signal_side == 'short' and btc_trend == 'UP':
-                base_confidence *= 0.4
-                logger.warning(f"⚠️ [BreakoutV1] Штраф к confidence: SHORT пробой против UP тренда BTC")
-        else:
-            logger.info(f"⚠️ [DEBUG MODE] Пропускаем бонусы/штрафы confidence за тренд BTC (bypass_btc_filter=True)")
+                if hvn_above and hvn_above['price'] > entry_price:
+                    # HVN выше входа — ставим TP перед ним
+                    tp_price = round(hvn_above['price'] - (atr * 0.1), 2)
+                    tp_price = min(tp_price, tp_price_candidate)
+                else:
+                    tp_price = tp_price_candidate
 
-        # Подтверждение локальной дельтой SOL
-        if signal_side == 'long' and sol_delta > 50.0:
-            base_confidence += 0.10
-        elif signal_side == 'short' and sol_delta < -50.0:
-            base_confidence += 0.10
+            # Проверка минимального R:R
+            risk = entry_price - sl_price
+            reward = tp_price - entry_price
+            if risk > 0 and (reward / risk) < 2.0:
+                continue
 
-        # ========================================================================
-        # 🔥 УРОВЕНЬ 3: Бонус за подтверждение дивергенцией
-        # ========================================================================
-        if self._last_divergence:
-            div_age = now - self._last_divergence["timestamp"]
-            if div_age <= self._divergence_valid_for_sec:
-                div_type = self._last_divergence["type"]
+            conf = wall['confidence'] + 0.2  # Бонус за пробой
+            
+            if conf > best_confidence:
+                best_confidence = conf
+                best_signal = {
+                    'side': 'long',
+                    'entry_price': entry_price,
+                    'sl_price': sl_price,
+                    'tp_price': tp_price,
+                    'qty': qty,
+                    'edge_price': wall['price']
+                }
+
+        # --- SHORT: Пробой BID-стены вниз ---
+        for wall in walls_bid:
+            if wall.get('confidence', 0) < self.min_confidence:
+                continue
+            
+            if wall.get('update_count', 0) < self.min_wall_updates:
+                continue
+            if wall.get('cv', 1.0) > self.max_wall_cv:
+                continue
+            
+            if wall.get('eaten_pct', 0.0) < self.min_eaten_pct:
+                continue
+            
+            # Для SHORT дельта должна быть отрицательной
+            if delta_v3 > 0 or delta_spike < self.delta_spike_ratio:
+                continue
+
+            max_allowed_qty = wall['size'] * self.max_wall_exposure_pct
+            qty = min(self.fixed_lot_size, max_allowed_qty)
+            if qty < 0.1:
+                continue
+
+            tick_size = 0.01
+            volatility = atr / current_price if current_price > 0 else 0
+            offset_ticks = 1 if volatility < 0.001 else 2
+            offset = tick_size * offset_ticks
+            
+            # Вход: лимитка на тик ниже стены (для SHORT продаем чуть ниже поддержки)
+            entry_price = round(wall['price'] - offset, 2)
+            sl_price = round(wall['price'] + (atr * 0.5), 2)
+
+            tp_price = 0.0  # 🔥 Инициализация для Pylance
+            
+            second_wall_found = False
+            for other_wall in walls_bid:
+                if other_wall['price'] == wall['price']:
+                    continue
+                distance = wall['price'] - other_wall['price']
+                if 0 < distance <= 3 * atr:
+                    if hvn_below and other_wall['price'] < hvn_below['price'] < wall['price']:
+                        tp_price = round(hvn_below['price'] + (atr * 0.1), 2)
+                    else:
+                        second_wall_found = True
+                        break
+                elif distance > 3 * atr:
+                    break
+            
+            if second_wall_found:
+                continue
+            
+            if not second_wall_found:
+                reward_distance = (sl_price - entry_price) * 2.5
+                tp_price_candidate = round(entry_price - reward_distance, 2)
                 
-                if div_type == "BULLISH" and signal_side == "long":
-                    base_confidence += 0.20
-                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал LONG подтвержден бычьей дивергенцией! +0.20 к confidence")
-                elif div_type == "BEARISH" and signal_side == "short":
-                    base_confidence += 0.20
-                    logger.info(f"🚨 [DIVERGENCE CONFIRMED] Сигнал SHORT подтвержден медвежьей дивергенцией! +0.20 к confidence")
-            else:
-                self._last_divergence = None
+                if hvn_below and hvn_below['price'] < entry_price:
+                    tp_price = round(hvn_below['price'] + (atr * 0.1), 2)
+                    tp_price = max(tp_price, tp_price_candidate)
+                else:
+                    tp_price = tp_price_candidate
+
+            risk = sl_price - entry_price
+            reward = entry_price - tp_price
+            if risk > 0 and (reward / risk) < 2.0:
+                continue
+
+            conf = wall['confidence'] + 0.2
+            
+            if conf > best_confidence:
+                best_confidence = conf
+                best_signal = {
+                    'side': 'short',
+                    'entry_price': entry_price,
+                    'sl_price': sl_price,
+                    'tp_price': tp_price,
+                    'qty': qty,
+                    'edge_price': wall['price']
+                }
+
         # ========================================================================
-
-        # 3. АНАЛИЗ ЛИКВИДНОСТИ
-        liquidity_behind_wall = self._analyze_liquidity_behind_wall(orderbook, wall_price, signal_side)
-        
-        if liquidity_behind_wall < self.liquidity_void_threshold:
-            order_type = "market"
-            base_confidence += 0.05 # Бонус за пустоту (сильный импульс)
-        else:
-            order_type = "limit"
-
-        final_confidence = min(max(base_confidence, 0.0), 1.0)
-
-        # Жесткий порог отсечения
-        if not self.bypass_confidence_threshold and final_confidence < 0.50:
-            logger.info(f"🚫 [BreakoutV1] Сигнал ОТКЛОНЕН: итоговый confidence {final_confidence:.2f} ниже порога 0.50 (BTC: {btc_trend}, SOL_Delta: {sol_delta})")
+        # 5. ФИНАЛЬНАЯ ВАЛИДАЦИЯ
+        # ========================================================================
+        if not best_signal:
             return None
-        elif self.bypass_confidence_threshold and final_confidence < 0.50:
-            logger.warning(f"⚠️ [DEBUG MODE] Пропускаем порог confidence (текущий: {final_confidence:.2f}, требуется >= 0.50)")
 
-        # 4. РАСЧЕТ УРОВНЕЙ
-        entry_price = round(current_price, 2)
-        if signal_side == "long":
-            sl_price = round(wall_price - (atr * 0.5), 2)
-        else:
-            sl_price = round(wall_price + (atr * 0.5), 2)
-            
-        r_value = abs(entry_price - sl_price)
-        if r_value == 0: r_value = atr
-            
-        target_rr = 2.5
-        if signal_side == "long":
-            tp1_price = round(entry_price + (target_rr * r_value), 2)
-        else:
-            tp1_price = round(entry_price - (target_rr * r_value), 2)
-
-        execution_params = {
-            "max_attempts": self.max_attempts,
-            "timeout_sec": self.timeout_sec,
-            "price_offset": self.price_offset,
-            "fallback_to_market": True,
-            "wall_price": wall_price,
-            "consumption_pct": event["consumption_pct"],
-            "liquidity_behind_wall": liquidity_behind_wall
-        }
-        
         self._last_signal_time = now
         
-        logger.info(
-            f"🚀 [BreakoutV1] SIGNAL CONFIRMED: {signal_side.upper()} | "
-            f"Entry: {entry_price} | SL: {sl_price} | TP1: {tp1_price} | "
-            f"R:R: {target_rr:.1f} | Conf: {final_confidence:.2f} | "
-            f"Order: {order_type.upper()} | Type: {trade_type} | BTC: {btc_trend} | SOL_Delta: {sol_delta}"
-        )
+        side = best_signal['side'].upper()
+        logger.info(f"🚀 [BreakoutV1] BREAKOUT SIGNAL: {side} | Entry: {best_signal['entry_price']} | "
+                    f"SL: {best_signal['sl_price']} | TP: {best_signal['tp_price']} | Qty: {best_signal['qty']:.2f} | Conf: {best_confidence:.2f}")
 
         return EnrichedSignal(
             signal_id=f"BreakoutV1_{symbol}_{int(now)}",
             symbol=symbol,
-            side=signal_side,
-            entry_price=entry_price,
+            side=best_signal['side'],
+            entry_price=best_signal['entry_price'],
             strategy="BreakoutV1",
-            confidence=final_confidence,
-            edge_price=wall_price,
-            rr_ratio=target_rr,
+            confidence=best_confidence,
+            edge_price=best_signal['edge_price'],
+            rr_ratio=2.5,
             atr=atr,
             volatility_mode="normal",
-            basis=0.001,
-            order_type=order_type,
-            execution_params=execution_params
+            basis=0.0,
+            order_type="limit",
+            execution_params={
+                "quantity": best_signal['qty'],
+                "sl_price": best_signal['sl_price'],
+                "tp1_price": best_signal['tp_price'],
+                "tp2_price": best_signal['tp_price']
+            }
         )
-
-    def _analyze_liquidity_behind_wall(self, orderbook: Dict, wall_price: float, signal_side: str) -> float:
-        try:
-            depth_pct = 0.005
-            if signal_side == "long":
-                asks = orderbook.get('asks', [])
-                max_price = wall_price * (1 + depth_pct)
-                return sum(float(volume) * float(price) for price, volume in asks if float(price) > wall_price and float(price) <= max_price)
-            else:
-                bids = orderbook.get('bids', [])
-                min_price = wall_price * (1 - depth_pct)
-                return sum(float(volume) * float(price) for price, volume in bids if float(price) < wall_price and float(price) >= min_price)
-        except Exception as e:
-            logger.error(f"Error analyzing liquidity behind wall: {e}")
-            return 0.0
