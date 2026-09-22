@@ -25,7 +25,7 @@
     }
   },
   "btc_context": {
-    "enabled": false,
+    "enabled": true,
     "penalty_multiplier": 0.5
   },
   "wall_fade": {

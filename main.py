@@ -531,14 +531,30 @@ class Platform:
         
         self.bus.subscribe("TRADE_NORMALIZED_SOLUSDT", on_normalized_trade)
 
-        async def on_btc_agg_trade(data):
+        # 🔥 ИСПРАВЛЕНИЕ: Нормализация тиков BTC для DeltaMonitor
+        # Возвращаем два аргумента, так как WS-адаптер передает именно их (event_type и data)
+        async def on_btc_agg_trade(event_type: str, data: dict):
+            # 1. Нормализуем формат (как это делается для SOLUSDT)
+            normalized_payload = {
+                "price": float(data.get("p", 0)),
+                "qty": float(data.get("q", 0)),
+                "is_buyer_maker": bool(data.get("m", False)),
+                "timestamp": data.get("T", 0)
+            }
+            
+            # 2. Публикуем ИМЕННО ТОТ event_type, на который подписан DeltaMonitor
             await self.bus.publish(
-                event_type="BTC_AGG_TRADE",
-                source="ws_adapter",
-                payload=data,
+                event_type="TRADE_NORMALIZED_BTCUSDT",
+                source="btc_ws_adapter",
+                payload=normalized_payload,
                 symbol="BTCUSDT"
             )
-        self.ws.on("BTC_AGG_TRADE", on_btc_agg_trade)
+            
+            # 3. Отладочный принт (чтобы убедиться, что тики идут)
+            #print(f"🟠 [BTC TICK] Price: {normalized_payload['price']}, Qty: {normalized_payload['qty']}")
+
+        # Подписка (сигнатуры теперь совпадают с тем, что ждет адаптер)
+        self.ws.on("BTC_AGG_TRADE", on_btc_agg_trade)  # type: ignore[arg-type]
 
         # 5. 🔥 ИСПРАВЛЕНО: Callback для продления listen_key (дешевый PUT-запрос)
         async def refresh_listen_key_callback():
@@ -740,7 +756,12 @@ class Platform:
             self.ws.subscribe_spot_depth(self.symbol, on_spot_depth)
         )
         
-        logger.info("✅ Задачи спота успешно созданы и запущены!")
+        # 🔥 НОВОЕ: Явная подписка на Spot тики BTC для нашего обработчика
+        self._btc_spot_trades_task = asyncio.create_task(
+            self.ws.subscribe_spot_agg_trade("BTCUSDT", on_btc_agg_trade)
+        )
+        
+        logger.info("✅ Задачи спота (SOL + BTC) успешно созданы и запущены!")
         # ==========================================
 
         async def tasks_watchdog():
@@ -929,6 +950,13 @@ class Platform:
                     'btc_delta_context': self.delta_contexts.get("BTCUSDT", {}),
                     'sol_delta_context': self.delta_contexts.get("SOLUSDT", {})
                 }
+                
+                # 🔍 РЕНТГЕН: проверяем, ожили ли данные BTC
+                btc_ctx = context.get('btc_delta_context', {})
+                if btc_ctx.get('current_price', 0.0) > 0:
+                    logger.info(f"🔍 [BTC FILTER] Активные данные: trend='{btc_ctx.get('trend')}', price={btc_ctx.get('current_price')}, delta={btc_ctx.get('delta_strength')}")
+                else:
+                    logger.warning("⚠️ [BTC FILTER] Данные BTC все еще нулевые! Проверь нормализацию тиков.")
 
                 signals = await self._generate_signals(context)
 
