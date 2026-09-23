@@ -78,7 +78,7 @@
   "volume_context": {
     "enabled": true,
     "recalc_interval_sec": 60,
-    "lookback_candles": 20,
+    "lookback_candles": 3,
     "baseline_avg_vol": 100.0,
     "dry_run": false,
     "force_regime": null,

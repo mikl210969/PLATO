@@ -261,7 +261,30 @@ class Platform:
                 lookback_candles=30
             )
 
-        volume_config = self.config.get("volume_context", {})
+        # ========================================================================
+        # 🔥 УМНОЕ ЧТЕНИЕ КОНФИГА с защитным fallback
+        # ========================================================================
+        raw_volume_config = self.config.get("volume_context", {})
+        
+        # Если конфига нет или он выключен, применяем наши проверенные настройки по умолчанию
+        if not raw_volume_config or not raw_volume_config.get("enabled", False):
+            logger.warning("⚠️ [CONFIG] volume_context не найден или выключен в main config. Применяем fallback-настройки!")
+            volume_config = {
+                "enabled": True,
+                "recalc_interval_sec": 60,
+                "lookback_candles": 20,  # Возвращаем нормальное значение, т.к. данные уже идут (volumes=30)
+                "baseline_avg_vol": 100.0,
+                "dry_run": False,
+                "force_regime": None,
+                "regimes": {
+                    "calm": {"vol_ratio_max": 0.7, "overrides": {"min_wall_volume": 10, "price_distance_pct": 0.3, "min_confidence": 0.4, "delta_spike_ratio": 2.0, "cooldown_sec": 60, "min_eaten_pct": 0.6}},
+                    "normal": {"vol_ratio_max": 2.0, "overrides": {"min_wall_volume": 20, "price_distance_pct": 0.5, "min_confidence": 0.5, "delta_spike_ratio": 3.0, "cooldown_sec": 30, "min_eaten_pct": 0.7}},
+                    "volatile": {"vol_ratio_max": 999, "overrides": {"min_wall_volume": 50, "price_distance_pct": 1.0, "min_confidence": 0.65, "delta_spike_ratio": 5.0, "cooldown_sec": 15, "min_eaten_pct": 0.8}}
+                }
+            }
+        else:
+            volume_config = raw_volume_config
+
         base_strategy_params = {
             "min_wall_volume": 20.0,
             "price_distance_pct": 0.5,
@@ -276,11 +299,13 @@ class Platform:
             "bypass_confidence_threshold": False,
             "bypass_hvn_filter": False,
         }
+        
         self.volume_context_manager = VolumeContextManager(
             volume_config=volume_config,
             base_strategy_params=base_strategy_params
         )
         logger.info("✅ VolumeContextManager и VolumeRollingWindow инициализированы")
+        # ========================================================================
 
         # ========================================================================
         # 🔥 ИСПРАВЛЕНО: merge базового конфига стратегии с debug-настройками
@@ -815,6 +840,38 @@ class Platform:
         )
         
         logger.info("✅ Задачи спота (SOL + BTC) успешно созданы и запущены!")
+
+        # ========================================================================
+        # 🔥 НОВОЕ: Фоновая задача для пересчета VolumeContext (адаптивные фильтры)
+        # ========================================================================
+        async def context_updater_loop():
+            logger.info("🚀 [DEBUG LOOP] context_updater_loop ЗАПУЩЕН!")
+            interval = self.config.get("volume_context", {}).get("recalc_interval_sec", 60)
+            logger.info(f"🚀 [DEBUG LOOP] Интервал пересчета: {interval} сек")
+            
+            while self._running:
+                logger.info("🔄 [DEBUG LOOP] Начинаю итерацию цикла...")
+                try:
+                    for symbol in self.monitored_symbols:
+                        rolling_window = self.volume_rolling_windows.get(symbol)
+                        if rolling_window:
+                            recent_volumes = rolling_window.get_recent_volumes(symbol, limit=50)
+                            logger.info(f"🔍 [DEBUG LOOP] {symbol}: volumes_count={len(recent_volumes)}")
+                            
+                            if len(recent_volumes) < self.volume_context_manager.lookback:
+                                logger.warning(f"⚠️ [DEBUG LOOP] {symbol}: Недостаточно данных ({len(recent_volumes)}/{self.volume_context_manager.lookback})")
+                            
+                            logger.info(f"📞 [DEBUG LOOP] Вызываю update_context для {symbol}...")
+                            await self.volume_context_manager.update_context(recent_volumes)
+                            logger.info(f"✅ [DEBUG LOOP] update_context для {symbol} завершен")
+                except Exception as e:
+                    logger.error(f"❌ [DEBUG LOOP] Error in context updater: {e}")
+                await asyncio.sleep(interval)
+
+        self._context_updater_task = asyncio.create_task(context_updater_loop())
+        logger.info("✅ VolumeContext updater task started")
+        # ========================================================================
+
         # ==========================================
 
         async def tasks_watchdog():

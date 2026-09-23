@@ -31,39 +31,35 @@ class VolumeContextManager:
         self.force_regime = self.config.get("force_regime", None)
 
     async def update_context(self, recent_volumes: List[float]) -> None:
-        """
-        Вызывается по таймеру или на закрытии свечи.
-        :param recent_volumes: Список объемов вертикальных свечей (от старых к новым).
-        """
         if not self.enabled:
             return
 
-        # 1. Защита от холодного старта
+        # Защита от холодного старта
         if len(recent_volumes) < self.lookback:
-            logger.debug(f"Not enough data for context update ({len(recent_volumes)}/{self.lookback}). Using base params.")
             return
 
-        # 2. Расчет метрик
-        volumes_array = np.array(recent_volumes[-self.lookback:])
-        avg_vol = float(np.mean(volumes_array))
-        std_vol = float(np.std(volumes_array))
-        
-        # Защита от деления на ноль
-        vol_ratio = avg_vol / self.baseline_avg_vol if self.baseline_avg_vol > 0 else 1.0
-        
-        # Clamp vol_ratio, чтобы избежать экстремумов при аномалиях
-        vol_ratio = max(0.1, min(vol_ratio, 10.0))
+        try:
+            volumes_array = np.array(recent_volumes[-self.lookback:])
+            avg_vol = float(np.mean(volumes_array))
+            std_vol = float(np.std(volumes_array))
+            
+            vol_ratio = avg_vol / self.baseline_avg_vol if self.baseline_avg_vol > 0 else 1.0
+            # Clamp для защиты от аномалий
+            vol_ratio = max(0.1, min(vol_ratio, 10.0))
 
-        # 3. Определение режима
-        new_regime = self._determine_regime(vol_ratio)
+            new_regime = self._determine_regime(vol_ratio)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка при расчете метрик контекста: {e}")
+            return
 
-        # 4. Применение параметров
+        # Применяем overrides для нового режима
         new_params = deepcopy(self.base_params)
         if new_regime in self.regimes:
             overrides = self.regimes[new_regime].get("overrides", {})
             new_params.update(overrides)
 
-        # 5. Фиксация состояния (Async-safe)
+        # Thread-safe обновление состояния
         async with self._lock:
             regime_changed = (new_regime != self.current_regime)
             
@@ -74,8 +70,6 @@ class VolumeContextManager:
 
             if not self.dry_run:
                 self.current_params = new_params
-            else:
-                logger.info(f"[DRY RUN] Would apply params for {new_regime}: {new_params}")
 
             self.last_metrics = {
                 "avg_vol": avg_vol,

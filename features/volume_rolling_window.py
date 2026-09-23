@@ -91,14 +91,15 @@ class VolumeRollingWindow:
             symbol = event.symbol
             payload = event.payload
             
-            price = payload.get('price', 0.0)
-            quantity = payload.get('quantity', 0.0)
-            timestamp = payload.get('timestamp', 0.0)
-            is_buyer_maker = payload.get('is_buyer_maker', False)
+            # 🔥 ИСПРАВЛЕНО: Binance использует 'qty', а не 'quantity'
+            price = float(payload.get("price", 0.0))
+            quantity = float(payload.get("qty", 0.0))
+            timestamp = float(payload.get("timestamp", 0.0))
+            is_buyer_maker = bool(payload.get("is_buyer_maker", False))
             
             self.on_trade(symbol, price, quantity, timestamp, is_buyer_maker)
         except Exception as e:
-            logger.error(f"Error in on_trade_event: {e}")
+            logger.error(f" Error in on_trade_event: {e}")
 
     def calculate_baseline_avg_vol(self, symbol: str, lookback_minutes: int = 1440) -> float:
         """
