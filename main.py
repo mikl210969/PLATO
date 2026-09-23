@@ -44,6 +44,9 @@ from extensions.analytics.monitor_factory import MonitorFactory  # 🔥 НОВО
 from extensions.analytics.atr_monitor import AtrMonitor  # 🔥 УРОВЕНЬ 5: Dynamic ATR
 from core.json_logger import JsonLogger, JsonLoggerHandler
 
+from features.volume_rolling_window import VolumeRollingWindow
+from features.volume_context_manager import VolumeContextManager
+
 logger = get_logger(__name__)
 
 
@@ -69,6 +72,10 @@ class Platform:
 
         # 1. Загрузка конфигов
         self.config = ConfigLoader().load_all()
+
+        # 🔥 НОВОЕ: Инициализация Базы Данных для хранения свечей и метрик
+        from extensions.data_layer.db_manager import DatabaseManager
+        self.db_manager = DatabaseManager(db_path="extensions/data_layer/plato_metrics.db")
         secrets = ConfigLoader().load_secrets()
 
         exchange_config = self.config.get('exchange', {})
@@ -239,24 +246,65 @@ class Platform:
         debug_mode = self.config.get('debug_mode', {})
         strategies_debug = debug_mode.get('strategies', {})
         
+        # ========================================================================
+        # 🔥 НОВОЕ: Инициализация адаптивных объемных компонентов
+        # ========================================================================
+        from features.volume_rolling_window import VolumeRollingWindow
+        from features.volume_context_manager import VolumeContextManager
+
+        self.monitored_symbols = ["BTCUSDT", "SOLUSDT"] 
+        
+        self.volume_rolling_windows = {}
+        for symbol in self.monitored_symbols:
+            self.volume_rolling_windows[symbol] = VolumeRollingWindow(
+                db_manager=self.db_manager,
+                lookback_candles=30
+            )
+
+        volume_config = self.config.get("volume_context", {})
+        base_strategy_params = {
+            "min_wall_volume": 20.0,
+            "price_distance_pct": 0.5,
+            "min_confidence": 0.5,
+            "cooldown_sec": 30,
+            "fixed_lot_size": 7.0,
+            "fixed_sl_distance": 0.25,
+            "fixed_tp1_distance": 0.25,
+            "fixed_tp2_distance": 0.50,
+            "bypass_filters": False,
+            "bypass_btc_filter": False,
+            "bypass_confidence_threshold": False,
+            "bypass_hvn_filter": False,
+        }
+        self.volume_context_manager = VolumeContextManager(
+            volume_config=volume_config,
+            base_strategy_params=base_strategy_params
+        )
+        logger.info("✅ VolumeContextManager и VolumeRollingWindow инициализированы")
+
+        # ========================================================================
         # 🔥 ИСПРАВЛЕНО: merge базового конфига стратегии с debug-настройками
-        # (bypass_filters, log_input_stream и др. лежат в debug_mode.strategies.<имя>)
+        # ========================================================================
         wall_fade_config = strategies_config.get('wall_fade', {})
         wall_fade_debug = strategies_debug.get('wall_fade_v3', {})
         wall_fade_merged = {**wall_fade_config, **wall_fade_debug}
-        self.wall_fade = WallFadeStrategyV3(wall_fade_merged, atr_value=0.5)
+        
+        # 🔥 ИЗМЕНЕНО: передаем context_manager
+        self.wall_fade = WallFadeStrategyV3(wall_fade_merged, atr_value=0.5, context_manager=self.volume_context_manager)
         self.wall_fade.subscribe_to_events(self.bus)
 
         absorption_config = strategies_config.get('absorption', {})
         absorption_debug = strategies_debug.get('absorption_v2', {})
         absorption_merged = {**absorption_config, **absorption_debug}
-        self.absorption = AbsorptionStrategyV2(absorption_merged, atr_value=0.5)
+        # 🔥 ИЗМЕНЕНО: передаем context_manager
+        self.absorption = AbsorptionStrategyV2(absorption_merged, atr_value=0.5, context_manager=self.volume_context_manager)
         self.absorption.subscribe_to_events(self.bus)
 
         breakout_config = strategies_config.get('breakout', {})
         breakout_debug = strategies_debug.get('breakout_v1', {})
         breakout_merged = {**breakout_config, **breakout_debug}
-        self.breakout = BreakoutStrategyV1(breakout_merged, atr_value=0.5)
+        # 🔥 ИЗМЕНЕНО: передаем context_manager
+        self.breakout = BreakoutStrategyV1(breakout_merged, atr_value=0.5, context_manager=self.volume_context_manager)
         self.breakout.subscribe_to_events(self.bus)    
 
         # ========================================================================
@@ -407,8 +455,8 @@ class Platform:
                 
             print(f"🚨 Вызываем generate_signal для {strategy.__class__.__name__}...")
             
-            # Вот здесь стратегия должна написать в лог "📥 [ВХОДНОЙ ПОТОК]..."
-            signal = strategy.generate_signal(context)
+            # 🔥 ИЗМЕНЕНО: добавлен await, так как generate_signal теперь async
+            signal = await strategy.generate_signal(context)
             
             if signal:
                 print(f"✅ СИГНАЛ ПОЛУЧЕН ОТ {strategy.__class__.__name__}!")
@@ -530,6 +578,11 @@ class Platform:
                 )
         
         self.bus.subscribe("TRADE_NORMALIZED_SOLUSDT", on_normalized_trade)
+        
+        # 🔥 НОВОЕ: Подписка VolumeRollingWindow на тики для агрегации свечей
+        for symbol in self.monitored_symbols:
+            self.bus.subscribe(f"TRADE_NORMALIZED_{symbol}", self.volume_rolling_windows[symbol].on_trade_event)
+        logger.info(f"✅ VolumeRollingWindow subscribed to {self.monitored_symbols}")
 
         # 🔥 ИСПРАВЛЕНИЕ: Нормализация тиков BTC для DeltaMonitor
         # Возвращаем два аргумента, так как WS-адаптер передает именно их (event_type и data)
