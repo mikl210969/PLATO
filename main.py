@@ -766,7 +766,7 @@ class Platform:
                 payload=normalized_payload,
                 symbol="BTCUSDT"
             )
-            logger.info(f"🔍 [BTC SPOT DEBUG] Тик получен! Цена: {normalized_payload['price']}")
+            #logger.info(f"🔍 [BTC SPOT DEBUG] Тик получен! Цена: {normalized_payload['price']}")
 
         logger.info("🚀 Запускаю задачи сбора спот-данных (aggTrade + depth)...")
         self._spot_trades_task = asyncio.create_task(self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade))

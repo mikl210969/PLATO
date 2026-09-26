@@ -57,4 +57,28 @@ git push origin main
 # 3. Если есть ошибки ❌ - чиним и повторяем пункт 1
 
 
+# 1. Добавляем все изменения в индекс
+git add .
+
+# 2. Делаем коммит
+git commit -m "Cleanup: Removed debug spam (BTC SPOT, Passport diagnostic) for night test"
+
+# 3. Отправляем в удаленный репозиторий
+git push origin feature/v12-analytics
+
+
+
+
+
+
+# 1. Получаем свежие изменения
+git pull origin feature/v12-analytics
+
+# 2. Очищаем кэш Python (обязательно!)
+Get-ChildItem -Path . -Filter __pycache__ -Recurse -Directory -Force | Remove-Item -Recurse -Force
+Get-ChildItem -Path . -Filter *.pyc -Recurse -File -Force | Remove-Item -Force
+
+# 3. Запускаем платформу в фоне
+Start-Process -FilePath "python" -ArgumentList "main.py" -RedirectStandardOutput "night_test.log" -RedirectStandardError "night_error.log" -NoNewWindow
+
    .\start_bot.bat
