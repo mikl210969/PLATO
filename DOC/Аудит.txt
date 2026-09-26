@@ -1,0 +1,23 @@
+# 1. Бот жил без рестартов (ждём ТОЛЬКО init-строки старта, без Exit Code/Traceback)
+Select-String -Path "logs\platform_log.jsonl" -Pattern "initialized|Exit Code|Traceback" | Select-Object -Last 5
+
+# 2. Reconciler не умолкал (ждём ~150-400 вызовов за 1,5 часа)
+Select-String -Path "logs\platform_log.jsonl" -Pattern "caller=reconciler" | Measure-Object
+
+# 3. H1 в бою: закрывающие филлы теперь наблюдение (ждём >0, если были закрытия)
+Select-String -Path "logs\platform_log.jsonl" -Pattern "close_fill_observed" | Measure-Object
+
+# 4. Старый баг мёртв: position_fully_closed из order_handler больше не публикуется (ждём 0)
+Select-String -Path "logs\platform_log.jsonl" -Pattern "position_fully_closed" | Measure-Object
+
+# 5. Ложных внешних закрытий нет (ждём 0 detected ИЛИ каждый accompanied cancelled)
+Select-String -Path "logs\platform_log.jsonl" -Pattern "external_close_detected|external_close_cancelled_position_exists" | Select-Object -Last 5
+
+# 6. DegradedGuard жил в обрывах (ждём >0, если были DEGRADED-окна)
+Select-String -Path "logs\platform_log.jsonl" -Pattern "caller=degraded_guard" | Measure-Object
+
+# 7. Сводка паспортов: размеры 0..7, без отрицательных, entry>0 при filled>0
+Get-ChildItem "passports\*.json" | ForEach-Object { $p = Get-Content $_.FullName -Raw | ConvertFrom-Json; [PSCustomObject]@{ id=$p.passport_id.Substring(17); status=$p.status; size=$p.position_size; filled=$p.filled_qty; entry=$p.position_entry_price; realized=$p.realized_pnl; gross=$p.gross_pnl; exit=$p.exit_reason; created=$p.created_at } } | Sort-Object created | Format-Table -AutoSize
+
+# 8. Судьба TP1: остаток жив под guard'ом или закрыт честно (gross ≠ 0 при realized ≠ 0)
+Get-ChildItem "passports\*.json" | ForEach-Object { $p = Get-Content $_.FullName -Raw | ConvertFrom-Json; if ($p.tp1_activated) { [PSCustomObject]@{ id=$p.passport_id.Substring(17); status=$p.status; size=$p.position_size; realized=$p.realized_pnl; gross=$p.gross_pnl; exit=$p.exit_reason } } } | Format-Table -AutoSize

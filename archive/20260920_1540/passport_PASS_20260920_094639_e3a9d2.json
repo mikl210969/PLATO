@@ -1,0 +1,113 @@
+{
+  "passport_id": "PASS_20260920_094639_e3a9d2",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "BreakoutStrategyV1_TEST_1789897599",
+  "strategy": "BreakoutStrategyV1",
+  "side": "short",
+  "entry_price": 108.52,
+  "confidence": 0.99,
+  "sl_price": 108.52,
+  "tp1_price": 108.27,
+  "tp2_price": 108.02,
+  "position_size": 0.0,
+  "position_entry_price": 108.52,
+  "orders": [
+    {
+      "order_id": 4207901883,
+      "client_order_id": "SOLU_BreakoutSt_e3a9d2_1789897599",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 108.52,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-20T09:46:39.035754+00:00",
+  "updated_at": "2026-09-20T10:05:24.897581+00:00",
+  "closed_at": "2026-09-20T10:05:24.897581+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-09-20T09:46:39.796374+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-20T09:46:39.818376+00:00",
+      "event": "STATUS: ORDER_ACK",
+      "details": "Order ACK received"
+    },
+    {
+      "timestamp": "2026-09-20T09:46:39.820373+00:00",
+      "event": "FULLY_FILLED",
+      "details": "Filled 7.0 @ 108.52, Total Size: 7.0, PnL_TP1: 1.75"
+    },
+    {
+      "timestamp": "2026-09-20T09:46:39.820373+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 7.0 SOL"
+    },
+    {
+      "timestamp": "2026-09-20T09:47:07.407354+00:00",
+      "event": "STATUS: OPEN",
+      "details": "Order filled"
+    },
+    {
+      "timestamp": "2026-09-20T09:47:07.841484+00:00",
+      "event": "GUARD_REGISTERED",
+      "details": "Guard registered. SL: 108.67, TP1: 108.27, TP2: 108.02"
+    },
+    {
+      "timestamp": "2026-09-20T09:49:47.216263+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    },
+    {
+      "timestamp": "2026-09-20T10:05:24.876275+00:00",
+      "event": "TP1_HIT",
+      "details": "Closed 5.25, SL moved to breakeven: 108.52"
+    },
+    {
+      "timestamp": "2026-09-20T10:05:24.897581+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "TP1_HIT"
+    }
+  ],
+  "exit_reason": "TP1_HIT",
+  "exit_price": 108.52,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "net_pnl": 0.0,
+  "tp1_activated": true,
+  "tp2_activated": false,
+  "sl_activated": false,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "BTC FLAT → нейтральный режим",
+    "btc_trend": "FLAT",
+    "btc_regime": "FLAT",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.15,
+    "sl_multiplier": 0.6,
+    "sl_reason": "Сильная дельта -1392.4 → узкий SL (×0.6)",
+    "symbol_delta": -1392.409,
+    "sl_distance": 0.15,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "DEGRADED",
+  "guard_status": "inactive",
+  "tp1_projected_pnl": 2.62,
+  "tp2_projected_pnl": 5.25,
+  "sl_projected_pnl": 0.0,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 10.5,
+  "remaining_order_qty": 0.0,
+  "avg_price": 108.52,
+  "real_pnl": 0.0,
+  "realized_pnl": 1.31
+}

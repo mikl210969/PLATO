@@ -1,0 +1,141 @@
+{
+  "passport_id": "PASS_20260921_073427_718810",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "WallFadeV3_SOLUSDT_1789976067",
+  "strategy": "WallFadeV3",
+  "side": "short",
+  "entry_price": 111.61,
+  "confidence": 0.75,
+  "sl_price": 111.76,
+  "tp1_price": 111.36,
+  "tp2_price": 111.11,
+  "position_size": 0.0,
+  "position_entry_price": 111.61,
+  "orders": [
+    {
+      "order_id": 4208528347,
+      "client_order_id": "SOLU_WallFadeV3_718810_1789976067",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 111.61,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-21T07:34:27.570933+00:00",
+  "updated_at": "2026-09-21T07:52:05.279509+00:00",
+  "closed_at": "2026-09-21T07:51:39.064463+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-09-21T07:34:27.595930+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    },
+    {
+      "timestamp": "2026-09-21T07:34:28.354058+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-21T07:34:28.375059+00:00",
+      "event": "STATUS: ORDER_ACK",
+      "details": "Order ACK received"
+    },
+    {
+      "timestamp": "2026-09-21T07:34:37.609641+00:00",
+      "event": "HEALTH_RESTORED",
+      "details": "Connection restored, Guard active"
+    },
+    {
+      "timestamp": "2026-09-21T07:37:34.480164+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    },
+    {
+      "timestamp": "2026-09-21T07:38:14.446285+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.07 @ 111.61, Total Size: 0.07, PnL_TP1: 0.02"
+    },
+    {
+      "timestamp": "2026-09-21T07:38:14.446285+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 0.07 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T07:38:14.461387+00:00",
+      "event": "HEALTH_RESTORED",
+      "details": "Connection restored, Guard active"
+    },
+    {
+      "timestamp": "2026-09-21T07:39:29.053675+00:00",
+      "event": "TTL_KEEP_OPEN",
+      "details": "TTL expired, but live position detected (exchange=7.34). Passport kept OPEN."
+    },
+    {
+      "timestamp": "2026-09-21T07:39:29.054678+00:00",
+      "event": "GUARD_REGISTERED",
+      "details": "Guard registered. SL: 111.76, TP1: 111.36, TP2: 111.11"
+    },
+    {
+      "timestamp": "2026-09-21T07:41:14.709014+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    },
+    {
+      "timestamp": "2026-09-21T07:51:39.064463+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "SL_HIT"
+    },
+    {
+      "timestamp": "2026-09-21T07:51:39.065458+00:00",
+      "event": "SL_HIT",
+      "details": "Fully closed 7.34 at SL"
+    },
+    {
+      "timestamp": "2026-09-21T07:52:05.279509+00:00",
+      "event": "CLOSE_FILL: CS",
+      "details": "Closed 7.34 @ 0.0000 (SL_HIT)"
+    }
+  ],
+  "exit_reason": "SL_HIT",
+  "exit_price": 111.76,
+  "gross_pnl": -1.1,
+  "commission": 0.0,
+  "net_pnl": -1.1,
+  "tp1_activated": false,
+  "tp2_activated": false,
+  "sl_activated": true,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "BTC FLAT → нейтральный режим",
+    "btc_trend": "FLAT",
+    "btc_regime": "NORMAL",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.15,
+    "sl_multiplier": 0.6,
+    "sl_reason": "Сильная дельта -2262.6 → узкий SL (×0.6)",
+    "symbol_delta": -2262.584,
+    "sl_distance": 0.15,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "DEGRADED",
+  "guard_status": "inactive",
+  "tp1_projected_pnl": 0.02,
+  "tp2_projected_pnl": 0.04,
+  "sl_projected_pnl": -0.01,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 7.34,
+  "remaining_order_qty": 0.0,
+  "avg_price": 111.61,
+  "real_pnl": -1.1,
+  "realized_pnl": 0.0,
+  "tp1_pnl": 0.0,
+  "tp2_pnl": 0.0,
+  "sl_pnl": -1.1
+}

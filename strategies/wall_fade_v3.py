@@ -59,16 +59,21 @@ class WallFadeStrategyV3(AdaptiveStrategy):
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
         
-        # 🔥 Получаем адаптивные параметры
         params = await self.get_params()
         if not params:
             params = self._fallback_params
 
+        # 🔥 ЖЕСТКИЙ ЛОГ: Мы ДОЛЖНЫ это увидеть. Если не видим - код не доходит сюда.
+        time_diff = now - self._last_test_signal_time
+        print(f"🚨🚨🚨 [DEBUG STRATEGY] Проверка: force={params.get('force_test_signal')} | interval={params.get('test_signal_interval')} | last={self._last_test_signal_time} | now={now} | diff={time_diff:.1f} сек")
+
         # ========================================================================
         # 1. ТЕСТОВЫЙ РЕЖИМ
         # ========================================================================
-        if params.get('force_test_signal') and (now - self._last_test_signal_time >= params.get('test_signal_interval', 60)):
+        if params.get('force_test_signal') and (time_diff >= params.get('test_signal_interval', 60)):
+            print("✅✅✅ [DEBUG STRATEGY] УСЛОВИЯ ДЛЯ ТЕСТОВОГО СИГНАЛА ВЫПОЛНЕНЫ! ГЕНЕРИРУЮ!!! ✅✅✅")
             self._last_test_signal_time = now
+
             side = 'short'
             
             if side == 'short':

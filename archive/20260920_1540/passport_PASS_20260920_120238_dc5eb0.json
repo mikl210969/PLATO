@@ -1,0 +1,98 @@
+{
+  "passport_id": "PASS_20260920_120238_dc5eb0",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "WallFadeV3_SOLUSDT_1789905758",
+  "strategy": "WallFadeV3",
+  "side": "short",
+  "entry_price": 108.37,
+  "confidence": 0.95,
+  "sl_price": 108.52,
+  "tp1_price": 108.12,
+  "tp2_price": 107.87,
+  "position_size": 0.0,
+  "position_entry_price": 0.0,
+  "orders": [
+    {
+      "order_id": 4207962471,
+      "client_order_id": "SOLU_WallFadeV3_dc5eb0_1789905758",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 108.37,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-20T12:02:38.894151+00:00",
+  "updated_at": "2026-09-20T12:04:16.660323+00:00",
+  "closed_at": "2026-09-20T12:04:16.660323+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-09-20T12:02:39.629539+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-20T12:02:39.641628+00:00",
+      "event": "STATUS: ORDER_ACK",
+      "details": "Order ACK received"
+    },
+    {
+      "timestamp": "2026-09-20T12:03:35.449312+00:00",
+      "event": "STATUS: OPEN",
+      "details": "Order filled"
+    },
+    {
+      "timestamp": "2026-09-20T12:03:35.624452+00:00",
+      "event": "GUARD_REGISTERED",
+      "details": "Guard registered. SL: 108.52, TP1: 108.12, TP2: 107.87"
+    },
+    {
+      "timestamp": "2026-09-20T12:04:16.660323+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "SL_HIT"
+    },
+    {
+      "timestamp": "2026-09-20T12:04:16.660323+00:00",
+      "event": "SL_HIT",
+      "details": "Fully closed 10.5 at SL"
+    }
+  ],
+  "exit_reason": "SL_HIT",
+  "exit_price": 108.52,
+  "gross_pnl": -1139.46,
+  "commission": 0.0,
+  "net_pnl": -1139.46,
+  "tp1_activated": false,
+  "tp2_activated": false,
+  "sl_activated": true,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "BTC FLAT → нейтральный режим",
+    "btc_trend": "FLAT",
+    "btc_regime": "NORMAL",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.15,
+    "sl_multiplier": 0.6,
+    "sl_reason": "Сильная дельта -571.1 → узкий SL (×0.6)",
+    "symbol_delta": -571.067,
+    "sl_distance": 0.15,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "HEALTHY",
+  "guard_status": "inactive",
+  "tp1_projected_pnl": 0.0,
+  "tp2_projected_pnl": 0.0,
+  "sl_projected_pnl": 0.0,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 10.5,
+  "remaining_order_qty": 0.0,
+  "avg_price": 0.0,
+  "real_pnl": -1139.46,
+  "realized_pnl": 0.0
+}

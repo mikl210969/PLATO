@@ -1,0 +1,86 @@
+{
+  "passport_id": "PASS_20260921_041556_b27a88",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "WallFadeV3_SOLUSDT_1789964156",
+  "strategy": "WallFadeV3",
+  "side": "short",
+  "entry_price": 111.36,
+  "confidence": 0.5249999999999999,
+  "sl_price": 111.61,
+  "tp1_price": 111.11,
+  "tp2_price": 110.86,
+  "position_size": 0.0,
+  "position_entry_price": 0.0,
+  "orders": [
+    {
+      "order_id": 4208454195,
+      "client_order_id": "SOLU_WallFadeV3_b27a88_1789964156",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 111.36,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-21T04:15:56.708934+00:00",
+  "updated_at": "2026-09-21T04:19:05.962482+00:00",
+  "closed_at": "2026-09-21T04:20:58.315506+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-09-21T04:15:57.406792+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-21T04:19:05.962482+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    },
+    {
+      "timestamp": "2026-09-21T04:20:58.315506+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "Limit order canceled after TTL. Order ID: 4208454195"
+    }
+  ],
+  "exit_reason": "TTL_EXPIRED",
+  "exit_price": 0.0,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "net_pnl": 0.0,
+  "tp1_activated": false,
+  "tp2_activated": false,
+  "sl_activated": false,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 45.0,
+    "smart_multiplier": 1.5,
+    "smart_reason": "BTC DOWN + SHORT → подтверждение трендом (×1.5)",
+    "btc_trend": "DOWN",
+    "btc_regime": "NORMAL",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.25,
+    "sl_multiplier": 1.0,
+    "sl_reason": "Нейтральная дельта +1352.8 → базовый SL (×1.0)",
+    "symbol_delta": 1352.797,
+    "sl_distance": 0.25,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "DEGRADED",
+  "guard_status": "active_rest",
+  "tp1_projected_pnl": 0.0,
+  "tp2_projected_pnl": 0.0,
+  "sl_projected_pnl": 0.0,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 0.0,
+  "remaining_order_qty": 0.0,
+  "avg_price": 0.0,
+  "real_pnl": 0.0,
+  "realized_pnl": 0.0,
+  "tp1_pnl": 0.0,
+  "tp2_pnl": 0.0,
+  "sl_pnl": 0.0
+}

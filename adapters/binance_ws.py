@@ -178,8 +178,8 @@ class BinanceWsAdapter:
 
                 self._ws = await websockets.connect(
                     self.spot_base_url,
-                    ping_interval=20,   # ping каждые 20 сек
-                    ping_timeout=10,    # pong максимум 10 сек
+                    ping_interval=40,   # ping каждые 20 сек
+                    ping_timeout=40,    # pong максимум 10 сек
                     close_timeout=5,
                 )
 
@@ -290,7 +290,7 @@ class BinanceWsAdapter:
         while getattr(self, "_running", True):
             try:
                 async with websockets.connect(
-                    user_data_url, ping_interval=30, ping_timeout=60  # 🔥 FIX: testnet ленив, ждём дольше
+                    user_data_url, ping_interval=40, ping_timeout=40  # 🔥 FIX: testnet ленив, ждём дольше
                 ) as ws:
                     logger.info("✅ Futures User Data WS connected")
                     async for message in ws:
@@ -361,7 +361,7 @@ class BinanceWsAdapter:
         while getattr(self, "_running", True):
             try:
                 async with websockets.connect(
-                    spot_url, ping_interval=20, ping_timeout=20
+                    spot_url, ping_interval=40, ping_timeout=40
                 ) as ws:
                     logger.info(f"✅ Spot aggTrade WS connected for {symbol}")
                     async for message in ws:

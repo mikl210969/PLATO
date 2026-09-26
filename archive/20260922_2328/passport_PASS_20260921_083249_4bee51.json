@@ -1,0 +1,96 @@
+{
+  "passport_id": "PASS_20260921_083249_4bee51",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "BreakoutStrategyV1_TEST_1789979569",
+  "strategy": "BreakoutStrategyV1",
+  "side": "short",
+  "entry_price": 113.72,
+  "confidence": 0.99,
+  "sl_price": 113.97,
+  "tp1_price": 113.47,
+  "tp2_price": 113.22,
+  "position_size": 0.0,
+  "position_entry_price": 0.0,
+  "orders": [
+    {
+      "order_id": 4208564664,
+      "client_order_id": "SOLU_BreakoutSt_4bee51_1789979569",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 113.72,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-21T08:32:49.969446+00:00",
+  "updated_at": "2026-09-21T08:33:41.999035+00:00",
+  "closed_at": "2026-09-21T08:33:41.999035+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-09-21T08:32:50.720296+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-21T08:33:28.852925+00:00",
+      "event": "STATUS: OPEN",
+      "details": "Order filled"
+    },
+    {
+      "timestamp": "2026-09-21T08:33:28.873573+00:00",
+      "event": "GUARD_REGISTERED",
+      "details": "Guard registered. SL: 113.97, TP1: 113.47, TP2: 113.22"
+    },
+    {
+      "timestamp": "2026-09-21T08:33:41.999035+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "SL_HIT"
+    },
+    {
+      "timestamp": "2026-09-21T08:33:42.000031+00:00",
+      "event": "SL_HIT",
+      "details": "Fully closed 7.0 at SL"
+    }
+  ],
+  "exit_reason": "SL_HIT",
+  "exit_price": 114.04,
+  "gross_pnl": -2.24,
+  "commission": 0.0,
+  "net_pnl": -2.24,
+  "tp1_activated": false,
+  "tp2_activated": false,
+  "sl_activated": true,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 15.0,
+    "smart_multiplier": 0.5,
+    "smart_reason": "BTC UP vs SHORT → контртренд (×0.5)",
+    "btc_trend": "UP",
+    "btc_regime": "NORMAL",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.25,
+    "sl_multiplier": 1.0,
+    "sl_reason": "Нейтральная дельта +516.2 → базовый SL (×1.0)",
+    "symbol_delta": 516.228,
+    "sl_distance": 0.25,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "HEALTHY",
+  "guard_status": "inactive",
+  "tp1_projected_pnl": 0.0,
+  "tp2_projected_pnl": 0.0,
+  "sl_projected_pnl": 0.0,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 7.0,
+  "remaining_order_qty": 0.0,
+  "avg_price": 0.0,
+  "real_pnl": -2.24,
+  "realized_pnl": 0.0,
+  "tp1_pnl": 0.0,
+  "tp2_pnl": 0.0,
+  "sl_pnl": -2.24
+}

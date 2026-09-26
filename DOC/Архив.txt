@@ -1,0 +1,6 @@
+   архив
+   $stamp = Get-Date -Format "yyyyMMdd_HHmm"
+New-Item -ItemType Directory -Path "archive\$stamp" -Force
+Move-Item -Path "passports\*.json" -Destination "archive\$stamp\" -Force
+Move-Item -Path "logs\*.jsonl" -Destination "archive\$stamp\" -Force
+Get-ChildItem "passports", "logs" -Recurse | Select-Object FullName

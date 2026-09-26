@@ -1,0 +1,78 @@
+{
+  "passport_id": "PASS_20260920_123442_ab4695",
+  "symbol": "SOLUSDT",
+  "status": "ORDER_ACK",
+  "signal_id": "WallFadeV3_SOLUSDT_1789907682",
+  "strategy": "WallFadeV3",
+  "side": "short",
+  "entry_price": 108.27,
+  "confidence": 0.595,
+  "sl_price": 108.52,
+  "tp1_price": 108.02,
+  "tp2_price": 107.77,
+  "position_size": 0.0,
+  "position_entry_price": 0.0,
+  "orders": [
+    {
+      "order_id": 4207977609,
+      "client_order_id": "SOLU_WallFadeV3_ab4695_1789907682",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 108.27,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-20T12:34:42.045035+00:00",
+  "updated_at": "2026-09-20T12:35:04.818926+00:00",
+  "closed_at": null,
+  "timeline": [
+    {
+      "timestamp": "2026-09-20T12:35:04.796770+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-20T12:35:04.818926+00:00",
+      "event": "STATUS: ORDER_ACK",
+      "details": "Order ACK received"
+    }
+  ],
+  "exit_reason": "",
+  "exit_price": 0.0,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "net_pnl": 0.0,
+  "tp1_activated": false,
+  "tp2_activated": false,
+  "sl_activated": false,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "BTC FLAT → нейтральный режим",
+    "btc_trend": "FLAT",
+    "btc_regime": "FLAT",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.25,
+    "sl_multiplier": 1.0,
+    "sl_reason": "Нейтральная дельта +1153.7 → базовый SL (×1.0)",
+    "symbol_delta": 1153.742,
+    "sl_distance": 0.25,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "HEALTHY",
+  "guard_status": "inactive",
+  "tp1_projected_pnl": 0.0,
+  "tp2_projected_pnl": 0.0,
+  "sl_projected_pnl": 0.0,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 0.0,
+  "remaining_order_qty": 0.0,
+  "avg_price": 0.0,
+  "real_pnl": 0.0,
+  "realized_pnl": 0.0
+}

@@ -1,0 +1,168 @@
+{
+  "passport_id": "PASS_20260921_002926_e93f8e",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "BreakoutStrategyV1_TEST_1789950566",
+  "strategy": "BreakoutStrategyV1",
+  "side": "short",
+  "entry_price": 112.34,
+  "confidence": 0.99,
+  "sl_price": 112.59,
+  "tp1_price": 112.09,
+  "tp2_price": 111.84,
+  "position_size": 0.0,
+  "position_entry_price": 112.34,
+  "orders": [
+    {
+      "order_id": 4208370490,
+      "client_order_id": "SOLU_BreakoutSt_e93f8e_1789950566",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 112.34,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-21T00:29:26.737590+00:00",
+  "updated_at": "2026-09-21T00:31:10.583087+00:00",
+  "closed_at": "2026-09-21T00:31:10.583087+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-09-21T00:29:27.487707+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.731374+00:00",
+      "event": "STATUS: OPEN",
+      "details": "Order filled (Partial/Full: 0.08)"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.731374+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.08 @ 112.34, Total Size: 0.08, PnL_TP1: 0.02"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.731374+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 0.08 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.734371+00:00",
+      "event": "GUARD_REGISTERED",
+      "details": "Guard registered. SL: 112.59, TP1: 112.09, TP2: 111.84"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.736375+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.17 @ 112.34, Total Size: 0.17, PnL_TP1: 0.04"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.736375+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 0.17 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.739375+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.27 @ 112.34, Total Size: 0.27, PnL_TP1: 0.07"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.739375+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 0.27 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.741373+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.38 @ 112.34, Total Size: 0.38, PnL_TP1: 0.1"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.741373+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 0.38 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.744371+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.43 @ 112.34, Total Size: 0.43, PnL_TP1: 0.11"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.744371+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 0.43 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.747376+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.52 @ 112.34, Total Size: 0.52, PnL_TP1: 0.13"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.747376+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 0.52 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.755372+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.58 @ 112.34, Total Size: 0.58, PnL_TP1: 0.14"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:06.755372+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 0.58 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:08.167715+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 0.0700 @ 112.34, Total Size: 0.6500, PnL_TP1: 0.16"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:10.583087+00:00",
+      "event": "STATUS: CLOSED",
+      "details": "SL_HIT"
+    },
+    {
+      "timestamp": "2026-09-21T00:31:10.583087+00:00",
+      "event": "SL_HIT",
+      "details": "Fully closed 0.85 at SL"
+    }
+  ],
+  "exit_reason": "SL_HIT",
+  "exit_price": 112.59,
+  "gross_pnl": -0.21,
+  "commission": 0.0,
+  "net_pnl": -0.21,
+  "tp1_activated": false,
+  "tp2_activated": false,
+  "sl_activated": true,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 15.0,
+    "smart_multiplier": 0.5,
+    "smart_reason": "BTC UP vs SHORT → контртренд (×0.5)",
+    "btc_trend": "UP",
+    "btc_regime": "NORMAL",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.25,
+    "sl_multiplier": 1.0,
+    "sl_reason": "Нейтральная дельта +3498.7 → базовый SL (×1.0)",
+    "symbol_delta": 3498.714,
+    "sl_distance": 0.25,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "HEALTHY",
+  "guard_status": "inactive",
+  "tp1_projected_pnl": 0.16,
+  "tp2_projected_pnl": 0.33,
+  "sl_projected_pnl": -0.16,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 0.85,
+  "remaining_order_qty": 0.0,
+  "avg_price": 112.34,
+  "real_pnl": -0.21,
+  "realized_pnl": 0.0
+}

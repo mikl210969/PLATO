@@ -1,0 +1,141 @@
+{
+  "passport_id": "PASS_20260921_085705_1ac1f1",
+  "symbol": "SOLUSDT",
+  "status": "CLOSED",
+  "signal_id": "BreakoutStrategyV1_TEST_1789981025",
+  "strategy": "BreakoutStrategyV1",
+  "side": "short",
+  "entry_price": 115.46,
+  "confidence": 0.99,
+  "sl_price": 115.46,
+  "tp1_price": 115.21,
+  "tp2_price": 114.96,
+  "position_size": 0.0,
+  "position_entry_price": 115.46,
+  "orders": [
+    {
+      "order_id": 4208581068,
+      "client_order_id": "SOLU_BreakoutSt_1ac1f1_1789981025",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 115.46,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-21T08:57:05.123726+00:00",
+  "updated_at": "2026-09-21T09:03:53.224878+00:00",
+  "closed_at": "2026-09-21T09:20:13.130952+00:00",
+  "timeline": [
+    {
+      "timestamp": "2026-09-21T08:57:05.914728+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-21T08:57:05.932727+00:00",
+      "event": "STATUS: ORDER_ACK",
+      "details": "Order ACK received"
+    },
+    {
+      "timestamp": "2026-09-21T08:57:05.934728+00:00",
+      "event": "PARTIAL_FILL",
+      "details": "Filled 1.44 @ 115.46, Total Size: 1.44, PnL_TP1: 0.36"
+    },
+    {
+      "timestamp": "2026-09-21T08:57:05.934728+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 1.44 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T08:57:05.937728+00:00",
+      "event": "FULLY_FILLED",
+      "details": "Filled 7.0 @ 115.46, Total Size: 7.0, PnL_TP1: 1.75"
+    },
+    {
+      "timestamp": "2026-09-21T08:57:05.937728+00:00",
+      "event": "GUARD_ACTIVATED",
+      "details": "Guard active on 7.0 SOL"
+    },
+    {
+      "timestamp": "2026-09-21T08:57:11.247755+00:00",
+      "event": "STATUS: OPEN",
+      "details": "Order filled"
+    },
+    {
+      "timestamp": "2026-09-21T08:57:11.287912+00:00",
+      "event": "GUARD_REGISTERED",
+      "details": "Guard registered. SL: 115.61, TP1: 115.21, TP2: 114.96"
+    },
+    {
+      "timestamp": "2026-09-21T09:00:12.158777+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    },
+    {
+      "timestamp": "2026-09-21T09:00:18.322658+00:00",
+      "event": "TP1_HIT",
+      "details": "Closed 3.5, SL moved to breakeven: 115.46"
+    },
+    {
+      "timestamp": "2026-09-21T09:00:18.337135+00:00",
+      "event": "CLOSE_FILL: C1",
+      "details": "Closed 3.5 @ 0.0000 (TP1_HIT)"
+    },
+    {
+      "timestamp": "2026-09-21T09:00:22.168718+00:00",
+      "event": "HEALTH_RESTORED",
+      "details": "Connection restored, Guard active"
+    },
+    {
+      "timestamp": "2026-09-21T09:03:53.224878+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    },
+    {
+      "timestamp": "2026-09-21T09:20:13.131949+00:00",
+      "event": "TP2_HIT",
+      "details": "Fully closed 3.5"
+    }
+  ],
+  "exit_reason": "TP2_HIT",
+  "exit_price": 114.96,
+  "gross_pnl": 2.63,
+  "commission": 0.0,
+  "net_pnl": 2.63,
+  "tp1_activated": true,
+  "tp2_activated": true,
+  "sl_activated": false,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 15.0,
+    "smart_multiplier": 0.5,
+    "smart_reason": "BTC UP vs SHORT → контртренд (×0.5)",
+    "btc_trend": "UP",
+    "btc_regime": "NORMAL",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.15,
+    "sl_multiplier": 0.6,
+    "sl_reason": "Сильная дельта -751.4 → узкий SL (×0.6)",
+    "symbol_delta": -751.394,
+    "sl_distance": 0.15,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "DEGRADED",
+  "guard_status": "active_rest",
+  "tp1_projected_pnl": 1.75,
+  "tp2_projected_pnl": 3.5,
+  "sl_projected_pnl": -1.05,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 3.5,
+  "remaining_order_qty": 0.0,
+  "avg_price": 115.46,
+  "real_pnl": 0.0,
+  "realized_pnl": 0.88,
+  "tp1_pnl": 0.88,
+  "tp2_pnl": 1.75,
+  "sl_pnl": 0.0
+}

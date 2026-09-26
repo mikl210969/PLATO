@@ -1,0 +1,103 @@
+{
+  "passport_id": "PASS_20260920_172716_add6c7",
+  "symbol": "SOLUSDT",
+  "status": "OPEN",
+  "signal_id": "BreakoutStrategyV1_TEST_1789925236",
+  "strategy": "BreakoutStrategyV1",
+  "side": "short",
+  "entry_price": 109.79,
+  "confidence": 0.99,
+  "sl_price": 110.04,
+  "tp1_price": 109.54,
+  "tp2_price": 109.29,
+  "position_size": 0.02,
+  "position_entry_price": 0.0,
+  "orders": [
+    {
+      "order_id": 4208142438,
+      "client_order_id": "SOLU_BreakoutSt_add6c7_1789925236",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "short",
+      "price": 109.79,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-09-20T17:27:16.050515+00:00",
+  "updated_at": "2026-09-20T17:35:26.295942+00:00",
+  "closed_at": null,
+  "timeline": [
+    {
+      "timestamp": "2026-09-20T17:27:16.768526+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-09-20T17:27:16.775530+00:00",
+      "event": "STATUS: ORDER_ACK",
+      "details": "Order ACK received"
+    },
+    {
+      "timestamp": "2026-09-20T17:30:19.712665+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    },
+    {
+      "timestamp": "2026-09-20T17:32:17.460993+00:00",
+      "event": "TTL_KEEP_OPEN",
+      "details": "TTL expired, but live position detected (exchange=0.02). Passport kept OPEN."
+    },
+    {
+      "timestamp": "2026-09-20T17:32:17.462994+00:00",
+      "event": "GUARD_REGISTERED",
+      "details": "Guard registered. SL: 110.04, TP1: 109.54, TP2: 109.29"
+    },
+    {
+      "timestamp": "2026-09-20T17:32:19.698113+00:00",
+      "event": "HEALTH_RESTORED",
+      "details": "Connection restored, Guard active"
+    },
+    {
+      "timestamp": "2026-09-20T17:35:26.295942+00:00",
+      "event": "HEALTH_DEGRADED",
+      "details": "WS lost, Guard switched to REST price feed"
+    }
+  ],
+  "exit_reason": "",
+  "exit_price": 0.0,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "net_pnl": 0.0,
+  "tp1_activated": false,
+  "tp2_activated": false,
+  "sl_activated": false,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "BTC FLAT → нейтральный режим",
+    "btc_trend": "FLAT",
+    "btc_regime": "FLAT",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.25,
+    "sl_multiplier": 1.0,
+    "sl_reason": "Нейтральная дельта -45.7 → базовый SL (×1.0)",
+    "symbol_delta": -45.69,
+    "sl_distance": 0.25,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "DEGRADED",
+  "guard_status": "active_rest",
+  "tp1_projected_pnl": 0.0,
+  "tp2_projected_pnl": 0.0,
+  "sl_projected_pnl": 0.0,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 0.02,
+  "remaining_order_qty": 0.0,
+  "avg_price": 0.0,
+  "real_pnl": 0.0,
+  "realized_pnl": 0.0
+}
