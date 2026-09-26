@@ -14,8 +14,10 @@ class WallsFeature(Feature):
         
         walls_cfg = config.get("walls", {})
         self._depth_levels = int(config.get("orderbook_depth", 50))
-        self._min_size_mult = float(walls_cfg.get("min_size_avg_mult", 5.0))
-        self._min_age_sec = float(walls_cfg.get("min_age_sec", 10.0))
+        
+        # 🔥 ПРОДАКШЕН НАСТРОЙКИ (берутся из config/walls.json)
+        self._min_size_mult = float(walls_cfg.get("min_size_avg_mult", 1.5))
+        self._min_age_sec = float(walls_cfg.get("min_age_sec", 2.0))  # Защита от мгновенного спуфинга
         self._relocate_radius_ticks = int(walls_cfg.get("relocate_radius_ticks", 3))
         self._tick_size = 0.01  # Для SOLUSDT
         
@@ -38,6 +40,7 @@ class WallsFeature(Feature):
             return
             
         # 2. Считаем медиану размера уровня (для динамического порога)
+        # 🔥 ФИЛЬТР: Игнорируем нулевые размеры (Binance size=0 = уровень удален)
         bid_sizes = sorted([q for p, q in top_bids if q > 0])
         ask_sizes = sorted([q for p, q in top_asks if q > 0])
         
@@ -60,12 +63,17 @@ class WallsFeature(Feature):
         # 3. Ищем кандидатов в стены
         current_wall_prices = set()
         
+        # 🔥 ФИЛЬТР: Пропускаем уровни с нулевым размером (удаленные ордера)
         for price, qty in top_bids:
+            if qty == 0:
+                continue
             if qty >= threshold:
                 current_wall_prices.add(price)
                 self._update_or_create_wall(price, "bid", qty, ts)
                 
         for price, qty in top_asks:
+            if qty == 0:
+                continue
             if qty >= threshold:
                 current_wall_prices.add(price)
                 self._update_or_create_wall(price, "ask", qty, ts)
@@ -104,8 +112,8 @@ class WallsFeature(Feature):
                 "last_seen": ts,
                 "eaten_pct": 0.0,
                 "status": "alive",
-                "update_count": 1,  #  Новое поле
-                "size_history": deque([size], maxlen=50)  #  Ring buffer на 50 записей
+                "update_count": 1,  # 🔥 Новое поле
+                "size_history": deque([size], maxlen=50)  # 🔥 Ring buffer на 50 записей
             }
 
     def _handle_disappeared_wall(self, price: float, bids: List[tuple], asks: List[tuple], ts: float) -> None:
@@ -144,6 +152,7 @@ class WallsFeature(Feature):
         sizes = list(size_history)
         mean_size = sum(sizes) / len(sizes)
         
+        # 🔥 ЗАЩИТА ОТ ДЕЛЕНИЯ НА НОЛЬ
         if mean_size == 0:
             return 0.0
         
@@ -177,7 +186,7 @@ class WallsFeature(Feature):
                     "status": wall["status"],
                     "update_count": wall["update_count"],  # 🔥 Новое поле
                     "cv": cv,  # 🔥 Новое поле
-                    "is_stable": is_stable,  #  Новое поле
+                    "is_stable": is_stable,  # 🔥 Новое поле
                     "is_mature": is_mature  # 🔥 Новое поле
                 }
                 if wall["side"] == "bid":
@@ -190,8 +199,45 @@ class WallsFeature(Feature):
         self._state["ts"] = ts
 
     def snapshot(self) -> Dict[str, Any]:
-        return {
-            "walls_bid": self._state["walls_bid"],
-            "walls_ask": self._state["walls_ask"],
-            "ts": self._state["ts"]
+        walls_bid = []
+        walls_ask = []
+        now = time.time()
+        
+        max_wall_cv = self.config.get("walls", {}).get("max_wall_cv", 0.15) if isinstance(self.config.get("walls"), dict) else 0.15
+
+        for price, wall in self._active_walls.items():
+            age = now - wall["first_seen"]
+            
+            # 1. Проверка возраста
+            if age < self._min_age_sec:
+                continue
+                
+            # 2. Проверка стабильности размера (CV)
+            cv = self._calculate_cv(wall["size_history"])
+            if cv > max_wall_cv:
+                continue
+                
+            # Если прошли все проверки, добавляем в снапшот
+            wall_data = {
+                "price": wall["price"],
+                "size": wall["size"],
+                "age": round(age, 1),
+                "cv": round(cv, 2),
+                "side": wall["side"]
+            }
+            
+            if wall["side"] == "bid":
+                walls_bid.append(wall_data)
+            else:
+                walls_ask.append(wall_data)
+
+        # Сортируем: самые крупные стены сверху
+        walls_bid.sort(key=lambda x: x["size"], reverse=True)
+        walls_ask.sort(key=lambda x: x["size"], reverse=True)
+
+        self._state = {
+            "walls_bid": walls_bid[:5],  # Топ-5 стен
+            "walls_ask": walls_ask[:5],
+            "ts": now
         }
+        return self._state

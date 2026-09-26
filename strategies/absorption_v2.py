@@ -3,14 +3,16 @@ import time
 import logging
 from typing import Optional, Dict, Any
 
-# Импортируем EnrichedSignal из wall_fade_v3, чтобы не дублировать код
-from strategies.wall_fade_v3 import EnrichedSignal 
+from strategies.wall_fade_v3 import EnrichedSignal
+from strategies.adaptive_strategy import AdaptiveStrategy  # 🔥 V13 ADAPTIVE: Импорт базового класса
 
 logger = logging.getLogger(__name__)
 
 
-class AbsorptionStrategyV2:
-    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5):
+class AbsorptionStrategyV2(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследование
+    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5, context_manager=None):  # 🔥 V13 ADAPTIVE: Добавлен context_manager
+        super().__init__(context_manager)  # 🔥 V13 ADAPTIVE: Инициализация базового класса
+        
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
@@ -24,15 +26,18 @@ class AbsorptionStrategyV2:
         self.fixed_tp1_distance = config.get('fixed_tp1_distance', 0.25)
         self.fixed_tp2_distance = config.get('fixed_tp2_distance', 0.50)
         
-        # 🔥 Флаги обхода (для отладки)
-        self.bypass_filters = config.get('bypass_filters', False)
-        self.bypass_btc_filter = config.get('bypass_btc_filter', self.bypass_filters)
-        self.bypass_confidence_threshold = config.get('bypass_confidence_threshold', self.bypass_filters)
-        self.bypass_hvn_filter = config.get('bypass_hvn_filter', self.bypass_filters)
+        # 🔥 V13 ADAPTIVE: Fallback параметры (используются, если context_manager еще не готов)
+        self._fallback_params = {
+            "min_confidence": config.get("min_confidence", 0.5),
+            "bypass_filters": config.get("bypass_filters", False),
+            "bypass_btc_filter": config.get("bypass_btc_filter", False),
+            "bypass_confidence_threshold": config.get("bypass_confidence_threshold", False),
+            "bypass_hvn_filter": config.get("bypass_hvn_filter", False),
+        }
 
         # 🔥 ТУМБЛЕР BTC-КОНТЕКСТА (Жесткое требование)
         btc_cfg = config.get('btc_context', {})
-        self.btc_enabled = btc_cfg.get('enabled', False)  # 🔥 По умолчанию ВЫКЛ
+        self.btc_enabled = btc_cfg.get('enabled', False)
         self.btc_penalty = btc_cfg.get('penalty_multiplier', 0.5)
 
         print(f"🔥 [DEBUG INIT] AbsorptionV2: force_test_signal={self.force_test_signal}, btc_enabled={self.btc_enabled}")
@@ -42,17 +47,17 @@ class AbsorptionStrategyV2:
         """Заглушка для совместимости. Новая стратегия читает состояние из context['features']."""
         pass
 
-    def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
+    async def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:  # 🔥 V13 ADAPTIVE: Добавлен async
         now = time.time()
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
         
         # ========================================================================
-        # 1. ТЕСТОВЫЙ РЕЖИМ (Мгновенная проверка механики отправки ордеров)
+        # 1. ТЕСТОВЫЙ РЕЖИМ
         # ========================================================================
         if self.force_test_signal and (now - self._last_test_signal_time >= self.test_signal_interval):
             self._last_test_signal_time = now
-            side = 'short' # Для теста механики
+            side = 'short'
             
             if side == 'short':
                 sl_price = round(current_price + self.fixed_sl_distance, 2)
@@ -76,16 +81,20 @@ class AbsorptionStrategyV2:
             )
 
         # ========================================================================
-        # 2. ПРОВЕРКА СВЕЖЕСТИ ДАННЫХ (Защита от "слепой" торговли)
+        # 2. ПРОВЕРКА СВЕЖЕСТИ ДАННЫХ
         # ========================================================================
         features = context.get('features')
         if not features or not features.is_fresh(now):
-            return None # Данные протухли, стратегия молчит
+            return None
+
+        # 🔥 V13 ADAPTIVE: Получаем адаптивные параметры из VolumeContextManager
+        params = await self.get_params()
+        if not params:
+            params = self._fallback_params
 
         snap = features.snapshot(now)
-        atr = self.atr_value if self.atr_value > 0 else 0.15 # Fallback на случай, если ATR еще не пришел
+        atr = self.atr_value if self.atr_value > 0 else 0.15
         
-        # Извлекаем метрики
         delta_v3 = snap['delta']['windows'][3]['velocity']
         imbalance = snap['imbalance']['imbalance']
         walls_bid = snap['walls'].get('walls_bid', [])
@@ -94,38 +103,33 @@ class AbsorptionStrategyV2:
         hvn_below = snap['volume_profile'].get('nearest_hvn_below')
 
         # ========================================================================
-        # 3. ПОИСК УСЛОВИЙ ПОГЛОЩЕНИЯ (Сканирование состояния)
+        # 3. ПОИСК УСЛОВИЙ ПОГЛОЩЕНИЯ
         # ========================================================================
         best_signal = None
         best_confidence = 0.0
 
-        # --- ПРОВЕРКА НА LONG (Бид-стена + Агрессия продавцов) ---
+        # --- ПРОВЕРКА НА LONG ---
         for wall in walls_bid:
-            if wall.get('confidence', 0) < 0.5:
-                continue # Стена недостаточно зрелая
-            
-            # Агрессия: продавцы бьют в бид (отрицательная velocity)
-            if delta_v3 > -20.0: # Требуется заметное давление продавцов
+            if wall.get('confidence', 0) < params.get('min_confidence', 0.5):  # 🔥 V13 ADAPTIVE
                 continue
             
-            # Имбаланс: бид-сторона должна быть тяжелее
+            if delta_v3 > -20.0:
+                continue
+            
             if imbalance < 0.1:
                 continue
 
-            # Условия совпали, считаем уверенность
-            conf = 0.6 # Базовая уверенность за факт поглощения о стену
-            sl_anchor = wall['price'] # Дефолтный якорь для SL
+            conf = 0.6
+            sl_anchor = wall['price']
 
-            # 🔥 HVN CONFLUENCE (Совпадение со стеной)
-            if not self.bypass_hvn_filter and hvn_below:
+            if not params.get('bypass_hvn_filter', False) and hvn_below:  # 🔥 V13 ADAPTIVE
                 dist_to_hvn = abs(wall['price'] - hvn_below['price'])
                 if dist_to_hvn <= (atr * 1.5):
-                    conf += 0.2 # Бонус за совпадение
-                    sl_anchor = hvn_below['price_low'] # Якорим SL ЗА границей HVN
+                    conf += 0.2
+                    sl_anchor = hvn_below['price_low']
                     logger.debug(f"🎯 [Absorption] HVN Confluence LONG: Wall {wall['price']:.2f} near HVN {hvn_below['price']:.2f}")
 
-            # 🔥 BTC FILTER (С уважением к тумблеру)
-            if self.btc_enabled and not self.bypass_btc_filter:
+            if self.btc_enabled and not params.get('bypass_btc_filter', False):  # 🔥 V13 ADAPTIVE
                 btc_trend = context.get('btc_delta_context', {}).get('trend', 'FLAT')
                 if btc_trend == 'DOWN':
                     conf *= self.btc_penalty
@@ -135,32 +139,28 @@ class AbsorptionStrategyV2:
                 best_confidence = conf
                 best_signal = {'side': 'long', 'sl_anchor': sl_anchor, 'edge_price': wall['price']}
 
-        # --- ПРОВЕРКА НА SHORT (Аск-стена + Агрессия покупателей) ---
+        # --- ПРОВЕРКА НА SHORT ---
         for wall in walls_ask:
-            if wall.get('confidence', 0) < 0.5:
+            if wall.get('confidence', 0) < params.get('min_confidence', 0.5):  # 🔥 V13 ADAPTIVE
                 continue
             
-            # Агрессия: покупатели бьют в аск (положительная velocity)
-            if delta_v3 < 20.0: # Требуется заметное давление покупателей
+            if delta_v3 < 20.0:
                 continue
             
-            # Имбаланс: аск-сторона должна быть тяжелее (отрицательный imbalance)
             if imbalance > -0.1:
                 continue
 
             conf = 0.6
             sl_anchor = wall['price']
 
-            # 🔥 HVN CONFLUENCE
-            if not self.bypass_hvn_filter and hvn_above:
+            if not params.get('bypass_hvn_filter', False) and hvn_above:  # 🔥 V13 ADAPTIVE
                 dist_to_hvn = abs(wall['price'] - hvn_above['price'])
                 if dist_to_hvn <= (atr * 1.5):
                     conf += 0.2
-                    sl_anchor = hvn_above['price_high'] # Якорим SL ЗА границей HVN
+                    sl_anchor = hvn_above['price_high']
                     logger.debug(f"🎯 [Absorption] HVN Confluence SHORT: Wall {wall['price']:.2f} near HVN {hvn_above['price']:.2f}")
 
-            # 🔥 BTC FILTER
-            if self.btc_enabled and not self.bypass_btc_filter:
+            if self.btc_enabled and not params.get('bypass_btc_filter', False):  # 🔥 V13 ADAPTIVE
                 btc_trend = context.get('btc_delta_context', {}).get('trend', 'FLAT')
                 if btc_trend == 'UP':
                     conf *= self.btc_penalty
@@ -174,9 +174,9 @@ class AbsorptionStrategyV2:
         # 4. ФИНАЛЬНАЯ ВАЛИДАЦИЯ И РАСЧЕТ УРОВНЕЙ
         # ========================================================================
         if not best_signal:
-            return None # Подходящих условий не найдено
+            return None
 
-        if not self.bypass_confidence_threshold and best_confidence < 0.5:
+        if not params.get('bypass_confidence_threshold', False) and best_confidence < 0.5:  # 🔥 V13 ADAPTIVE
             logger.info(f"🚫 [Absorption] Сигнал отклонен: итоговый confidence {best_confidence:.2f} < 0.5")
             return None
 
@@ -184,7 +184,6 @@ class AbsorptionStrategyV2:
         entry_price = round(current_price, 2)
         sl_anchor = best_signal['sl_anchor']
         
-        # Расчет SL: якорь +/- буфер ATR
         if side == 'long':
             sl_price = round(sl_anchor - (atr * 0.2), 2)
         else:
@@ -192,7 +191,7 @@ class AbsorptionStrategyV2:
             
         r_value = abs(entry_price - sl_price)
         if r_value == 0:
-            r_value = atr # Защита от деления на ноль
+            r_value = atr
             
         tp1_price = round(entry_price + (2.0 * r_value) if side == 'long' else entry_price - (2.0 * r_value), 2)
         tp2_price = round(entry_price + (4.0 * r_value) if side == 'long' else entry_price - (4.0 * r_value), 2)

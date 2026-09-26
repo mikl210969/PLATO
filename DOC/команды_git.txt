@@ -36,8 +36,8 @@ Start-Sleep -Seconds 2
 
 # Запускаем платформу с записью в файл (режим -Append добавляет новые строки, не стирая старые)
 python main.py | Tee-Object -FilePath platform_run.log -Append
-
-
+python main.py | Tee-Object -FilePath platform_run_NEW.log -Append
+platform_run_NEW.log
 
 # Убиваем старые процессы
 Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force

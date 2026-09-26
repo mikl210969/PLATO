@@ -4,6 +4,8 @@ import logging
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
+from strategies.adaptive_strategy import AdaptiveStrategy  # 🔥 V13 ADAPTIVE: Импорт базового класса
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,8 +27,10 @@ class EnrichedSignal:
     execution_params: Dict[str, Any]
 
 
-class WallFadeStrategyV3:
-    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5):
+class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследование
+    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5, context_manager=None):  # 🔥 V13 ADAPTIVE: Добавлен context_manager
+        super().__init__(context_manager)  # 🔥 V13 ADAPTIVE: Инициализация базового класса
+        
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
@@ -40,19 +44,27 @@ class WallFadeStrategyV3:
         self.fixed_tp1_distance = config.get('fixed_tp1_distance', 0.25)
         self.fixed_tp2_distance = config.get('fixed_tp2_distance', 0.50)
         
-        # 🔥 Фильтры
-        self.bypass_filters = config.get('bypass_filters', False)
-        self.min_confidence = config.get('min_confidence', 0.6)
-        self.price_distance_pct = config.get('price_distance_pct', 0.5) / 100.0  # 0.5%
+        # 🔥 V13 ADAPTIVE: Fallback параметры (используются, если context_manager еще не готов)
+        self._fallback_params = {
+            "bypass_filters": config.get('bypass_filters', False),
+            "min_confidence": config.get('min_confidence', 0.6),
+            "price_distance_pct": config.get('price_distance_pct', 0.5) / 100.0,  # 0.5%
+            "force_test_signal": self.force_test_signal,
+            "test_signal_interval": self.test_signal_interval,
+            "fixed_lot_size": self.fixed_lot_size,
+            "fixed_sl_distance": self.fixed_sl_distance,
+            "fixed_tp1_distance": self.fixed_tp1_distance,
+            "fixed_tp2_distance": self.fixed_tp2_distance,
+        }
         
-        print(f"🔥 [DEBUG INIT] WallFadeV3: force_test_signal={self.force_test_signal}, min_conf={self.min_confidence}")
+        print(f" [DEBUG INIT] WallFadeV3: force_test_signal={self._fallback_params['force_test_signal']}, min_conf={self._fallback_params['min_confidence']}")
         self._last_test_signal_time = 0.0
 
     def subscribe_to_events(self, event_bus):
         """Заглушка для совместимости. Новая стратегия читает состояние из context['features']."""
         pass
 
-    def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
+    async def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:  # 🔥 V13 ADAPTIVE: Добавлен async
         now = time.time()
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
@@ -62,7 +74,7 @@ class WallFadeStrategyV3:
         # ========================================================================
         if self.force_test_signal and (now - self._last_test_signal_time >= self.test_signal_interval):
             self._last_test_signal_time = now
-            side = 'short' # Для теста механики
+            side = 'short'
             
             if side == 'short':
                 sl_price = round(current_price + self.fixed_sl_distance, 2)
@@ -92,6 +104,11 @@ class WallFadeStrategyV3:
         if not features or not features.is_fresh(now):
             return None
 
+        # 🔥 V13 ADAPTIVE: Получаем адаптивные параметры из VolumeContextManager
+        params = await self.get_params()
+        if not params:
+            params = self._fallback_params
+
         snap = features.snapshot(now)
         atr = self.atr_value if self.atr_value > 0 else 0.15
         
@@ -99,33 +116,36 @@ class WallFadeStrategyV3:
         walls_ask = snap['walls'].get('walls_ask', [])
         imbalance = snap['imbalance']['imbalance']
         
-        # Проверка режима рынка (если доступен в контексте от мониторов)
-        # Если режим IMPULSIVE, фейдить стены ОПАСНО (их сметут)
+        #  V13 ADAPTIVE: Проверка режима рынка с использованием адаптивных параметров
         market_regime = context.get('market_regime', 'NORMAL')
-        if not self.bypass_filters and market_regime == 'IMPULSIVE':
-            return None # Пропускаем фейды в сильном импульсе
+        if not params.get('bypass_filters', False) and market_regime == 'IMPULSIVE':
+            return None  # Пропускаем фейды в сильном импульсе (их сметут)
 
         # ========================================================================
-        # 3. ПОИСК УСЛОВИЙ ДЛЯ ФЕЙДА (Сканирование состояния)
+        # 3. ПОИСК УСЛОВИЙ ДЛЯ ФЕЙДА
         # ========================================================================
         best_signal = None
         best_confidence = 0.0
+        
+        #  V13 ADAPTIVE: Читаем пороги из адаптивных параметров
+        min_conf = params.get('min_confidence', 0.6)
+        price_dist = params.get('price_distance_pct', 0.005)
 
         # --- ПРОВЕРКА НА LONG (Фейд от Бид-стены) ---
         for wall in walls_bid:
-            if wall.get('confidence', 0) < self.min_confidence:
+            if wall.get('confidence', 0) < min_conf:  # 🔥 V13 ADAPTIVE
                 continue
             
             # Стена должна быть близко к текущей цене (не дальше price_distance_pct)
             dist_pct = (current_price - wall['price']) / current_price
-            if dist_pct < 0 or dist_pct > self.price_distance_pct:
+            if dist_pct < 0 or dist_pct > price_dist:  # 🔥 V13 ADAPTIVE
                 continue
                 
             # Стакан должен подтверждать: бид-сторона тяжелее
             if imbalance < 0.1:
                 continue
 
-            conf = wall['confidence'] # Базовая уверенность = зрелость стены
+            conf = wall['confidence']
             if conf > best_confidence:
                 best_confidence = conf
                 best_signal = {
@@ -136,12 +156,12 @@ class WallFadeStrategyV3:
 
         # --- ПРОВЕРКА НА SHORT (Фейд от Аск-стены) ---
         for wall in walls_ask:
-            if wall.get('confidence', 0) < self.min_confidence:
+            if wall.get('confidence', 0) < min_conf:  # 🔥 V13 ADAPTIVE
                 continue
             
             # Стена должна быть близко к текущей цене
             dist_pct = (wall['price'] - current_price) / current_price
-            if dist_pct < 0 or dist_pct > self.price_distance_pct:
+            if dist_pct < 0 or dist_pct > price_dist:  # 🔥 V13 ADAPTIVE
                 continue
                 
             # Стакан должен подтверждать: аск-сторона тяжелее

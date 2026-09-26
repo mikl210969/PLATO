@@ -5,12 +5,15 @@ from collections import deque
 from typing import Optional, Dict, Any
 
 from strategies.wall_fade_v3 import EnrichedSignal
+from strategies.adaptive_strategy import AdaptiveStrategy  # 🔥 V13 ADAPTIVE: Импорт базового класса
 
 logger = logging.getLogger(__name__)
 
 
-class BreakoutStrategyV1:
-    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5):
+class BreakoutStrategyV1(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследование
+    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5, context_manager=None):  # 🔥 V13 ADAPTIVE: Добавлен context_manager
+        super().__init__(context_manager)  # 🔥 V13 ADAPTIVE: Инициализация базового класса
+        
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
@@ -21,21 +24,21 @@ class BreakoutStrategyV1:
         self.test_signal_interval = config.get('test_signal_interval', 60)
         self.fixed_lot_size = config.get('fixed_lot_size', 7.0)
         
-        # 🔥 Параметры пробоя
-        self.min_eaten_pct = config.get('min_eaten_pct', 0.70)  # Ждем 70% съедения
-        self.min_wall_age_sec = config.get('min_wall_age_sec', 30)  # Минимальный возраст стены
-        self.max_wall_exposure_pct = config.get('max_wall_exposure_pct', 0.15)  # Макс 15% от остатка стены
-        self.min_wall_updates = config.get('min_wall_updates', 30)  # Минимум обновлений для зрелости
-        self.max_wall_cv = config.get('max_wall_cv', 0.15)  # Максимальный CV для стабильности
+        # 🔥 Параметры пробоя (остаются как fallback, если context_manager не вернет данные)
+        self.min_eaten_pct = config.get('min_eaten_pct', 0.70)
+        self.min_wall_age_sec = config.get('min_wall_age_sec', 30)
+        self.max_wall_exposure_pct = config.get('max_wall_exposure_pct', 0.15)
+        self.min_wall_updates = config.get('min_wall_updates', 30)
+        self.max_wall_cv = config.get('max_wall_cv', 0.15)
         
         # 🔥 Фильтры
         self.bypass_filters = config.get('bypass_filters', False)
         self.min_confidence = config.get('min_confidence', 0.6)
-        self.delta_spike_ratio = config.get('delta_spike_ratio', 3.0)  # Порог всплеска дельты
+        self.delta_spike_ratio = config.get('delta_spike_ratio', 3.0)
         
         # 🔥 Ring buffers для анализа
-        self._delta_history = deque(maxlen=10)  # История дельты за последние 10 секунд
-        self._price_history = deque(maxlen=10)  # История цен для расчета скорости
+        self._delta_history = deque(maxlen=10)
+        self._price_history = deque(maxlen=10)
         
         print(f"🔥 [DEBUG INIT] BreakoutV1: force_test_signal={self.force_test_signal}, min_eaten={self.min_eaten_pct}")
         self._last_test_signal_time = 0.0
@@ -43,11 +46,14 @@ class BreakoutStrategyV1:
     def subscribe_to_events(self, event_bus):
         pass
 
-    def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
+    async def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:  # 🔥 V13 ADAPTIVE: Добавлен async
         now = time.time()
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
         
+        # 🔥 V13 ADAPTIVE: Получаем динамические параметры из VolumeContextManager
+        params = await self.get_params()
+
         # ========================================================================
         # 1. ТЕСТОВЫЙ РЕЖИМ
         # ========================================================================
@@ -77,8 +83,9 @@ class BreakoutStrategyV1:
         atr = self.atr_value if self.atr_value > 0 else 0.15
         market_regime = context.get('market_regime', 'NORMAL')
         
-        # Во флэте не торгуем пробои
-        if not self.bypass_filters and market_regime == 'FLAT':
+        # Во флэте не торгуем пробои (используем params, если есть, иначе self)
+        bypass = params.get('bypass_filters', self.bypass_filters)
+        if not bypass and market_regime == 'FLAT':
             return None
 
         # Обновляем ring buffers
@@ -100,10 +107,18 @@ class BreakoutStrategyV1:
         if len(self._delta_history) >= 3:
             delta_median = sorted(self._delta_history)[len(self._delta_history) // 2]
             if abs(delta_median) < 1.0:
-                delta_median = 1.0  # Защита от деления на ноль
+                delta_median = 1.0
             delta_spike = abs(delta_v3) / abs(delta_median)
         else:
             delta_spike = 0.0
+
+        # 🔥 V13 ADAPTIVE: Читаем пороги из адаптивных параметров с fallback на self
+        min_conf = params.get('min_confidence', self.min_confidence)
+        min_updates = params.get('min_wall_updates', self.min_wall_updates)
+        max_cv = params.get('max_wall_cv', self.max_wall_cv)
+        min_eaten = params.get('min_eaten_pct', self.min_eaten_pct)
+        spike_ratio = params.get('delta_spike_ratio', self.delta_spike_ratio)
+        max_exposure = params.get('max_wall_exposure_pct', self.max_wall_exposure_pct)
 
         # ========================================================================
         # 4. ПОИСК ПРОБОЯ
@@ -111,80 +126,67 @@ class BreakoutStrategyV1:
         
         # --- LONG: Пробой ASK-стены вверх ---
         for wall in walls_ask:
-            if wall.get('confidence', 0) < self.min_confidence:
+            if wall.get('confidence', 0) < min_conf:  # 🔥 ИСПОЛЬЗУЕМ min_conf
                 continue
             
-            # Фильтр зрелости и стабильности
-            if wall.get('update_count', 0) < self.min_wall_updates:
+            if wall.get('update_count', 0) < min_updates:  # 🔥 ИСПОЛЬЗУЕМ min_updates
                 continue
-            if wall.get('cv', 1.0) > self.max_wall_cv:
-                continue
-            
-            # Проверка съедения
-            if wall.get('eaten_pct', 0.0) < self.min_eaten_pct:
+            if wall.get('cv', 1.0) > max_cv:  # 🔥 ИСПОЛЬЗУЕМ max_cv
                 continue
             
-            # Проверка агрессии (для LONG дельта должна быть положительной и с всплеском)
-            if delta_v3 < 0 or delta_spike < self.delta_spike_ratio:
+            if wall.get('eaten_pct', 0.0) < min_eaten:  # 🔥 ИСПОЛЬЗУЕМ min_eaten
+                continue
+            
+            if delta_v3 < 0 or delta_spike < spike_ratio:  # 🔥 ИСПОЛЬЗУЕМ spike_ratio
                 continue
 
-            # Ограничение размера позиции
-            max_allowed_qty = wall['size'] * self.max_wall_exposure_pct
+            max_allowed_qty = wall['size'] * max_exposure  # 🔥 ИСПОЛЬЗУЕМ max_exposure
             qty = min(self.fixed_lot_size, max_allowed_qty)
             if qty < 0.1:
                 continue
 
-            # Расчет смещения лимитки (адаптивно)
-            tick_size = 0.01  # Для SOLUSDT
+            tick_size = 0.01
             volatility = atr / current_price if current_price > 0 else 0
             offset_ticks = 1 if volatility < 0.001 else 2
             offset = tick_size * offset_ticks
             
-            # Вход: лимитка на тик выше стены (для LONG покупаем чуть выше сопротивления)
             entry_price = round(wall['price'] + offset, 2)
-            sl_price = round(wall['price'] - (atr * 0.5), 2)  # Стоп ниже стены
-            tp_price = 0.0  # 🔥 Инициализация для Pylance
+            sl_price = round(wall['price'] - (atr * 0.5), 2)
+            tp_price = 0.0
             
-            # Проверка второй стены в пределах 3 ATR
             second_wall_found = False
             for other_wall in walls_ask:
                 if other_wall['price'] == wall['price']:
                     continue
                 distance = other_wall['price'] - wall['price']
                 if 0 < distance <= 3 * atr:
-                    # Вторая стена найдена, проверяем HVN между ними
                     if hvn_above and wall['price'] < hvn_above['price'] < other_wall['price']:
-                        # HVN между стенами — торгуем
                         tp_price = round(hvn_above['price'] - (atr * 0.1), 2)
                     else:
-                        # Нет HVN между стенами — пропускаем
                         second_wall_found = True
                         break
                 elif distance > 3 * atr:
-                    break  # Дальше не сканируем
+                    break
             
             if second_wall_found:
                 continue
             
-            # Если второй стены нет или HVN между ними — рассчитываем TP
             if not second_wall_found:
                 reward_distance = (entry_price - sl_price) * 2.5
                 tp_price_candidate = round(entry_price + reward_distance, 2)
                 
                 if hvn_above and hvn_above['price'] > entry_price:
-                    # HVN выше входа — ставим TP перед ним
                     tp_price = round(hvn_above['price'] - (atr * 0.1), 2)
                     tp_price = min(tp_price, tp_price_candidate)
                 else:
                     tp_price = tp_price_candidate
 
-            # Проверка минимального R:R
             risk = entry_price - sl_price
             reward = tp_price - entry_price
             if risk > 0 and (reward / risk) < 2.0:
                 continue
 
-            conf = wall['confidence'] + 0.2  # Бонус за пробой
+            conf = wall['confidence'] + 0.2
             
             if conf > best_confidence:
                 best_confidence = conf
@@ -199,22 +201,21 @@ class BreakoutStrategyV1:
 
         # --- SHORT: Пробой BID-стены вниз ---
         for wall in walls_bid:
-            if wall.get('confidence', 0) < self.min_confidence:
+            if wall.get('confidence', 0) < min_conf:
                 continue
             
-            if wall.get('update_count', 0) < self.min_wall_updates:
+            if wall.get('update_count', 0) < min_updates:
                 continue
-            if wall.get('cv', 1.0) > self.max_wall_cv:
-                continue
-            
-            if wall.get('eaten_pct', 0.0) < self.min_eaten_pct:
+            if wall.get('cv', 1.0) > max_cv:
                 continue
             
-            # Для SHORT дельта должна быть отрицательной
-            if delta_v3 > 0 or delta_spike < self.delta_spike_ratio:
+            if wall.get('eaten_pct', 0.0) < min_eaten:
+                continue
+            
+            if delta_v3 > 0 or delta_spike < spike_ratio:
                 continue
 
-            max_allowed_qty = wall['size'] * self.max_wall_exposure_pct
+            max_allowed_qty = wall['size'] * max_exposure
             qty = min(self.fixed_lot_size, max_allowed_qty)
             if qty < 0.1:
                 continue
@@ -224,11 +225,9 @@ class BreakoutStrategyV1:
             offset_ticks = 1 if volatility < 0.001 else 2
             offset = tick_size * offset_ticks
             
-            # Вход: лимитка на тик ниже стены (для SHORT продаем чуть ниже поддержки)
             entry_price = round(wall['price'] - offset, 2)
             sl_price = round(wall['price'] + (atr * 0.5), 2)
-
-            tp_price = 0.0  # 🔥 Инициализация для Pylance
+            tp_price = 0.0
             
             second_wall_found = False
             for other_wall in walls_bid:

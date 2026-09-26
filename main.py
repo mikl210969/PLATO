@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 PLAT_WALLS_NEW — Торговая платформа (чистая версия, рефакторинг v3.1).
+Исправлен порядок инициализации аналитических модулей (Фаза 2).
 """
 
 import asyncio
 import signal
+import inspect
 import sys
 import time
 import logging
@@ -17,12 +19,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.logger import get_logger
 from core.event_bus import EventBus, Event
 from core.config_loader import ConfigLoader
-from core.json_logger import JsonLogger
+from core.json_logger import JsonLogger, JsonLoggerHandler
 
 from adapters.binance_rest import BinanceRestClient
 from adapters.binance_ws import BinanceWsAdapter
 from adapters.channel_router import ChannelRouter
 
+from extensions.data_layer.db_manager import DatabaseManager
 from trading.passport_manager import PassportManager
 from trading.passport_repository import PassportRepository
 from trading.trader import Trader
@@ -40,36 +43,57 @@ from strategies.breakout_v1 import BreakoutStrategyV1
 from datetime import datetime, timezone
 
 from extensions.risk.position_sizer import PositionSizer
-from extensions.analytics.monitor_factory import MonitorFactory  # 🔥 НОВОЕ: Фабрика мониторов
-from extensions.analytics.atr_monitor import AtrMonitor  # 🔥 УРОВЕНЬ 5: Dynamic ATR
-from core.json_logger import JsonLogger, JsonLoggerHandler
+from extensions.analytics.monitor_factory import MonitorFactory
+from extensions.analytics.atr_monitor import AtrMonitor
 
 logger = get_logger(__name__)
 
 
 class Platform:
-    def __init__(self, profile: str = "testnet_24h_real"):
+    def __init__(self, profile: str = "trading"):
         self.profile = profile
         self._running = True
         self._is_reconnecting = False        
         self._listen_key = None
 
+        # ========================================================================
+        # 🔥 1. Интеграция DatabaseManager (Архитектурное ядро)
+        # ========================================================================
+        self.db = DatabaseManager()
+        logger.info("✅ DatabaseManager инициализирован (ядро V12)")
+        # ========================================================================
+
         # Переменные для хранения данных из WS
         self.ws_price = 0.0
         self.ws_orderbook = {'bids': [], 'asks': []}
 
-        # 🔥 НОВОЕ: кэш последней известной цены для мягкой деградации при сбоях REST
         self.last_known_price = 0.0
-        self._last_user_data_ts = time.time()  # 🔥 свежесть User Data (для health-check)        
-        # 🔥 ФАЗА 1: порог свежести WS-стакана (сек).
-        # Стакан старше этого возраста = рынок не виден = итерацию пропускаем.
-        # REST больше НЕ используется для стакана вообще.
+        self._last_user_data_ts = time.time()
         self.depth_freshness_sec = 3.0
-        self._stale_skips = 0  # счётчик пропусков для диагностики        
+        self._stale_skips = 0
 
-        # 1. Загрузка конфигов
+        # 2. Загрузка конфигов
         self.config = ConfigLoader().load_all()
         secrets = ConfigLoader().load_secrets()
+        # ========================================================================
+        # 🔥 ЛОГИРОВАНИЕ СТАРТОВОЙ КОНФИГУРАЦИИ (Audit Log) — ИСПРАВЛЕНО
+        # ========================================================================
+        import json
+        logger.info("="*60)
+        logger.info("🚀 [CONFIG STARTUP] Загружена конфигурация платформы:")
+        
+        # Ключи в корне конфига
+        for key in ['volume_context', 'walls', 'features', 'exchange', 'trading', 'risk', 'logging']:
+            val = self.config.get(key, '❌ NOT FOUND IN ROOT')
+            logger.info(f" [{key.upper()}] {json.dumps(val, indent=2, ensure_ascii=False)}")
+        
+        # Breakout лежит внутри strategies
+        strategies = self.config.get('strategies', {})
+        breakout = strategies.get('breakout', '❌ NOT FOUND IN strategies')
+        logger.info(f"🔹 [BREAKOUT] {json.dumps(breakout, indent=2, ensure_ascii=False)}")
+        
+        logger.info("="*60)
+        # ========================================================================
 
         exchange_config = self.config.get('exchange', {})
         api_key = secrets.get('api_key', '') or exchange_config.get('api_key', '')
@@ -77,52 +101,36 @@ class Platform:
 
         self.symbol = exchange_config.get('symbol', 'SOLUSDT')
 
-        # 2. JSON Logger
+        # 3. JSON Logger
         log_config = self.config.get('logging', {})
         self.json_logger = JsonLogger(config=log_config)
         
-        # 🔥 НОВОЕ: Подключаем мост к СТАНДАРТНОМУ root-логгеру Python
-        import logging
         json_handler = JsonLoggerHandler(self.json_logger)
         json_handler.setLevel(logging.INFO)
-        
-        # Добавляем handler к root logger, чтобы он перехватывал вызовы из ВСЕХ модулей
         logging.getLogger().addHandler(json_handler)
         
-        # Теперь используем твой стандартный logger для вывода в консоль
         logger.info(f"✅ JSON Logger initialized | Level: {log_config.get('level', 'INFO')} | WS Raw: {log_config.get('optional_modules', {}).get('ws', False)}")
 
-        # 3. Инициализация базовых компонентов
+        # 4. Инициализация базовых компонентов
         self.bus = EventBus()
-        # 1. Сначала создаем репозиторий
         self.passport_repository = PassportRepository()
-
-        # 2. Затем передаем его в менеджер паспортов
         self.passport_manager = PassportManager(repository=self.passport_repository)
         
-        # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ (Шаг 10.4): Восстановление состояния при старте
-        # Загружаем паспорта с диска в оперативную память, чтобы is_symbol_busy работал корректно
-        # и предотвращал фантомное увеличение лота при перезапусках или сбоях.
         saved_passports = self.passport_repository.load_all()
         active_count = 0
         for passport in saved_passports:
-            # Добавляем в память только те, что еще не закрыты
             if passport.status not in ("CLOSED", "CANCELED", "FAILED"):
                 self.passport_manager.update(passport)
                 active_count += 1
-        
         logger.info(f"✅ Загружено {len(saved_passports)} паспортов из хранилища, {active_count} активных добавлено в память")
 
-        # 4. REST и WS клиенты
+        # 5. REST и WS клиенты
         self.rest = BinanceRestClient(
             api_key=api_key,
             api_secret=api_secret,
             base_url=exchange_config.get('rest_base_url', 'https://testnet.binancefuture.com')
         )
 
-        # 🔥 НОВОЕ: Передаем event_bus в адаптер для нормализации событий
-        # base_url используется ТОЛЬКО для Futures User Data Stream и определения testnet/mainnet.
-        # SPOT market data идёт через внутренний spot_base_url адаптера.
         self.ws = BinanceWsAdapter(
             base_url=exchange_config.get('ws_base_url', 'wss://stream.binancefuture.com/ws'),
             event_bus=self.bus
@@ -130,23 +138,18 @@ class Platform:
         self.ws.set_json_logger(self.json_logger)
         self.router = ChannelRouter(self.ws, self.rest)
 
-        # 5. Analytics Hub
+        # 6. Analytics Hub
         from core.analytics_hub import AnalyticsHub
         self.analytics = AnalyticsHub(self.bus, self.symbol, self.rest)
         self.volatility_filter = self.analytics.volatility 
 
-        # 6. StateManager
+        # 7. StateManager & PositionSizer
         self.state_manager = StateManager(self.passport_manager)
-
-        # 7. PositionSizer (Создаем ПЕРЕД Orchestrator)
         max_pos_size = self.config.get('risk', {}).get('max_position_size', 5.0)
-        self.position_sizer = PositionSizer(
-            rest_client=self.rest, 
-            max_position_size=max_pos_size
-        )
+        self.position_sizer = PositionSizer(rest_client=self.rest, max_position_size=max_pos_size)
         logger.info(f"✅ PositionSizer initialized | Max Size Cap: {max_pos_size}")
 
-        # 8. Оркестратор
+        # 8. Оркестратор и Трейдер
         self.orchestrator = Orchestrator(
             config=self.config,
             event_bus=self.bus,
@@ -158,7 +161,6 @@ class Platform:
         )
         logger.info("✅ Orchestrator initialized")
 
-        # 9. Трейдер
         self.trader = Trader(
             symbol=self.symbol,
             rest_client=self.rest,
@@ -167,14 +169,25 @@ class Platform:
             config=self.config
         )
         self.orchestrator.register_trader(self.symbol, self.trader)
-        # 9. Features (слой анализа рынка)
+
+        # 9. Features и Lifecycle
         self.features = FeatureRegistry(self.config, logger)
         logger.info("✅ FeatureRegistry initialized")
-        
-        # Запускаем периодическое логирование OUTPUT
         self._features_output_task = asyncio.create_task(self.features.start())
 
-        # 10. LifecycleManager
+        # ========================================================================
+        # 🔥 Интеграция WallsFeature (Детектор стен из V13)
+        # ========================================================================
+        from features.walls import WallsFeature
+        
+        self.walls_feature = WallsFeature(
+            symbol=self.symbol,
+            config=self.config,
+            log=logger
+        )
+        logger.info("✅ WallsFeature инициализирован и готов к анализу стакана")
+        # ========================================================================
+
         self.lifecycle_manager = LifecycleManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
@@ -183,19 +196,18 @@ class Platform:
         )
         logger.info("✅ LifecycleManager initialized")
 
-        # 11. RiskManager
+        # 10. RiskManager, OrderVerifier, DriftMonitor
         self.risk_manager = RiskManager(
             event_bus=self.bus,
             passport_manager=self.passport_manager,
             trader=self.trader,
             config=self.config,
             json_logger=self.json_logger,
-            passport_repository=self.passport_repository  # 🔥 ДОБАВИТЬ ЭТУ СТРОКУ
+            passport_repository=self.passport_repository
         )
         self.orchestrator.set_risk_manager(self.risk_manager)
         logger.info("✅ RiskManager initialized and set in Orchestrator")
 
-        # 12. OrderVerifier
         self.verifier = OrderVerifier(
             rest_client=self.rest,
             event_bus=self.bus,
@@ -204,23 +216,20 @@ class Platform:
         )
         logger.info("✅ OrderVerifier initialized")
 
-        # 13. DriftMonitor
         from trading.drift_monitor import DriftMonitor
         self.drift_monitor = DriftMonitor(
             rest_client=self.rest,
             passport_manager=self.passport_manager,
-            passport_repository=self.passport_repository,  # 🔥 ДОБАВИТЬ ЭТО
+            passport_repository=self.passport_repository,
             event_bus=self.bus,
-            risk_manager=self.risk_manager,  # 🔥 ДОБАВИТЬ ЭТУ СТРОКУ
-            poll_interval=900.0  # 🔥 ЧИСТКА: 15-минутный heartbeat в HEALTHY (Reconciler и так сверяет каждую минуту)
+            risk_manager=self.risk_manager,
+            poll_interval=900.0
         )
         logger.info("✅ DriftMonitor initialized")
-
         self.orchestrator.set_drift_monitor(self.drift_monitor)
         self.orchestrator.set_verifier(self.verifier)
         logger.info("✅ DriftMonitor and OrderVerifier set in Orchestrator")
 
-        # 13.5 ExchangeReconciler — непрерывный гарант «биржа = источник правды»
         from trading.reconciler import ExchangeReconciler
         self.reconciler = ExchangeReconciler(
             rest_client=self.rest,
@@ -234,75 +243,143 @@ class Platform:
         )
         logger.info("✅ ExchangeReconciler initialized")
 
-        # 14. Стратегии
+        # ========================================================================
+        # 🔥 11. Определение monitored_symbols (КРИТИЧЕСКИ ВАЖНО: до аналитики)
+        # ========================================================================
+        self.monitored_symbols = ["BTCUSDT", "SOLUSDT"]
+
+        # ========================================================================
+        # 🔥 12. Интеграция VolumeRollingWindow (Фаза 2: Подача данных)
+        # ========================================================================
+        from features.volume_rolling_window import VolumeRollingWindow
+        
+        self.volume_rolling_windows = {}
+        for symbol in self.monitored_symbols:
+            self.volume_rolling_windows[symbol] = VolumeRollingWindow(
+                db_manager=self.db,
+                lookback_candles=30
+            )
+
+        for symbol in self.monitored_symbols:
+            self.bus.subscribe(
+                f"TRADE_NORMALIZED_{symbol}", 
+                self.volume_rolling_windows[symbol].on_trade_event
+            )
+        logger.info(f"✅ VolumeRollingWindow инициализирован и подписан для {self.monitored_symbols}")
+        # ========================================================================
+
+        # ========================================================================
+        # 🔥 13. Интеграция VolumeContextManager (Фаза 1: Режим наблюдения)
+        # ========================================================================
+        from features.volume_context_manager import VolumeContextManager
+        
+        raw_volume_config = self.config.get("volume_context", {})
+        if not raw_volume_config or not raw_volume_config.get("enabled", False):
+            logger.warning("⚠️ [CONFIG] volume_context не найден. Применяем fallback-настройки для аналитики.")
+            volume_config = {
+                "enabled": True,
+                "recalc_interval_sec": 60,
+                "lookback_candles": 20,
+                "baseline_avg_vol": 100.0,
+                "dry_run": True,
+                "regimes": {
+                    "calm": {"vol_ratio_max": 0.7, "overrides": {}},
+                    "normal": {"vol_ratio_max": 2.0, "overrides": {}},
+                    "volatile": {"vol_ratio_max": 999, "overrides": {}}
+                }
+            }
+        else:
+            volume_config = raw_volume_config
+
+        self.volume_context_manager = VolumeContextManager(
+            volume_config=volume_config,
+            base_strategy_params={}
+        )
+        logger.info("✅ VolumeContextManager инициализирован в РЕЖИМЕ НАБЛЮДЕНИЯ")
+
+        # ========================================================================
+        # 🔥 14. Запуск фонового цикла VolumeContextManager
+        # ========================================================================
+        async def context_updater_loop():
+            logger.info("🚀 [CONTEXT UPDATER] Фоновая задача запущена!")
+            while getattr(self, '_running', True):
+                try:
+                    for symbol in self.monitored_symbols:
+                        recent_volumes = self.volume_rolling_windows[symbol].get_recent_volumes(
+                            symbol=symbol, 
+                            limit=20
+                        )
+                        # 🔥 ДОБАВЛЕНО: имя символа в лог
+                        logger.info(f"🔍 [VCM DEBUG] {symbol}: получено {len(recent_volumes)} объемов")
+                        
+                        # Если данных достаточно, можно раскомментировать вызов менеджера, 
+                        # но пока оставим как есть, чтобы видеть чистый сбор данных.
+                        await self.volume_context_manager.update_context(recent_volumes)
+                except Exception as e:
+                    logger.error(f"❌ [CONTEXT UPDATER] Ошибка: {e}")
+                await asyncio.sleep(10)
+
+        asyncio.create_task(context_updater_loop())
+        logger.info("✅ Фоновая задача VolumeContextManager активирована")
+        # ========================================================================        
+
+        # 15. Стратегии
         strategies_config = self.config.get('strategies', {})
         debug_mode = self.config.get('debug_mode', {})
         strategies_debug = debug_mode.get('strategies', {})
         
-        # 🔥 ИСПРАВЛЕНО: merge базового конфига стратегии с debug-настройками
-        # (bypass_filters, log_input_stream и др. лежат в debug_mode.strategies.<имя>)
         wall_fade_config = strategies_config.get('wall_fade', {})
         wall_fade_debug = strategies_debug.get('wall_fade_v3', {})
-        wall_fade_merged = {**wall_fade_config, **wall_fade_debug}
-        self.wall_fade = WallFadeStrategyV3(wall_fade_merged, atr_value=0.5)
+        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
+        self.wall_fade = WallFadeStrategyV3(
+            config=wall_fade_config, 
+            atr_value=0.5,  # Или твое значение
+            context_manager=self.volume_context_manager
+        )
         self.wall_fade.subscribe_to_events(self.bus)
 
         absorption_config = strategies_config.get('absorption', {})
         absorption_debug = strategies_debug.get('absorption_v2', {})
-        absorption_merged = {**absorption_config, **absorption_debug}
-        self.absorption = AbsorptionStrategyV2(absorption_merged, atr_value=0.5)
+        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
+        self.absorption = AbsorptionStrategyV2(
+            config=absorption_config, 
+            atr_value=0.5,  # Или твое значение
+            context_manager=self.volume_context_manager
+        )
         self.absorption.subscribe_to_events(self.bus)
 
         breakout_config = strategies_config.get('breakout', {})
         breakout_debug = strategies_debug.get('breakout_v1', {})
-        breakout_merged = {**breakout_config, **breakout_debug}
-        self.breakout = BreakoutStrategyV1(breakout_merged, atr_value=0.5)
+        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
+        self.breakout = BreakoutStrategyV1(
+            config=breakout_config, 
+            atr_value=0.5,  # Или твое значение ATR
+            context_manager=self.volume_context_manager
+        )
         self.breakout.subscribe_to_events(self.bus)    
 
-        # ========================================================================
-        # 🔥 15. НОВОЕ: DeltaMonitor Factory (Универсальный мониторинг + Дивергенции)
-        # ========================================================================
-        self.monitored_symbols = ["BTCUSDT", "SOLUSDT"] 
-        
+        # 16. DeltaMonitor Factory
         self.delta_monitors = MonitorFactory.create_delta_monitors(
             symbols=self.monitored_symbols, 
             event_bus=self.bus, 
-            timeframe_sec=300  # 5 минут
+            timeframe_sec=300
         )
-        # 🔥 Хранилище последних контекстов дельты для передачи в стратегии
+
         self.delta_contexts = {
             "BTCUSDT": {"trend": "FLAT", "delta_strength": 0.0, "current_price": 0.0},
             "SOLUSDT": {"trend": "FLAT", "delta_strength": 0.0, "current_price": 0.0}
         }        
-        # Подписчик для логирования и сохранения контекста
-        # 🔥 ЧИСТКА ЛОГА: DELTA_CTX печатается только когда что-то реально меняется:
-        # смена тренда, смена знака дельты, сдвиг цены >0.5% или пульс раз в 60 сек.
-        # Информативность та же, шума в ~10 раз меньше.
         self._delta_log_state = {}
-
-        # 🔥 Объявление задач для корректной остановки и устранения предупреждений Pylance
-        self._ws_task = None
-        self._keep_alive_task = None
-        self._health_check_task = None
-        self._spot_trades_task = None
-        self._spot_depth_task = None
-        self._features_output_task = None
 
         async def update_and_log_delta_context(event):
             payload = event.payload
             symbol = getattr(event, 'symbol', 'UNKNOWN')
-
             trend = payload.get('trend', 'FLAT')
             delta = float(payload.get('delta_strength', 0.0) or 0.0)
             price = float(payload.get('current_price', 0.0) or 0.0)
 
-            # Сохраняем актуальное состояние в платформу (всегда, без throttling)
             if symbol in self.delta_contexts:
-                self.delta_contexts[symbol] = {
-                    "trend": trend,
-                    "delta_strength": delta,
-                    "current_price": price
-                }
+                self.delta_contexts[symbol] = {"trend": trend, "delta_strength": delta, "current_price": price}
 
             if event.type == "DIVERGENCE_DETECTED":
                 logger.warning(f"🚨 [DIVERGENCE {symbol}] ОБНАРУЖЕНА ДИВЕРГЕНЦИЯ: {payload.get('type')} @ {payload.get('price')}")
@@ -317,47 +394,37 @@ class Platform:
 
             should_log = False
             if st is None:
-                should_log = True                                   # первое появление символа
+                should_log = True
             elif trend != st["trend"]:
-                should_log = True                                   # сменился режим рынка
+                should_log = True
             elif sign != st["sign"]:
-                should_log = True                                   # дельта сменила знак
+                should_log = True
             elif st["price"] > 0 and abs(price - st["price"]) / st["price"] > 0.005:
-                should_log = True                                   # цена ушла на >0.5%
+                should_log = True
             elif now - st["ts"] >= 60.0:
-                should_log = True                                   # пульс: поток жив
+                should_log = True
 
             if should_log:
                 self._delta_log_state[symbol] = {"trend": trend, "sign": sign, "price": price, "ts": now}
-                logger.info(
-                    f"📊 [DELTA_CTX {symbol}] Trend: {trend:<5} | "
-                    f"Delta: {delta:>8} | "
-                    f"Price: {price}"
-                )
+                logger.info(f"📊 [DELTA_CTX {symbol}] Trend: {trend:<5} | Delta: {delta:>8} | Price: {price}")
 
         self.bus.subscribe("BTC_CONTEXT_UPDATED", update_and_log_delta_context)
         self.bus.subscribe("CONTEXT_UPDATED_SOLUSDT", update_and_log_delta_context)
         self.bus.subscribe("DIVERGENCE_DETECTED", update_and_log_delta_context)
-        
         logger.info(f"✅ DeltaMonitor Factory initialized for {self.monitored_symbols}")
 
-        # ========================================================================
-        # 🔥 16. AtrMonitor Factory (Dynamic ATR — живой пересчёт каждые 5 минут)
-        # ========================================================================
+        # 17. AtrMonitor Factory
         self.atr_monitors: Dict[str, AtrMonitor] = {}
-        
         for symbol in self.monitored_symbols:
-            atr_monitor = AtrMonitor(
+            self.atr_monitors[symbol] = AtrMonitor(
                 symbol=symbol,
                 event_bus=self.bus,
                 volatility_filter=self.volatility_filter,
-                update_interval_sec=300  # 5 минут
+                update_interval_sec=300
             )
-            self.atr_monitors[symbol] = atr_monitor
-        
         logger.info(f"✅ AtrMonitor Factory initialized for {self.monitored_symbols}")
 
-        # 17. Extensions (Safe Bootstrap)
+        # 18. Extensions
         from extensions.bootstrap import init_extensions_safe
         self.extensions = init_extensions_safe(self.bus, self.symbol)
         if self.extensions:
@@ -365,7 +432,7 @@ class Platform:
         else:
             logger.warning("⚠️ Extensions failed to initialize, running in Core-only mode")
 
-        # 18. Shadow Advanced Risk Evaluator
+        # 19. Shadow Advanced Risk Evaluator
         from extensions.risk.advanced_risk_service import AdvancedRiskService
         self.shadow_risk = AdvancedRiskService(
             basis_monitor=self.extensions.basis if (hasattr(self, 'extensions') and self.extensions) else None,
@@ -381,23 +448,32 @@ class Platform:
 
         logger.info(f"✅ Platform initialized | symbol={self.symbol} | profile={self.profile}")
 
+        # Объявление задач для корректной остановки
+        self._ws_task = None
+        self._keep_alive_task = None
+        self._health_check_task = None
+        self._spot_trades_task = None
+        self._spot_depth_task = None
+        self._features_output_task = None
+        self._degraded_guard_task = None
+        self._watchdog_task = None
+
     async def _generate_signals(self, context: dict):
-        # 🔥 Логирование факта вызова (для отладки)
         logger.info("🚨 [ГЛАВНЫЙ ЦИКЛ] _generate_signals вызван")
         print("🚨 [ГЛАВНЫЙ ЦИКЛ] _generate_signals ВЫЗВАН!")
         
-        # 🔥 ЗАДАЧА 2: Блокировка новых ордеров только за счет статуса паспорта
         symbol = context.get('symbol', 'SOLUSDT')
         active_passport = self.passport_manager.get_active_by_symbol(symbol)
         
+        # 1. Если есть активный паспорт в торговле, блокируем новые сигналы и выходим
         if active_passport and active_passport.status in ('OPEN', 'PARTIAL_CLOSE', 'ORDER_SENT'):
             logger.warning(f"🚫 [ГЛАВНЫЙ ЦИКЛ] Сигналы заблокированы: активный паспорт {active_passport.passport_id} в статусе {active_passport.status}")
             print(f"🚫 [ГЛАВНЫЙ ЦИКЛ] Сигналы заблокированы: активный паспорт {active_passport.passport_id}")
             return []
 
+        # 2. Если паспорта нет (или он закрыт), формируем сигналы
+        # 🔥 ВАЖНО: Этот блок теперь находится ВНЕ блока if, поэтому он выполнится!
         signals = []
-        
-        # Проверяем, существуют ли вообще объекты стратегий
         print(f"🔍 Стратегии: wall_fade={self.wall_fade is not None}, absorption={self.absorption is not None}, breakout={self.breakout is not None}")
         
         for strategy in [self.wall_fade, self.absorption, self.breakout]:
@@ -407,8 +483,12 @@ class Platform:
                 
             print(f"🚨 Вызываем generate_signal для {strategy.__class__.__name__}...")
             
-            # Вот здесь стратегия должна написать в лог "📥 [ВХОДНОЙ ПОТОК]..."
-            signal = strategy.generate_signal(context)
+            # 🔥 ХИРУРГИЧЕСКАЯ ПРАВКА: Проверяем, является ли метод асинхронным
+            import inspect
+            if inspect.iscoroutinefunction(strategy.generate_signal):
+                signal = await strategy.generate_signal(context)
+            else:
+                signal = strategy.generate_signal(context)
             
             if signal:
                 print(f"✅ СИГНАЛ ПОЛУЧЕН ОТ {strategy.__class__.__name__}!")
@@ -420,40 +500,27 @@ class Platform:
 
     async def _main_loop(self):
         logger.info("🔄 Main loop started")
+        logger.info("🔥 [DEBUG] Вход в главный цикл!")  # <-- ДОБАВИТЬ ЭТУ СТРОКУ
 
-        # 1. Инициализация Listen Key
         listen_key = await self.rest.get_listen_key()
         self._listen_key = listen_key
         logger.info(f"✅ Listen key obtained: {listen_key[:10]}...")
 
-        # 2. Подключение основного WebSocket и первичная подписка
         await self.ws.connect()
         await self.ws.subscribe_depth(self.symbol)
 
         self._last_user_data_ts = time.time()
         self._last_price_update_ts = time.time()
 
-        # 3. Обработчик переподключения ОСНОВНОГО WebSocket
         async def on_ws_reconnect():
             if getattr(self, '_is_reconnecting', False):
                 return
-            
             self._is_reconnecting = True
             try:
-                # 🔥 ИСПРАВЛЕНО: Мы НЕ трогаем здесь listen_key и subscribe_user_data.
-                # User Data Stream управляется своим фоновым процессом и callback-ом.
-                # Здесь мы только восстанавливаем рыночные данные.
                 await self.ws.subscribe_depth(self.symbol)
                 await self.ws.subscribe_btc_streams()
-                
-                logger.info("✅ Основные потоки (depth, btc) переподписаны после reconnect.")
-                
-                await self.bus.publish(
-                    event_type="SYNC_REQUEST",
-                    source="platform",
-                    payload={"symbol": self.symbol},
-                    symbol=self.symbol
-                )
+                logger.info("✅ BTC streams подписаны")
+                await self.bus.publish(event_type="SYNC_REQUEST", source="platform", payload={"symbol": self.symbol}, symbol=self.symbol)
             except Exception as e:
                 logger.error(f"❌ Reconnect handler error: {e}")
             finally:
@@ -466,7 +533,6 @@ class Platform:
 
         self.bus.subscribe("WS_RECONNECT_FORCED", on_ws_reconnect_forced)
 
-        # 4. Обработчики событий WebSocket
         async def on_order_update(data):
             self._last_user_data_ts = time.time()            
             order_data = data.get('o', data)
@@ -493,12 +559,7 @@ class Platform:
 
         async def on_account_update(data):
             self._last_user_data_ts = time.time()            
-            await self.bus.publish(
-                event_type="ACCOUNT_UPDATE",
-                source="ws_adapter",
-                payload=data,
-                symbol=self.symbol
-            )
+            await self.bus.publish(event_type="ACCOUNT_UPDATE", source="ws_adapter", payload=data, symbol=self.symbol)
         self.ws.on("ACCOUNT_UPDATE", on_account_update)
 
         async def on_depth_update(data):
@@ -507,66 +568,63 @@ class Platform:
                 asks = data.get('a', [])
                 self.ws_orderbook = {'bids': bids, 'asks': asks}
                 if bids and asks:
-                    # 🔥 ЦЕНА НЕ ИЗ DIFF-СТАКАНА: без snapshot его mid даёт фантом (кейс 103.095).
-                    # Источник цены — только сделки. Стакан обслуживает детекторы.
                     self._last_price_update_ts = time.time()
             except Exception as e:
                 logger.error(f"Error processing depth update: {e}")
         self.ws.on("depthUpdate", on_depth_update)
-        # 🔥 FIX: используем цену из Spot aggTrade (работает стабильно)
-        # Diff depth stream требует initial snapshot — это сложная правка.
-        # Trades уже работают и дают актуальную цену.
+
         async def on_normalized_trade(event: Event):
             price = event.payload.get('price', 0.0)
             if price > 0:
                 self.ws_price = price
                 self._last_price_update_ts = time.time()
-                # 🔥 ЕДИНСТВЕННЫЙ источник PRICE_UPDATE для RiskManager — сделки
                 await self.bus.publish(
                     event_type="PRICE_UPDATE",
                     source="main",
                     payload={'symbol': self.symbol, 'price': price, 'ts': time.time()},
                     symbol=self.symbol
                 )
-        
         self.bus.subscribe("TRADE_NORMALIZED_SOLUSDT", on_normalized_trade)
 
-        async def on_btc_agg_trade(data):
+        # 🔥 ИСПРАВЛЕНО: Используем self.bus.subscribe, как для SOLUSDT, 
+        # потому что адаптер публикует событие именно в EventBus.
+        async def on_btc_agg_trade(event: Event):
+            data = event.payload  # Извлекаем сырые данные из объекта Event
+            logger.info(f"🔍 [BTC DEBUG] on_btc_agg_trade вызван! Цена: {data.get('p')}")
+            
+            normalized_payload = {
+                "price": float(data.get("p", 0)),
+                "qty": float(data.get("q", 0)),
+                "is_buyer_maker": bool(data.get("m", False)),
+                "timestamp": data.get("T", 0)
+            }
             await self.bus.publish(
-                event_type="BTC_AGG_TRADE",
-                source="ws_adapter",
-                payload=data,
+                event_type="TRADE_NORMALIZED_BTCUSDT", 
+                source="ws_adapter", 
+                payload=normalized_payload, 
                 symbol="BTCUSDT"
             )
-        self.ws.on("BTC_AGG_TRADE", on_btc_agg_trade)
+        
+        # 🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: subscribe вместо ws.on
+        self.bus.subscribe("BTC_AGG_TRADE", on_btc_agg_trade)
 
-        # 5. 🔥 ИСПРАВЛЕНО: Callback для продления listen_key (дешевый PUT-запрос)
         async def refresh_listen_key_callback():
             try:
                 if self._listen_key:
-                    # Используем renew вместо get (дешевле по лимитам)
                     success = await self.rest.renew_listen_key(self._listen_key)
                     if success:
                         logger.info(f"✅ Listen key продлен: {self._listen_key[:10]}...")
                     else:
-                        logger.warning("⚠️ renew_listen_key вернул False. Запрашиваем новый ключ...")
                         new_key = await self.rest.get_listen_key()
                         if new_key:
                             self._listen_key = new_key
                             logger.info(f"✅ Получен новый listen key: {self._listen_key[:10]}...")
-                else:
-                    logger.warning("️ listen_key is None. Запрашиваем новый...")
-                    new_key = await self.rest.get_listen_key()
-                    if new_key:
-                        self._listen_key = new_key
             except Exception as e:
                 logger.error(f"❌ Ошибка при обновлении listen key: {e}")
 
-        # 6. Запуск User Data Stream с переданным callback-ом
         await self.ws.subscribe_user_data(listen_key, refresh_key_callback=refresh_listen_key_callback)
         logger.info(f"✅ User data stream subscribed: {listen_key[:10]}...")
 
-        # 🔥 LIVE RECOVERY: после каждого reconnect User Data запускаем сверку
         async def on_user_data_reconnected():
             logger.warning("🔁 [LIVE_RECOVERY] User Data reconnected — запускаем сверку")
             try:
@@ -576,35 +634,20 @@ class Platform:
         
         self.ws.set_on_reconnect(on_user_data_reconnected)
         logger.info("✅ Live recovery callback registered")        
-        
         await self.ws.subscribe_btc_streams()
 
-        # 7. Монитор здоровья платформы и Guard (обновлённая версия)
         async def user_data_health_check():
             blind_start_time = None
-            
             while getattr(self, '_running', True):
                 try:
-                    await asyncio.sleep(10) # Проверка каждые 10 секунд
-                    
-                    # 1. Оцениваем состояние каналов.
-                    # 🔥 ИСПРАВЛЕНО: здоровье считаем по СВЕЖЕСТИ РЫНОЧНЫХ ДАННЫХ
-                    # (depth-обновления идут ~10 раз/сек при живом соединении),
-                    # а НЕ по user-data событиям: user-data молчит, когда нет ордеров,
-                    # из-за чего платформа ложно уходила в DEGRADED при живом WS.
+                    await asyncio.sleep(10)
                     md_age = time.time() - getattr(self, '_last_price_update_ts', time.time())
                     rest_is_banned = getattr(self.rest, '_ban_active', lambda: False)()
                     ws_ok = md_age < 45
-                    
-                    # 🔥 НОВОЕ: проверяем живость User Data отдельно
                     user_data_age = time.time() - getattr(self.ws, '_last_user_data_ts', time.time())
                     has_active = self.passport_manager.get_active_by_symbol(self.symbol) is not None
-                    user_data_dead = user_data_age > 180 and has_active  # > 3 мин при активных паспортах
+                    user_data_dead = user_data_age > 180 and has_active
                     
-                    # 2. Определяем platform_health
-                    # 🔥 BLIND = полная слепота: market data МЁРТВА и REST недоступен.
-                    # Тишина User Data при живом REST — это DEGRADED: drift-монитор
-                    # сверяет позицию через REST, guard живёт на ценах сделок.
                     if ws_ok and not rest_is_banned and not user_data_dead:
                         new_health = "HEALTHY"
                     elif not ws_ok and rest_is_banned:
@@ -612,55 +655,41 @@ class Platform:
                     else:
                         new_health = "DEGRADED"
 
-                    
-                    # 3. Обновляем статусы во всех активных паспортах
                     active_passports = self.passport_manager.get_active()
                     for passport in active_passports:
                         old_health = getattr(passport, 'platform_health', "HEALTHY")
-                        
-                        # Обновляем health только при смене состояния, чтобы не спамить диск
                         if old_health != new_health:
                             passport.platform_health = new_health
                             passport.updated_at = datetime.now(timezone.utc).isoformat()
-                            
-                            # Обновляем guard_status
                             if new_health == "HEALTHY":
                                 passport.guard_status = "active"
                                 passport.add_timeline_event("HEALTH_RESTORED", "Connection restored, Guard active")
                             elif new_health == "DEGRADED":
-                                # 🔥 FIX: Guard не спит при обрыве — переходит на REST-цену
                                 passport.guard_status = "active_rest"
                                 passport.add_timeline_event("HEALTH_DEGRADED", "WS lost, Guard switched to REST price feed")
                             elif new_health == "BLIND":
                                 passport.guard_status = "active_rest"
                                 passport.add_timeline_event("HEALTH_BLIND", "Total blindness, Guard on REST price feed")
-                            
-                            # Сохраняем изменение на диск
                             self.passport_repository.save(passport)
                             logger.warning(f"⚠️ [{passport.passport_id}] Health changed to {new_health}, Guard: {passport.guard_status}")
 
-                    # 4. Логика безопасного перезапуска при полной слепоте
                     if new_health == "BLIND":
                         if blind_start_time is None:
                             blind_start_time = time.time()
                             logger.critical("🚨 CRITICAL: Platform went BLIND. Starting 60s countdown to safe restart...")
-                        
                         elapsed = time.time() - blind_start_time
-                        if elapsed > 60: # Если слепота длится больше 60 секунд
+                        if elapsed > 60:
                             logger.critical("🛑 MAX BLINDNESS REACHED. Initiating SAFE RESTART (Exit Code 42).")
-                            # Здесь можно добавить отправку уведомления в Telegram
-                            self._running = False # Останавливаем циклы
-                            sys.exit(42) # Специальный код для Watchdog-скрипта
+                            self._running = False
+                            sys.exit(42)
                     else:
-                        blind_start_time = None # Сбрасываем таймер, если связь вернулась
-
+                        blind_start_time = None
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
                     logger.error(f"Health check error: {e}")
                     await asyncio.sleep(1)
 
-        # 8. Инициализация Cold Storage для Spot тиков
         import json
         self._cold_storage_dir = Path("data/cold_storage")
         self._cold_storage_dir.mkdir(parents=True, exist_ok=True)
@@ -673,17 +702,7 @@ class Platform:
                 "is_buyer_maker": bool(data.get("m", False)),
                 "timestamp": data.get("T", 0)
             }
-            
-            await self.bus.publish(
-                event_type=f"TRADE_NORMALIZED_{self.symbol}",
-                source="spot_ws_adapter",
-                payload=normalized_payload,
-                symbol=self.symbol
-            )
-            
-            # 🔥 Features v2: кормим FeatureSet спот-лентой (синхронный on_trade)
-            # Обёрнуто в свой try/except, чтобы падение Features не ломало ни шину,
-            # ни cold storage. Семантика Binance: m=True → taker is buyer → is_buy=True.
+            await self.bus.publish(event_type=f"TRADE_NORMALIZED_{self.symbol}", source="spot_ws_adapter", payload=normalized_payload, symbol=self.symbol)
             try:
                 self.features.get(self.symbol).on_trade(
                     price=float(data.get("p", 0)),
@@ -712,59 +731,70 @@ class Platform:
                 logger.warning(f"Не удалось сохранить тик в Cold Storage: {e}")
 
         async def on_spot_depth(event_type: str, data: dict):
-            # 1. Штатная публикация в шину (оставляем без изменений для совместимости)
             await self.bus.publish(event_type=event_type, source="spot_ws_adapter", payload=data, symbol=self.symbol)
-
-            # 2. 🔥 Features v2: кормим FeatureSet стаканом
             try:
-                # Binance depth payload: "b" = bids, "a" = asks. Формат: [[price, qty], ...]
-                bids = [(float(p), float(q)) for p, q in data.get("b", [])]
-                asks = [(float(p), float(q)) for p, q in data.get("a", [])]
-                # "E" - это время события в миллисекундах, переводим в секунды
+                # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обновляем глобальный стакан платформы!
+                raw_bids = data.get("b", [])
+                raw_asks = data.get("a", [])
+                
+                self.ws_orderbook = {'bids': raw_bids, 'asks': raw_asks}
+                self._last_price_update_ts = time.time()  # Сбрасываем таймер "протухания" стакана
+                
+                # Преобразуем в float для фичей
+                bids = [(float(p), float(q)) for p, q in raw_bids]
+                asks = [(float(p), float(q)) for p, q in raw_asks]
                 ts = float(data.get("E", time.time() * 1000)) / 1000.0
                 
                 self.features.get(self.symbol).on_orderbook(bids, asks, ts)
+                self.walls_feature.on_orderbook(bids, asks, ts)
+                
             except Exception as e:
                 logger.warning(f"🔸 [FEATURES] on_orderbook упал (стакан пропущен): {e}")
-        # 🔥 WATCHDOG: следит за живостью фоновых задач
 
-        # ==========================================
-        # 🔥 3. Запуск фоновых задач СПОТ (Вернули на место!)
-        # ==========================================
+        # 🔥 НОВЫЙ обработчик специально для спотовых тиков BTCUSDT
+        async def on_btc_spot_trade(event_type: str, data: dict):
+            normalized_payload = {
+                "price": float(data.get("p", 0)),
+                "qty": float(data.get("q", 0)),
+                "is_buyer_maker": bool(data.get("m", False)),
+                "timestamp": data.get("T", 0)
+            }
+            # Публикуем в ту же шину, где ждет VolumeRollingWindow
+            await self.bus.publish(
+                event_type="TRADE_NORMALIZED_BTCUSDT",
+                source="spot_ws_adapter",
+                payload=normalized_payload,
+                symbol="BTCUSDT"
+            )
+            logger.info(f"🔍 [BTC SPOT DEBUG] Тик получен! Цена: {normalized_payload['price']}")
+
         logger.info("🚀 Запускаю задачи сбора спот-данных (aggTrade + depth)...")
-        
-        self._spot_trades_task = asyncio.create_task(
-            self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade)
-        )
-        self._spot_depth_task = asyncio.create_task(
-            self.ws.subscribe_spot_depth(self.symbol, on_spot_depth)
-        )
-        
+        self._spot_trades_task = asyncio.create_task(self.ws.subscribe_spot_agg_trade(self.symbol, on_spot_trade))
+        self._spot_depth_task = asyncio.create_task(self.ws.subscribe_spot_depth(self.symbol, on_spot_depth))
+       
         logger.info("✅ Задачи спота успешно созданы и запущены!")
-        # ==========================================
+
+        # 🔥 Запускаем сбор спотовых тиков для BTCUSDT тем же проверенным методом
+        self._btc_spot_trades_task = asyncio.create_task(
+            self.ws.subscribe_spot_agg_trade("BTCUSDT", on_btc_spot_trade)
+        )
+        logger.info("✅ Задача сбора спот-данных для BTCUSDT успешно создана и запущена!")
 
         async def tasks_watchdog():
             while getattr(self, '_running', True):
                 await asyncio.sleep(60)
                 dead_tasks = []
-                
                 if hasattr(self, 'reconciler') and self.reconciler._task and self.reconciler._task.done():
                     dead_tasks.append("reconciler")
                     await self.reconciler.start()
-                
                 if hasattr(self, 'drift_monitor') and self.drift_monitor._task and self.drift_monitor._task.done():
                     dead_tasks.append("drift_monitor")
                     await self.drift_monitor.start(symbols=[self.symbol])
-                
                 if dead_tasks:
                     logger.warning(f"🚨 [WATCHDOG] Перезапущены мёртвые задачи: {', '.join(dead_tasks)}")
         
         self._watchdog_task = asyncio.create_task(tasks_watchdog())
 
-        # 🔥 PRAGMATIC TRIO #1: Startup Prefetch
-        # Загружаем exchangeInfo ОДИН раз, синхронно, ДО старта фоновых задач.
-        # PositionSizer и стратегии будут брать данные из кэша,
-        # не создавая параллельных REST-запросов на старте.
         try:
             await self.rest.get_exchange_info(self.symbol, force_refresh=True)
             logger.info(f"✅ [STARTUP PREFETCH] Exchange info loaded for {self.symbol}")
@@ -775,9 +805,6 @@ class Platform:
         await self.orchestrator.start_stuck_orders_monitor()
         await self.reconciler.start()
 
-        # 🔥 FIX: Guard на REST-цене во время обрывов WS.
-        # Работает ТОЛЬКО когда health != HEALTHY и есть открытая позиция.
-        # Один вызов positionRisk даёт mark price (для SL/TP) и размер (усыновление правды).
         async def _degraded_guard_loop():
             from adapters.binance_rest import REST_CALLER
             REST_CALLER.set("degraded_guard")
@@ -785,8 +812,6 @@ class Platform:
             rest_fail_streak = 0
             while self._running:
                 await asyncio.sleep(POLL_SEC)
-                # 🔥 FIX: гейт по свежести цены, а не по несуществующему self.platform_health
-                # (health живёт на паспортах; getattr всегда возвращал HEALTHY, поллер не работал)
                 price_fresh = (time.time() - getattr(self, '_last_price_update_ts', 0)) < 5.0
                 if price_fresh:
                     rest_fail_streak = 0
@@ -808,35 +833,23 @@ class Platform:
                     if mark <= 0:
                         raise RuntimeError("no price from REST")
                     rest_fail_streak = 0
-                    # Усыновляем размер с биржи: лечит дрейф filled_qty во время обрыва
                     if size > 0 and abs(size - float(passport.position_size or 0)) > 0.001:
                         passport.position_size = size
                         passport.filled_qty = size
                         self.passport_repository.save(passport)
-                    # 🔥 Усыновление цены входа с биржи: честный PnL при потерянных филлах
                     ex_entry = float(pos.get('entryPrice', 0) or 0)
                     if ex_entry > 0 and float(passport.position_entry_price or 0) <= 0:
                         passport.position_entry_price = ex_entry
                         passport.avg_price = ex_entry
                         self.passport_repository.save(passport)
-                    # 🔥 Синхронизация remaining guard'а с биржей (каждые 3 сек в аварии)
                     _rm = getattr(self, 'risk_manager', None)
                     if _rm is not None and hasattr(_rm, 'sync_guard_remaining') and size > 0:
                         _rm.sync_guard_remaining(passport.passport_id, size)
-                        logger.warning(
-                            f"🔧 [{passport.passport_id}] DEGRADED: размер усыновлён с биржи = {size}"
-                        )
-
-                    # 🔥 FIX: DegradedGuard регистрирует guard если его нет
-                    # Это страховка: даже если все пути регистрации провалились,
-                    # поллинг закроет дыру за 3 секунды
+                        logger.warning(f"🔧 [{passport.passport_id}] DEGRADED: размер усыновлён с биржи = {size}")
                     if hasattr(self, 'risk_manager') and self.risk_manager:
                         if passport.passport_id not in self.risk_manager._guards:
-                            logger.warning(
-                                f"🔧 [{passport.passport_id}] DEGRADED: guard отсутствует, принудительная регистрация"
-                            )
+                            logger.warning(f"🔧 [{passport.passport_id}] DEGRADED: guard отсутствует, принудительная регистрация")
                             await self.risk_manager.ensure_guard_registered(passport)
-
                     await self.bus.publish(
                         event_type="PRICE_UPDATE",
                         source="rest_poll",
@@ -848,15 +861,8 @@ class Platform:
                     logger.warning(f"⚠️ [DEGRADED_GUARD] poll failed ({rest_fail_streak}): {type(e).__name__}")
                     if rest_fail_streak == 3:
                         passport.guard_status = "suspended"
-                        passport.add_timeline_event(
-                            "GUARD_SUSPENDED", "REST price feed failed 3 times - true blindness"
-                        )
+                        passport.add_timeline_event("GUARD_SUSPENDED", "REST price feed failed 3 times - true blindness")
                         self.passport_repository.save(passport)
-
-        # Передаём risk_manager в DegradedGuard для принудительной регистрации guard
-        if hasattr(self, 'risk_manager'):
-            # DegradedGuard получает доступ к risk_manager через self
-            pass
 
         self._degraded_guard_task = asyncio.create_task(_degraded_guard_loop())
         logger.info("✅ DegradedGuard poller started (REST price on WS outage)")
@@ -865,9 +871,6 @@ class Platform:
         await self.orchestrator.perform_startup_recovery(self.symbol)
         logger.info("✅ [STARTUP] Recovery complete. Main loop starting.")
 
-        # 10. Основной цикл платформы
-        # 🔥 FIX: сбрасываем caller-тег после recovery, иначе он "заражает"
-        # все запросы main loop (ордера помечались как startup_recovery)
         from adapters.binance_rest import REST_CALLER
         REST_CALLER.set("main_loop")
 
@@ -876,10 +879,11 @@ class Platform:
 
         while self._running:
             try:
-                # 🔥 ФАЗА 1: цена ТОЛЬКО из живого WS-стакана. REST-fallback УДАЛЁН.
-                # Если стакан протух (> depth_freshness_sec) — пропускаем итерацию:
-                # решения на протухших данных запрещены, REST бережём только под ордера.
+                logger.info("🔥 [LOOP] Начало итерации")
+                
+                #  ФАЗА 1: проверка свежести WS-стакана
                 depth_age = time.time() - getattr(self, '_last_price_update_ts', 0)
+                logger.info(f"🔥 [LOOP] depth_age={depth_age:.1f}s, ws_price={self.ws_price}")
 
                 if self.ws_price > 0 and depth_age <= self.depth_freshness_sec:
                     current_price = self.ws_price
@@ -894,21 +898,24 @@ class Platform:
                     await asyncio.sleep(0.5)
                     continue
 
+                logger.info("🔥 [LOOP] Стакан свежий, продолжаем")
+                
                 current_time = time.time()
                 
-                # 🔥 Проверка позиции закомментирована/удалена, чтобы не спамить REST
                 if current_time - last_position_check_time >= 10:
-                    # await self.rest.get_position(self.symbol) 
                     last_position_check_time = current_time
 
                 if current_time - last_log_time >= 60:
-                    logger.debug(f"🔄 Price: {current_price} (from {'WS' if self.ws_price > 0 else 'REST'})")
+                    logger.debug(f"🔄 Price: {current_price}")
                     last_log_time = current_time
 
                 if self.passport_manager.is_symbol_busy(self.symbol):
+                    logger.info("🔥 [LOOP] Символ занят, ждем")
                     await asyncio.sleep(2)
                     continue
 
+                logger.info(" [LOOP] Символ свободен, формируем контекст")
+                
                 spot_price = self.analytics.spot_price.get_current_price()
                 hvn_micro = []
                 hvn_macro = []
@@ -916,11 +923,45 @@ class Platform:
                     hvn_micro = self.extensions.hvn.calculate_hvn(self.symbol, lookback_minutes=60)[:3]
                     hvn_macro = self.extensions.hvn.calculate_hvn(self.symbol, lookback_minutes=1440)[:3]
 
+                # ========================================================================
+                # 🔥 ПРЯМОЙ РЕНТГЕН: Сравниваем стакан и детектор
+                # ========================================================================
+                walls_snapshot = self.walls_feature.snapshot() if hasattr(self, 'walls_feature') else {"walls_bid": [], "walls_ask": []}
+                
+                bid_count = len(walls_snapshot.get("walls_bid", []))
+                ask_count = len(walls_snapshot.get("walls_ask", []))
+                
+                # 🔥 Считаем максимальный объем в топ-20 уровнях стакана
+                bids = self.ws_orderbook.get('bids', [])[:20]
+                asks = self.ws_orderbook.get('asks', [])[:20]
+                max_bid_vol = max([float(b[1]) for b in bids]) if bids else 0.0
+                max_ask_vol = max([float(a[1]) for a in asks]) if asks else 0.0
+                
+                logger.info(f"🐋 [WALLS CHECK] Найдено стен: BID={bid_count}, ASK={ask_count}")
+                logger.info(f"📊 [ORDERBOOK MAX VOL] Макс. объем в топ-20: BID={max_bid_vol:.2f}, ASK={max_ask_vol:.2f}")
+                
+                if bid_count > 0 or ask_count > 0:
+                    logger.info(f"🐋 [WALLS DATA] Top BID: {walls_snapshot['walls_bid'][0] if bid_count > 0 else 'None'}")
+                # ========================================================================
+
+                # ========================================================================
+                # 🔥 МОСТ: Синхронизируем новый детектор со старым фоновым логгером
+                # ========================================================================
+                try:
+                    feature_set = self.features.get(self.symbol)
+                    if hasattr(feature_set, 'walls'):
+                        # Принудительно отдаем старый логгеру реальные данные из нового детектора
+                        feature_set.walls._state = self.walls_feature._state
+                except Exception:
+                    pass  # Безопасный фоллбэк, если внутренняя структура FeatureSet изменится
+                # ========================================================================
+
                 context = {
                     'symbol': self.symbol,
                     'current_price': current_price,
                     'spot_price': spot_price,
                     'orderbook': self.ws_orderbook,
+                    'walls_snapshot': walls_snapshot,
                     'hvn_micro': hvn_micro,
                     'hvn_macro': hvn_macro,
                     'delta': self.analytics.delta.get_metrics(),
@@ -970,11 +1011,7 @@ class Platform:
 
     async def run(self):
         logger.info("🚀 Starting platform...")
-        
-        # 🔥 НОВОЕ: Запуск всех мониторов через Фабрику
         await MonitorFactory.start_all(self.delta_monitors)
-        
-        # 🔥 УРОВЕНЬ 5: Запуск AtrMonitor'ов
         logger.info(f"🚀 [Factory] Starting {len(self.atr_monitors)} ATR monitors...")
         for symbol, monitor in self.atr_monitors.items():
             await monitor.start()
@@ -985,31 +1022,23 @@ class Platform:
 
     async def stop(self):
         self._running = False
-        
         tasks_to_cancel = []
         
-        # 🔥 Исправлено: добавлена проверка на None для всех задач
         if self._ws_task is not None and not self._ws_task.done():
             self._ws_task.cancel()
             tasks_to_cancel.append(self._ws_task)
-            
         if self._keep_alive_task is not None and not self._keep_alive_task.done():
             self._keep_alive_task.cancel()
             tasks_to_cancel.append(self._keep_alive_task)
-            
         if self._health_check_task is not None and not self._health_check_task.done():
             self._health_check_task.cancel()
             tasks_to_cancel.append(self._health_check_task)
-            
         if self._spot_trades_task is not None and not self._spot_trades_task.done():
             self._spot_trades_task.cancel()
             tasks_to_cancel.append(self._spot_trades_task)
-            
         if self._spot_depth_task is not None and not self._spot_depth_task.done():
             self._spot_depth_task.cancel()
             tasks_to_cancel.append(self._spot_depth_task)
-            
-        # 🔥 Features v2: отмена задачи периодического логирования OUTPUT
         if self._features_output_task is not None and not self._features_output_task.done():
             self._features_output_task.cancel()
             tasks_to_cancel.append(self._features_output_task)
@@ -1018,41 +1047,41 @@ class Platform:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         
         await self.orchestrator.stop()
-
-        # 🔥 НОВОЕ: Остановка всех мониторов через Фабрику
         await MonitorFactory.stop_all(self.delta_monitors)
         
-        # 🔥 УРОВЕНЬ 5: Остановка AtrMonitor'ов
         for symbol, monitor in self.atr_monitors.items():
             await monitor.stop()
                 
         if hasattr(self, 'drift_monitor'):
-            try:
-                await self.drift_monitor.stop()
-            except Exception as e:
-                logger.error(f"Error stopping DriftMonitor: {e}")
+            try: await self.drift_monitor.stop()
+            except Exception as e: logger.error(f"Error stopping DriftMonitor: {e}")
 
         if hasattr(self, 'verifier'):
-            try:
-                await self.verifier.stop_all()
-            except Exception as e:
-                logger.error(f"Error stopping OrderVerifier: {e}")
+            try: await self.verifier.stop_all()
+            except Exception as e: logger.error(f"Error stopping OrderVerifier: {e}")
 
         if hasattr(self, 'reconciler'):
-            try:
-                await self.reconciler.stop()
-            except Exception as e:
-                logger.error(f"Error stopping Reconciler: {e}")
+            try: await self.reconciler.stop()
+            except Exception as e: logger.error(f"Error stopping Reconciler: {e}")
 
-        if hasattr(self, '_degraded_guard_task'):
+        task = getattr(self, '_degraded_guard_task', None)
+        if task is not None:
             try:
-                self._degraded_guard_task.cancel()
+                task.cancel()
             except Exception:
                 pass
 
         await self.rest.close()
         self.json_logger.close()
         logger.info("🛑 Platform stopped")
+
+        # ========================================================================
+        # 🔥 Корректное завершение работы с БД (Архитектурное ядро)
+        # ========================================================================
+        if hasattr(self, 'db') and self.db is not None:
+            self.db.close()
+            logger.info("✅ DatabaseManager корректно закрыт")
+        # ========================================================================
 
 
 def signal_handler(platform: Platform):
@@ -1063,7 +1092,7 @@ def signal_handler(platform: Platform):
 
 
 async def main():
-    platform = Platform(profile="testnet_24h_real")
+    platform = Platform(profile="trading")
     
     signal.signal(signal.SIGINT, signal_handler(platform))
     signal.signal(signal.SIGTERM, signal_handler(platform))

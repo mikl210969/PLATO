@@ -105,7 +105,7 @@ class VolumeProfileFeature(Feature):
             if median_vol <= 0:
                 continue
                 
-            strength = vol / median_vol
+            strength = vol / median_vol if median_vol > 0 else 0.0
             is_hvn = strength >= self._hvn_median_mult
             
             if is_hvn:

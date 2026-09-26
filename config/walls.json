@@ -1,0 +1,8 @@
+{
+  "min_size_avg_mult": 1.5,
+  "min_age_sec": 2.0,
+  "min_value_usdt": 10000,
+  "orderbook_depth": 50,
+  "relocate_radius_ticks": 3,
+  "max_wall_cv": 0.5
+}
