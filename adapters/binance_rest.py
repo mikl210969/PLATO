@@ -861,6 +861,7 @@ class BinanceRestClient:
     async def get_klines(self, symbol: str, interval: str = "1m", limit: int = 100) -> list:
         """Получение исторических свечей с Binance Spot REST API."""
         import logging
+        import asyncio
         logger = logging.getLogger(__name__)
 
         if self._ban_active():
@@ -874,18 +875,103 @@ class BinanceRestClient:
 
         url = "https://api.binance.com/api/v3/klines"
         params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
-        try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with self._request_semaphore:
-                async with session.get(url, params=params, timeout=timeout) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    error_text = await response.text()
-                    logger.error(f"Binance REST Klines error {response.status}: {error_text}")
-                    return []
-        except Exception as e:
-            logger.error(f"Exception while fetching klines for {symbol}: {e}")
-            return []
+
+        # 🔥 Изменение №1: увеличенный таймаут (было 10, стало 15)
+        timeout = aiohttp.ClientTimeout(total=15)
+
+        max_attempts = 2  # 🔥 Изменение №2: один ретрай при сетевых ошибках
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with self._request_semaphore:
+                    async with session.get(url, params=params, timeout=timeout) as response:
+                        # --- Успех ---
+                        if response.status == 200:
+                            return await response.json()
+
+                        # --- 429: Rate Limit (Binance говорит "подожди") ---
+                        if response.status == 429:
+                            retry_after = response.headers.get("Retry-After", "1")
+                            try:
+                                wait = max(1.0, float(retry_after))
+                            except (TypeError, ValueError):
+                                wait = 2.0
+                            logger.warning(
+                                f"[REST] 429 Rate Limit для {symbol} | "
+                                f"Retry-After={retry_after} | ждём {wait:.1f}s"
+                            )
+                            # При первом попадании — ждём и пробуем ещё раз
+                            if attempt < max_attempts:
+                                await asyncio.sleep(wait)
+                                continue
+                            logger.error(
+                                f"[REST] 429 Rate Limit для {symbol} | "
+                                f"исчерпаны попытки ({max_attempts})"
+                            )
+                            return []
+
+                        # --- 5xx: Ошибки сервера Binance (стоит ретраить) ---
+                        if 500 <= response.status < 600 and attempt < max_attempts:
+                            wait = 1.0 * attempt
+                            logger.warning(
+                                f"[REST] {response.status} для {symbol} | "
+                                f"ретрай через {wait}s (попытка {attempt}/{max_attempts})"
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+
+                        # --- Остальные ошибки (4xx кроме 429) ---
+                        error_text = await response.text()
+                        logger.error(
+                            f"[REST] Klines error для {symbol} | "
+                            f"status={response.status} | "
+                            f"body={error_text[:500]}"  # обрезаем, чтобы не засорять лог
+                        )
+                        return []
+
+            # 🔥 Изменение №3: расширенное логирование исключений
+            except asyncio.TimeoutError as e:
+                logger.error(
+                    f"[REST] Timeout для {symbol} | "
+                    f"type=TimeoutError | "
+                    f"attempt={attempt}/{max_attempts} | "
+                    f"timeout={timeout.total}s | "
+                    f"repr={e!r}"
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(1.0 * attempt)
+                    continue
+
+            except aiohttp.ClientError as e:
+                # ClientError — базовый класс для ServerDisconnectedError,
+                # ClientConnectionError, ClientPayloadError и т.д.
+                logger.error(
+                    f"[REST] Network error для {symbol} | "
+                    f"type={type(e).__name__} | "
+                    f"attempt={attempt}/{max_attempts} | "
+                    f"repr={e!r}"
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(1.0 * attempt)
+                    continue
+
+            except Exception as e:
+                # Неизвестные исключения — логируем ВСЁ, но не ретраим
+                logger.error(
+                    f"[REST] Unexpected error для {symbol} | "
+                    f"type={type(e).__name__} | "
+                    f"attempt={attempt}/{max_attempts} | "
+                    f"repr={e!r} | "
+                    f"msg={str(e)}"
+                )
+                return []
+
+        # Если все попытки закончились таймаутами/сетевыми ошибками
+        logger.error(
+            f"[REST] get_klines({symbol}) | "
+            f"все {max_attempts} попытки провалены (network/timeout)"
+        )
+        return []
 
     async def close(self):
         """Закрыть сессии."""
