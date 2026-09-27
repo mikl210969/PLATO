@@ -59,20 +59,13 @@ class VolumeRollingWindow:
 
     def _save_completed_candle(self, symbol: str, candle: Dict[str, Any]):
         """Сохраняет завершенную свечу в deque и в SQLite"""
-        # 1. Добавляем объем в историю в памяти
+        # 1. Добавляем объем в историю в памяти (ЭТО КРИТИЧНО ДЛЯ РАБОТЫ СИСТЕМЫ)
         self._volume_history[symbol].append(candle["volume"])
         
-        # 2. Асинхронно/фоново сохраняем в БД (вызываем синхронный метод, он быстр благодаря WAL)
+        # 2. Сохранение в БД временно отключено (метод upsert_candle_1m не реализован)
+        # TODO: Реализовать upsert_candle_1m в DatabaseManager и создать таблицу candles_1m
         try:
-            self.db_manager.upsert_candle_1m(
-                symbol=symbol,
-                timestamp=candle["start_minute"],
-                open_p=candle["open"],
-                high=candle["high"],
-                low=candle["low"],
-                close=candle["close"],
-                volume=candle["volume"]
-            )
+            pass  # self.db_manager.upsert_candle_1m(...) - закомментировано до реализации
         except Exception as e:
             logger.error(f"Ошибка записи свечи в БД для {symbol}: {e}")
 
