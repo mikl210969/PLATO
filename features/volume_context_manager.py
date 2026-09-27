@@ -30,69 +30,78 @@ class VolumeContextManager:
         self.dry_run = self.config.get("dry_run", False)
         self.force_regime = self.config.get("force_regime", None)
 
-    async def update_context(self, recent_volumes: List[float]) -> None:
-        # 🔥 ГАРАНТИРОВАННЫЙ ВЫВОД
-        print(f"🔍 [VCM DEBUG] Вызван update_context. Получено объемов: {len(recent_volumes)}")
+    async def update_context(self, recent_volumes: List[float]) -> Dict[str, Any]:
+        """
+        Обновляет контекст на основе последних объемов.
+        Добавлены: EMA для сглаживания + гистерезис для стабильности режимов.
+        """
+        if not recent_volumes:
+            return self.current_params
+
+        # 1. Рассчитываем средний объем за период
+        avg_vol = sum(recent_volumes) / len(recent_volumes)
         
-        if not self.enabled:
-            print("️ [VCM DEBUG] Менеджер выключен!")
-            return
-
-        if len(recent_volumes) < self.lookback:
-            print(f"⚠️ [VCM DEBUG] Мало данных: {len(recent_volumes)} < {self.lookback}")
-            return
-
-        try:
-            volumes_array = np.array(recent_volumes[-self.lookback:])
-            avg_vol = float(np.mean(volumes_array))
-            std_vol = float(np.std(volumes_array))
+        # 2. Рассчитываем коэффициент относительно базового объема
+        vol_ratio = avg_vol / self.baseline_avg_vol if self.baseline_avg_vol > 0 else 1.0
+        
+        # 3. 🔥 EMA для сглаживания (коэффициент 0.3 = быстрая реакция, но без резких скачков)
+        if not hasattr(self, '_ema_vol_ratio'):
+            self._ema_vol_ratio = vol_ratio  # Инициализация при первом запуске
+        else:
+            self._ema_vol_ratio = (vol_ratio * 0.3) + (self._ema_vol_ratio * 0.7)
+        
+        # Используем EMA для определения режима (вместо мгновенного vol_ratio)
+        smoothed_vol_ratio = self._ema_vol_ratio
+        
+        # 4. Определяем новый режим на основе сглаженного объема
+        new_regime = self._determine_regime(smoothed_vol_ratio)
+        
+        # 5. 🔥 ГИСТЕРЕЗИС: Требуем подтверждение смены режима
+        if not hasattr(self, '_regime_counter'):
+            self._regime_counter = 0
+            self._pending_regime = new_regime
+        
+        if new_regime == self._pending_regime:
+            self._regime_counter += 1
+        else:
+            self._pending_regime = new_regime
+            self._regime_counter = 1
+        
+        # Режим меняется только если продержался 5 свечей (5 минут для 1m таймфрейма)
+        HYSTERESIS_THRESHOLD = 5
+        if self._regime_counter >= HYSTERESIS_THRESHOLD and new_regime != self.current_regime:
+            # Смена режима подтверждена
+            old_regime = self.current_regime
+            self.current_regime = new_regime
+            self._regime_counter = 0
             
-            vol_ratio = avg_vol / self.baseline_avg_vol if self.baseline_avg_vol > 0 else 1.0
-            # Clamp для защиты от аномалий
-            vol_ratio = max(0.1, min(vol_ratio, 10.0))
-
-            new_regime = self._determine_regime(vol_ratio)
+            # Получаем параметры для нового режима
+            new_params = deepcopy(self.base_params)
+            if new_regime in self.regimes:
+                overrides = self.regimes[new_regime].get("overrides", {})
+                new_params.update(overrides)
             
-        except Exception as e:
-            logger.error(f"❌ Ошибка при расчете метрик контекста: {e}")
-            return
-
-        # Применяем overrides для нового режима
-        new_params = deepcopy(self.base_params)
-        if new_regime in self.regimes:
-            overrides = self.regimes[new_regime].get("overrides", {})
-            new_params.update(overrides)
-
-        # Thread-safe обновление состояния
-        async with self._lock:
-            regime_changed = (new_regime != self.current_regime)
-            
-            if regime_changed:
-                # 🔥 RUNTIME ЛОГИРОВАНИЕ: Сообщаем об изменении параметров
-                old_wall_vol = self.current_params.get("min_wall_volume", "N/A") if hasattr(self, 'current_params') else "N/A"
-                new_wall_vol = new_params.get("min_wall_volume", "N/A")
-                old_price_dist = self.current_params.get("price_distance_pct", "N/A") if hasattr(self, 'current_params') else "N/A"
-                new_price_dist = new_params.get("price_distance_pct", "N/A")
-                
-                logger.warning(
-                    f"🔄 [REGIME SHIFT] {self.current_regime.upper()} ➔ {new_regime.upper()} | "
-                    f"VolRatio: {vol_ratio:.2f} | AvgVol: {avg_vol:.1f} | "
-                    f"MinWallVol: {old_wall_vol} ➔ {new_wall_vol} | "
-                    f"PriceDist%: {old_price_dist} ➔ {new_price_dist}"
-                )
-                
-                self.current_regime = new_regime
-
             if not self.dry_run:
                 self.current_params = new_params
-
-            self.last_metrics = {
-                "avg_vol": avg_vol,
-                "std_vol": std_vol,
-                "vol_ratio": vol_ratio,
-                "regime": self.current_regime
-            }
-
+            
+            # Логируем смену режима
+            logger.warning(
+                f"🔄 [REGIME SHIFT] {old_regime.upper()} ➔ {new_regime.upper()} | "
+                f"EMA_VolRatio: {smoothed_vol_ratio:.2f} | AvgVol: {avg_vol:.1f} | "
+                f"Подтверждено за {HYSTERESIS_THRESHOLD} свечей"
+            )
+        
+        # 6. Сохраняем метрики для отладки
+        self.last_metrics = {
+            "vol_ratio": vol_ratio,
+            "ema_vol_ratio": smoothed_vol_ratio,
+            "avg_vol": avg_vol,
+            "current_regime": self.current_regime,
+            "pending_regime": self._pending_regime,
+            "regime_counter": self._regime_counter
+        }
+        
+        return self.current_params
     async def get_active_params(self) -> Dict[str, Any]:
         """
         Возвращает текущие активные параметры (для AdaptiveStrategy).

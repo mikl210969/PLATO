@@ -37,27 +37,32 @@
       "calm": {
         "vol_ratio_max": 0.7,
         "overrides": {
-          "min_confidence": 0.7,
-          "price_distance_pct": 0.3
+          "min_confidence": 0.75,
+          "price_distance_pct": 0.3,
+          "bypass_filters": false
         }
       },
       "normal": {
         "vol_ratio_max": 2.0,
         "overrides": {
           "min_confidence": 0.6,
-          "price_distance_pct": 0.5
+          "price_distance_pct": 0.5,
+          "bypass_filters": false
         }
       },
       "volatile": {
         "vol_ratio_max": 5.0,
         "overrides": {
           "min_confidence": 0.8,
-          "price_distance_pct": 0.8
+          "price_distance_pct": 0.8,
+          "bypass_filters": false
         }
       },
       "impulsive": {
         "vol_ratio_max": 999.0,
         "overrides": {
+          "min_confidence": 0.95,
+          "price_distance_pct": 1.5,
           "bypass_filters": false
         }
       }
@@ -106,17 +111,17 @@
   "breakout": {
     "enabled": true,
     "log_input_stream": false,
-    "force_test_signal": false,   
+    "force_test_signal": false,
     "test_signal_interval": 60,
     "fixed_lot_size": 7.0,
-    "min_eaten_pct": 0.70,
-    "min_wall_age_sec": 30,
-    "max_wall_exposure_pct": 0.15,
-    "min_wall_updates": 30,
-    "max_wall_cv": 0.15,
+    "min_eaten_pct": 0.50,
+    "min_wall_age_sec": 15,
+    "max_wall_exposure_pct": 0.20,
+    "min_wall_updates": 15,
+    "max_wall_cv": 0.30,
     "bypass_filters": false,
     "min_confidence": 0.6,
-    "delta_spike_ratio": 3.0,
+    "delta_spike_ratio": 2.0,
     "cooldown_sec": 60
   }
 }
