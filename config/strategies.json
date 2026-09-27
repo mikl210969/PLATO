@@ -87,7 +87,7 @@
     "fixed_tp2_distance": 0.50,
     "bypass_filters": false,
     "min_confidence": 0.6,
-    "price_distance_pct": 0.5,
+    "price_distance_pct": 0.8,
     "cooldown_sec": 30
   },
   "absorption": {
@@ -106,7 +106,7 @@
     "cooldown_sec": 30,
     "min_wall_volume": 15.0,
     "min_confidence": 0.5,
-    "price_distance_pct": 0.5
+    "price_distance_pct": 0.8
   },
   "breakout": {
     "enabled": true,
