@@ -56,13 +56,8 @@ class WallFadeStrategyV3(AdaptiveStrategy):
             "fixed_tp2_distance": self.fixed_tp2_distance,
         }
         
-        print(f" [DEBUG INIT] WallFadeV3: force_test_signal={self._fallback_params['force_test_signal']}, min_conf={self._fallback_params['min_confidence']}")
+        print(f" [DEBUG INIT] WallFadeV3: force_test_signal={self._fallback_params['force_test_signal']}, min_conf={self._fallback_params['min_confidence']}", flush=True)
         self._last_test_signal_time = 0.0
-        
-        # 🔥 НОВОЕ: Счётчики причин отказов
-        self._reject_counters = defaultdict(int)
-        self._last_reject_log_time = 0.0
-        self._reject_log_interval = 30.0  # Печатаем сводку раз в 30 секунд
 
     def subscribe_to_events(self, event_bus):
         """Заглушка для совместимости."""
@@ -106,8 +101,7 @@ class WallFadeStrategyV3(AdaptiveStrategy):
         # ========================================================================
         features = context.get('features')
         if not features or not features.is_fresh(now):
-            self._reject_counters['fresh_data'] += 1
-            self._maybe_log_rejects(now)
+            print(f"[WallFadeV3] REJECT: stale features (exists: {features is not None})", flush=True)
             return None
 
         params = await self.get_params()
@@ -123,12 +117,11 @@ class WallFadeStrategyV3(AdaptiveStrategy):
         
         market_regime = context.get('market_regime', 'NORMAL')
         if not params.get('bypass_filters', False) and market_regime == 'IMPULSIVE':
-            self._reject_counters['impulsive_regime'] += 1
-            self._maybe_log_rejects(now)
+            print(f"🔍 [WallFadeV3] ОТКАЗ: impulsive regime", flush=True)
             return None
 
         # ========================================================================
-        # 3. ПОИСК УСЛОВИЙ ДЛЯ ФЕЙДА
+        # 3. ПОИСК УСЛОВИЙ ДЛЯ ФЕЙДА (С ДИАГНОСТИКОЙ)
         # ========================================================================
         best_signal = None
         best_confidence = 0.0
@@ -136,25 +129,28 @@ class WallFadeStrategyV3(AdaptiveStrategy):
         min_conf = params.get('min_confidence', 0.6)
         price_dist = params.get('price_distance_pct', 0.005)
 
+        print(f"🔍 [WallFadeV3] Проверка: bid={len(walls_bid)} ask={len(walls_ask)} price={current_price:.2f}", flush=True)
+
         # --- ПРОВЕРКА НА LONG (Фейд от Бид-стены) ---
         for wall in walls_bid:
-            if wall.get('confidence', 0) < min_conf:
-                self._reject_counters['long_confidence_low'] += 1
+            conf = wall.get('confidence', 0)
+            dist_pct = (current_price - wall['price']) / current_price
+            
+            print(f"🔍 [WallFade LONG] price={wall['price']:.2f} dist={dist_pct*100:+.2f}% conf={conf:.2f} imb={imbalance:+.2f}", flush=True)
+            
+            if conf < min_conf:
+                print(f"   ❌ LONG отказ: conf {conf:.2f} < min {min_conf}", flush=True)
                 continue
             
-            dist_pct = (current_price - wall['price']) / current_price
             if dist_pct < 0 or dist_pct > price_dist:
-                if dist_pct < 0:
-                    self._reject_counters['long_price_passed_wall'] += 1
-                else:
-                    self._reject_counters['long_wall_too_far'] += 1
+                reason = "цена прошла стену" if dist_pct < 0 else f"стена слишком далеко {dist_pct*100:.2f}% > {price_dist*100:.2f}%"
+                print(f"   ❌ LONG отказ: {reason}", flush=True)
                 continue
                 
             if imbalance < 0.1:
-                self._reject_counters['long_imbalance_weak'] += 1
+                print(f"   ❌ LONG отказ: imbalance {imbalance:.2f} < 0.1", flush=True)
                 continue
 
-            conf = wall['confidence']
             if conf > best_confidence:
                 best_confidence = conf
                 best_signal = {
@@ -162,26 +158,28 @@ class WallFadeStrategyV3(AdaptiveStrategy):
                     'sl_anchor': wall['price'], 
                     'edge_price': wall['price']
                 }
+                print(f"   ✅ LONG кандидат принят!", flush=True)
 
         # --- ПРОВЕРКА НА SHORT (Фейд от Аск-стены) ---
         for wall in walls_ask:
-            if wall.get('confidence', 0) < min_conf:
-                self._reject_counters['short_confidence_low'] += 1
+            conf = wall.get('confidence', 0)
+            dist_pct = (wall['price'] - current_price) / current_price
+            
+            print(f"🔍 [WallFade SHORT] price={wall['price']:.2f} dist={dist_pct*100:+.2f}% conf={conf:.2f} imb={imbalance:+.2f}", flush=True)
+            
+            if conf < min_conf:
+                print(f"   ❌ SHORT отказ: conf {conf:.2f} < min {min_conf}", flush=True)
                 continue
             
-            dist_pct = (wall['price'] - current_price) / current_price
             if dist_pct < 0 or dist_pct > price_dist:
-                if dist_pct < 0:
-                    self._reject_counters['short_price_passed_wall'] += 1
-                else:
-                    self._reject_counters['short_wall_too_far'] += 1
+                reason = "цена прошла стену" if dist_pct < 0 else f"стена слишком далеко {dist_pct*100:.2f}% > {price_dist*100:.2f}%"
+                print(f"   ❌ SHORT отказ: {reason}", flush=True)
                 continue
                 
             if imbalance > -0.1:
-                self._reject_counters['short_imbalance_weak'] += 1
+                print(f"   ❌ SHORT отказ: imbalance {imbalance:.2f} > -0.1", flush=True)
                 continue
 
-            conf = wall['confidence']
             if conf > best_confidence:
                 best_confidence = conf
                 best_signal = {
@@ -189,13 +187,13 @@ class WallFadeStrategyV3(AdaptiveStrategy):
                     'sl_anchor': wall['price'], 
                     'edge_price': wall['price']
                 }
+                print(f"   ✅ SHORT кандидат принят!", flush=True)
 
         # ========================================================================
         # 4. ФИНАЛЬНАЯ ВАЛИДАЦИЯ И РАСЧЕТ УРОВНЕЙ
         # ========================================================================
         if not best_signal:
-            self._reject_counters['no_valid_wall'] += 1
-            self._maybe_log_rejects(now)
+            print(f"🔍 [WallFadeV3] ИТОГО: ни одна стена не прошла фильтры", flush=True)
             return None
 
         side = best_signal['side']
@@ -238,29 +236,3 @@ class WallFadeStrategyV3(AdaptiveStrategy):
                 "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price
             }
         )
-
-    def _maybe_log_rejects(self, now: float) -> None:
-        """Периодически печатает сводку причин отказов."""
-        if now - self._last_reject_log_time < self._reject_log_interval:
-            return
-        
-        self._last_reject_log_time = now
-        
-        if not self._reject_counters:
-            return
-        
-        # Сортируем по убыванию количества отказов
-        sorted_reasons = sorted(self._reject_counters.items(), key=lambda x: x[1], reverse=True)
-        total = sum(self._reject_counters.values())
-        
-        # Формируем строку отчёта
-        parts = [f"{reason}:{count}" for reason, count in sorted_reasons[:5]]  # Топ-5 причин
-        report = " | ".join(parts)
-        
-        logger.info(
-            f"🔍 [WallFadeV3] ОТКАЗЫ за {self._reject_log_interval:.0f}с: "
-            f"всего={total} | {report}"
-        )
-        
-        # Сбрасываем счётчики
-        self._reject_counters.clear()

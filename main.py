@@ -968,7 +968,8 @@ class Platform:
                     'imbalance': self.analytics.imbalance.get_metrics(),
                     'trend': self.analytics.trend.get_context(),
                     'btc_delta_context': self.delta_contexts.get("BTCUSDT", {}),
-                    'sol_delta_context': self.delta_contexts.get("SOLUSDT", {})
+                    'sol_delta_context': self.delta_contexts.get("SOLUSDT", {}),
+                    'features': self.features.get(self.symbol)  # 🔥 ДОБАВЛЕНО!
                 }
 
                 signals = await self._generate_signals(context)

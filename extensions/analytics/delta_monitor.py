@@ -18,7 +18,7 @@ class DeltaMonitor:
         self.publish_interval = publish_interval
         
         # 🔥 Пороги для определения режима рынка
-        self.impulsive_threshold = 100.0  # |delta| > 100 = импульс
+        self.impulsive_threshold = 500.0  # |delta| > 100 = импульс
         self.flat_threshold = 5.0         # |delta| < 5 + FLAT тренд = флэт
         
         # Состояние текущей формирующейся свечи
