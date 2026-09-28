@@ -359,9 +359,14 @@ class BinanceWsAdapter:
         logger.info(f"🔄 Connecting to SPOT aggTrade: {spot_url}")
 
         while getattr(self, "_running", True):
+            session_start = time.time()
+            messages_processed = 0
             try:
                 async with websockets.connect(
-                    spot_url, ping_interval=20, ping_timeout=20
+                    spot_url,
+                    ping_interval=60,    # 🔥 ПАТЧ: пинг раз в минуту (было 20)
+                    ping_timeout=30,     # 🔥 ПАТЧ: ждём pong 30 сек (было 20)
+                    close_timeout=10     # 🔥 ПАТЧ: добавлено
                 ) as ws:
                     logger.info(f"✅ Spot aggTrade WS connected for {symbol}")
                     async for message in ws:
@@ -377,10 +382,29 @@ class BinanceWsAdapter:
                             }
                             if callback:
                                 await callback("MARKET_TRADE", normalized_data)
+                            messages_processed += 1
                         except Exception as e:
                             logger.error(f"Error processing spot trade: {e}")
+            except websockets.ConnectionClosed as e:
+                # 🔥 ПАТЧ: детальная диагностика обрыва
+                session_dur = time.time() - session_start
+                logger.warning(
+                    f"⚠️  Spot aggTrade WS ({symbol}) lost | "
+                    f"close_code={e.code} | reason={e.reason!r} | "
+                    f"session={session_dur:.0f}s | "
+                    f"messages={messages_processed} | "
+                    f"Reconnect in 5s..."
+                )
+                await asyncio.sleep(5)
             except Exception as e:
-                logger.warning(f"⚠️  Spot aggTrade WS lost. Reconnect in 5s...")
+                session_dur = time.time() - session_start
+                logger.warning(
+                    f"⚠️  Spot aggTrade WS ({symbol}) lost | "
+                    f"error={type(e).__name__}: {e!r} | "
+                    f"session={session_dur:.0f}s | "
+                    f"messages={messages_processed} | "
+                    f"Reconnect in 5s..."
+                )
                 await asyncio.sleep(5)
 
     async def subscribe_spot_depth(self, symbol: str, callback):
@@ -391,9 +415,14 @@ class BinanceWsAdapter:
         logger.info(f"🔄 Connecting to SPOT depth (100ms): {spot_depth_url}")
 
         while getattr(self, "_running", True):
+            session_start = time.time()
+            messages_processed = 0
             try:
                 async with websockets.connect(
-                    spot_depth_url, ping_interval=20, ping_timeout=20
+                    spot_depth_url,
+                    ping_interval=60,    # 🔥 ПАТЧ: пинг раз в минуту (было 20)
+                    ping_timeout=30,     # 🔥 ПАТЧ: ждём pong 30 сек (было 20)
+                    close_timeout=10     # 🔥 ПАТЧ: добавлено
                 ) as ws:
                     logger.info(f"✅ Spot Depth WS connected for {symbol}")
                     async for message in ws:
@@ -408,10 +437,29 @@ class BinanceWsAdapter:
                             }
                             if callback:
                                 await callback("SPOT_ORDERBOOK_UPDATE", normalized_data)
+                            messages_processed += 1
                         except Exception as e:
                             logger.error(f"Error processing spot depth: {e}")
+            except websockets.ConnectionClosed as e:
+                # 🔥 ПАТЧ: детальная диагностика обрыва
+                session_dur = time.time() - session_start
+                logger.warning(
+                    f"⚠️  Spot Depth WS ({symbol}) lost | "
+                    f"close_code={e.code} | reason={e.reason!r} | "
+                    f"session={session_dur:.0f}s | "
+                    f"messages={messages_processed} | "
+                    f"Reconnect in 3s..."
+                )
+                await asyncio.sleep(3)
             except Exception as e:
-                logger.warning(f"⚠️  Spot Depth WS lost. Reconnect in 3s...")
+                session_dur = time.time() - session_start
+                logger.warning(
+                    f"⚠️  Spot Depth WS ({symbol}) lost | "
+                    f"error={type(e).__name__}: {e!r} | "
+                    f"session={session_dur:.0f}s | "
+                    f"messages={messages_processed} | "
+                    f"Reconnect in 3s..."
+                )
                 await asyncio.sleep(3)
 
     # ──────────────────────────────────────────────────────────────

@@ -27,6 +27,15 @@ class DeltaMonitor:
             "volume": 0.0, "delta": 0.0, "start_time": 0.0
         }
         
+        # 🔥 ПАТЧ: Последняя известная цена (сохраняется между свечами)
+        self._last_known_price = 0.0
+        
+        # 🔥 ПАТЧ: Время последней сделки (для проверки свежести)
+        self._last_trade_ts = 0.0
+        
+        # Порог "несвежести": если сделок не было больше этого времени — данные устарели
+        self._staleness_threshold_sec = 30.0
+        
         # История завершенных свечей (храним последние 24 свечи = 2 часа для 5м ТФ)
         self._history: deque = deque(maxlen=24)
         
@@ -54,8 +63,6 @@ class DeltaMonitor:
 
     async def _on_trade(self, event):
         """Обработка нормализованной сделки."""
-        # print(f"👂 [DeltaMonitor {self.symbol}] Received TRADE_NORMALIZED event")
-        
         try:
             data = event.payload if hasattr(event, 'payload') else event
             price = float(data.get('price', 0))
@@ -64,6 +71,10 @@ class DeltaMonitor:
             
             if price <= 0 or qty <= 0:
                 return
+
+            # 🔥 ПАТЧ: Обновляем последнюю известную цену и время сделки
+            self._last_known_price = price
+            self._last_trade_ts = time.time()
 
             # Инициализация первой свечи
             if self._current_bar["open"] == 0.0:
@@ -171,6 +182,8 @@ class DeltaMonitor:
                                 symbol=self.symbol
                             )
                         
+                        # 🔥 ПАТЧ: НЕ сбрасываем _last_known_price!
+                        # Цена сохраняется между свечами, чтобы избежать 0.0
                         self._current_bar = {
                             "open": 0.0, "high": 0.0, "low": 999999.0, "close": 0.0,
                             "volume": 0.0, "delta": 0.0, "start_time": now
@@ -193,12 +206,41 @@ class DeltaMonitor:
                         print(f"🔄 [{self.symbol}] РЕЖИМ РЫНКА СМЕНИЛСЯ: {self._last_regime} → {regime} (delta: {self._current_bar['delta']:.2f}, trend: {trend})")
                         self._last_regime = regime
 
+                    # 🔥 ПАТЧ: Выбираем цену из трёх источников:
+                    #   1. Текущая свеча (если открыта)
+                    #   2. Последняя известная цена (fallback)
+                    #   3. Последняя закрытая свеча (если вообще ничего нет)
+                    current_price = 0.0
+                    if self._current_bar["close"] > 0:
+                        current_price = self._current_bar["close"]
+                    elif self._last_known_price > 0:
+                        current_price = self._last_known_price
+                    elif len(self._history) > 0:
+                        current_price = self._history[-1]["close"]
+
+                    # 🔥 ПАТЧ: Проверяем свежесть данных
+                    age_sec = (now - self._last_trade_ts) if self._last_trade_ts > 0 else 999999
+                    is_fresh = age_sec < self._staleness_threshold_sec
+
+                    # 🔥 ПАТЧ: Периодически логируем устаревшие данные
+                    if not is_fresh and age_sec < 60:  # только первое предупреждение
+                        logger.warning(
+                            f"⚠️  [{self.symbol}] Данные устарели: "
+                            f"last_trade={age_sec:.0f}s ago | "
+                            f"price={current_price:.2f} | "
+                            f"используем last_known_price"
+                        )
+
                     context = {
                         "trend": trend,
                         "delta_strength": round(self._current_bar["delta"], 3),
-                        "current_price": round(self._current_bar["close"], 2) if self._current_bar["close"] > 0 else 0.0,
+                        "current_price": round(current_price, 2),  # 🔥 ПАТЧ: никогда не 0.0
                         "timeframe": f"{self.timeframe_sec}s",
-                        "regime": regime  # 🔥 ИСПРАВЛЕНО: передаем режим стратегиям
+                        "regime": regime,
+                        # 🔥 ПАТЧ: Новые поля для диагностики и свежести
+                        "last_trade_ts": self._last_trade_ts,
+                        "data_age_sec": round(age_sec, 1),
+                        "fresh": is_fresh,
                     }
                     
                     event_type = "BTC_CONTEXT_UPDATED" if self.symbol == "BTCUSDT" else f"CONTEXT_UPDATED_{self.symbol}"
