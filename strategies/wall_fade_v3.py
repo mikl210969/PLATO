@@ -3,8 +3,9 @@ import time
 import logging
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+from collections import defaultdict
 
-from strategies.adaptive_strategy import AdaptiveStrategy  # 🔥 V13 ADAPTIVE: Импорт базового класса
+from strategies.adaptive_strategy import AdaptiveStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -14,29 +15,28 @@ class EnrichedSignal:
     """Унифицированная структура сигнала для всех стратегий v2."""
     signal_id: str
     symbol: str
-    side: str  # 'long' или 'short'
+    side: str
     entry_price: float
     strategy: str
     confidence: float
-    edge_price: float  # Цена, на которой основано решение (например, цена стены)
+    edge_price: float
     rr_ratio: float
     atr: float
     volatility_mode: str
     basis: float
-    order_type: str  # 'limit' или 'market'
+    order_type: str
     execution_params: Dict[str, Any]
 
 
-class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследование
-    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5, context_manager=None):  # 🔥 V13 ADAPTIVE: Добавлен context_manager
-        super().__init__(context_manager)  # 🔥 V13 ADAPTIVE: Инициализация базового класса
+class WallFadeStrategyV3(AdaptiveStrategy):
+    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5, context_manager=None):
+        super().__init__(context_manager)
         
         self.config = config
         self.atr_value = atr_value
         self._last_signal_time = 0.0
         self.cooldown_sec = config.get('cooldown_sec', 30.0)
         
-        # 🔥 Тестовый режим и отладка
         self.force_test_signal = config.get('force_test_signal', False)
         self.test_signal_interval = config.get('test_signal_interval', 60)
         self.fixed_lot_size = config.get('fixed_lot_size', 7.0)
@@ -44,11 +44,10 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
         self.fixed_tp1_distance = config.get('fixed_tp1_distance', 0.25)
         self.fixed_tp2_distance = config.get('fixed_tp2_distance', 0.50)
         
-        # 🔥 V13 ADAPTIVE: Fallback параметры (используются, если context_manager еще не готов)
         self._fallback_params = {
             "bypass_filters": config.get('bypass_filters', False),
             "min_confidence": config.get('min_confidence', 0.6),
-            "price_distance_pct": config.get('price_distance_pct', 0.5) / 100.0,  # 0.5%
+            "price_distance_pct": config.get('price_distance_pct', 0.5) / 100.0,
             "force_test_signal": self.force_test_signal,
             "test_signal_interval": self.test_signal_interval,
             "fixed_lot_size": self.fixed_lot_size,
@@ -59,12 +58,17 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
         
         print(f" [DEBUG INIT] WallFadeV3: force_test_signal={self._fallback_params['force_test_signal']}, min_conf={self._fallback_params['min_confidence']}")
         self._last_test_signal_time = 0.0
+        
+        # 🔥 НОВОЕ: Счётчики причин отказов
+        self._reject_counters = defaultdict(int)
+        self._last_reject_log_time = 0.0
+        self._reject_log_interval = 30.0  # Печатаем сводку раз в 30 секунд
 
     def subscribe_to_events(self, event_bus):
-        """Заглушка для совместимости. Новая стратегия читает состояние из context['features']."""
+        """Заглушка для совместимости."""
         pass
 
-    async def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:  # 🔥 V13 ADAPTIVE: Добавлен async
+    async def generate_signal(self, context: Dict[str, Any]) -> Optional[EnrichedSignal]:
         now = time.time()
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
@@ -102,9 +106,10 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
         # ========================================================================
         features = context.get('features')
         if not features or not features.is_fresh(now):
+            self._reject_counters['fresh_data'] += 1
+            self._maybe_log_rejects(now)
             return None
 
-        # 🔥 V13 ADAPTIVE: Получаем адаптивные параметры из VolumeContextManager
         params = await self.get_params()
         if not params:
             params = self._fallback_params
@@ -116,10 +121,11 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
         walls_ask = snap['walls'].get('walls_ask', [])
         imbalance = snap['imbalance']['imbalance']
         
-        #  V13 ADAPTIVE: Проверка режима рынка с использованием адаптивных параметров
         market_regime = context.get('market_regime', 'NORMAL')
         if not params.get('bypass_filters', False) and market_regime == 'IMPULSIVE':
-            return None  # Пропускаем фейды в сильном импульсе (их сметут)
+            self._reject_counters['impulsive_regime'] += 1
+            self._maybe_log_rejects(now)
+            return None
 
         # ========================================================================
         # 3. ПОИСК УСЛОВИЙ ДЛЯ ФЕЙДА
@@ -127,22 +133,25 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
         best_signal = None
         best_confidence = 0.0
         
-        #  V13 ADAPTIVE: Читаем пороги из адаптивных параметров
         min_conf = params.get('min_confidence', 0.6)
         price_dist = params.get('price_distance_pct', 0.005)
 
         # --- ПРОВЕРКА НА LONG (Фейд от Бид-стены) ---
         for wall in walls_bid:
-            if wall.get('confidence', 0) < min_conf:  # 🔥 V13 ADAPTIVE
+            if wall.get('confidence', 0) < min_conf:
+                self._reject_counters['long_confidence_low'] += 1
                 continue
             
-            # Стена должна быть близко к текущей цене (не дальше price_distance_pct)
             dist_pct = (current_price - wall['price']) / current_price
-            if dist_pct < 0 or dist_pct > price_dist:  # 🔥 V13 ADAPTIVE
+            if dist_pct < 0 or dist_pct > price_dist:
+                if dist_pct < 0:
+                    self._reject_counters['long_price_passed_wall'] += 1
+                else:
+                    self._reject_counters['long_wall_too_far'] += 1
                 continue
                 
-            # Стакан должен подтверждать: бид-сторона тяжелее
             if imbalance < 0.1:
+                self._reject_counters['long_imbalance_weak'] += 1
                 continue
 
             conf = wall['confidence']
@@ -156,16 +165,20 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
 
         # --- ПРОВЕРКА НА SHORT (Фейд от Аск-стены) ---
         for wall in walls_ask:
-            if wall.get('confidence', 0) < min_conf:  # 🔥 V13 ADAPTIVE
+            if wall.get('confidence', 0) < min_conf:
+                self._reject_counters['short_confidence_low'] += 1
                 continue
             
-            # Стена должна быть близко к текущей цене
             dist_pct = (wall['price'] - current_price) / current_price
-            if dist_pct < 0 or dist_pct > price_dist:  # 🔥 V13 ADAPTIVE
+            if dist_pct < 0 or dist_pct > price_dist:
+                if dist_pct < 0:
+                    self._reject_counters['short_price_passed_wall'] += 1
+                else:
+                    self._reject_counters['short_wall_too_far'] += 1
                 continue
                 
-            # Стакан должен подтверждать: аск-сторона тяжелее
             if imbalance > -0.1:
+                self._reject_counters['short_imbalance_weak'] += 1
                 continue
 
             conf = wall['confidence']
@@ -181,13 +194,14 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
         # 4. ФИНАЛЬНАЯ ВАЛИДАЦИЯ И РАСЧЕТ УРОВНЕЙ
         # ========================================================================
         if not best_signal:
+            self._reject_counters['no_valid_wall'] += 1
+            self._maybe_log_rejects(now)
             return None
 
         side = best_signal['side']
         entry_price = round(current_price, 2)
         sl_anchor = best_signal['sl_anchor']
         
-        # Расчет SL: якорь (стена) +/- буфер ATR (чтобы не выбило случайной тенью)
         atr_buffer = atr * 0.3
         if side == 'long':
             sl_price = round(sl_anchor - atr_buffer, 2)
@@ -198,7 +212,6 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
         if r_value == 0:
             r_value = atr 
             
-        # Фейды обычно берут меньший мувинг, чем трендовые стратегии. R:R = 1.5
         rr = 1.5
         tp1_price = round(entry_price + (rr * r_value) if side == 'long' else entry_price - (rr * r_value), 2)
         tp2_price = round(entry_price + (rr * 2.0 * r_value) if side == 'long' else entry_price - (rr * 2.0 * r_value), 2)
@@ -222,8 +235,32 @@ class WallFadeStrategyV3(AdaptiveStrategy):  # 🔥 V13 ADAPTIVE: Наследо
             order_type="limit",
             execution_params={
                 "quantity": self.fixed_lot_size,
-                "sl_price": sl_price,
-                "tp1_price": tp1_price,
-                "tp2_price": tp2_price
+                "sl_price": sl_price, "tp1_price": tp1_price, "tp2_price": tp2_price
             }
         )
+
+    def _maybe_log_rejects(self, now: float) -> None:
+        """Периодически печатает сводку причин отказов."""
+        if now - self._last_reject_log_time < self._reject_log_interval:
+            return
+        
+        self._last_reject_log_time = now
+        
+        if not self._reject_counters:
+            return
+        
+        # Сортируем по убыванию количества отказов
+        sorted_reasons = sorted(self._reject_counters.items(), key=lambda x: x[1], reverse=True)
+        total = sum(self._reject_counters.values())
+        
+        # Формируем строку отчёта
+        parts = [f"{reason}:{count}" for reason, count in sorted_reasons[:5]]  # Топ-5 причин
+        report = " | ".join(parts)
+        
+        logger.info(
+            f"🔍 [WallFadeV3] ОТКАЗЫ за {self._reject_log_interval:.0f}с: "
+            f"всего={total} | {report}"
+        )
+        
+        # Сбрасываем счётчики
+        self._reject_counters.clear()
