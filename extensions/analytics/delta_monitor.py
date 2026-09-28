@@ -34,7 +34,7 @@ class DeltaMonitor:
         self._last_trade_ts = 0.0
         
         # Порог "несвежести": если сделок не было больше этого времени — данные устарели
-        self._staleness_threshold_sec = 30.0
+        self._staleness_threshold_sec = 120.0
         
         # История завершенных свечей (храним последние 24 свечи = 2 часа для 5м ТФ)
         self._history: deque = deque(maxlen=24)

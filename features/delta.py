@@ -41,6 +41,7 @@ class DeltaFeature(Feature):
             self._log.info(f"🔄 [DELTA] {self.symbol}: сброс cum_delta (новая сессия UTC)")
 
     def on_trade(self, price: float, qty: float, is_buy: bool, ts: float) -> None:
+        self._last_update_ts = ts
         signed = qty if is_buy else -qty
         self._tape.append((ts, signed))
         self._last_update_ts = ts

@@ -20,6 +20,7 @@ class ImbalanceFeature(Feature):
         }
 
     def on_orderbook(self, bids: List[Tuple[float, float]], asks: List[Tuple[float, float]], ts: float) -> None:
+        self._last_update_ts = ts
         """
         bids/asks: список кортежей [(price, qty), ...]
         """

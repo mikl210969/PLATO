@@ -68,8 +68,8 @@ class FeatureSet:
 
     def is_fresh(self, now: float) -> bool:
         fc = self._fcfg.get("freshness", {})
-        ok_delta = self.delta.is_fresh(now, float(fc.get("delta_max_age_sec", 5)))
-        ok_imb = self.imbalance.is_fresh(now, float(fc.get("orderbook_max_age_sec", 3)))
+        ok_delta = self.delta.is_fresh(now, float(fc.get("delta_max_age_sec", 60)))
+        ok_imb = self.imbalance.is_fresh(now, float(fc.get("orderbook_max_age_sec", 15)))
         return bool(ok_delta and ok_imb)
 
     def log_event(self, text: str) -> None:
