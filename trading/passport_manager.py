@@ -203,15 +203,25 @@ class PassportManager:
     
     def _handle_order_filled(self, passport, payload: Dict):
         passport.status = "OPEN"
-        passport.position_size = abs(payload.get("quantity", passport.position_size))
-        # 🔥 ZERO-GUARD: .get(key, default) возвращает 0, если ключ ЕСТЬ и равен 0
-        _px = float(payload.get("price", 0) or 0)
+        passport.position_size = abs(float(payload.get("quantity", passport.position_size) or 0))
+        
+        # 🔥 ИСПРАВЛЕНИЕ БАГА: Надежное извлечение цены исполнения с fallback
+        fill_price = payload.get("price") or payload.get("avg_fill_price")
+        
+        try:
+            _px = float(fill_price) if fill_price else 0.0
+        except (ValueError, TypeError):
+            _px = 0.0
+            
         if _px > 0:
             passport.position_entry_price = _px
+        elif not passport.position_entry_price or float(passport.position_entry_price) == 0.0:
+            # 🔥 FALLBACK: Если биржа не прислала корректную цену, берем цену сигнала
+            passport.position_entry_price = float(passport.entry_price or 0.0)
+            self.logger.warning(f"⚠️ ORDER_FILLED: Нет корректной цены исполнения в payload. Fallback к цене сигнала: {passport.position_entry_price}")
         
-        # 🔥 ДОБАВИТЬ ЭТИ ДВЕ СТРОКИ ЗДЕСЬ:
         passport.calculate_projected_pnls()
-        self._save(passport)  # Сохраняем сразу после расчета
+        self._save(passport)
     
     def _handle_order_cancelled(self, passport, payload: Dict):
         passport.status = "CANCELLED"
@@ -240,6 +250,11 @@ class PassportManager:
         if passport.status == "CLOSED":
             return
         
+        # 🔥 STATE REPAIR: Гарантируем, что цена входа не равна 0 перед расчетом PnL
+        if not passport.position_entry_price or float(passport.position_entry_price) == 0.0:
+            passport.position_entry_price = float(passport.entry_price or 0.0)
+            self.logger.warning(f"🔧 STATE REPAIR: Восстановлен position_entry_price из entry_price ({passport.position_entry_price}) для {passport.passport_id}")
+
         passport.sl_activated = True
 
         # 🔥 1. Факт закрытого количества берём из payload (результат market-ордера)
@@ -313,6 +328,12 @@ class PassportManager:
         # 🔥 ИДЕМПОТЕНТНОСТЬ: повторное событие по уже закрытому паспорту не пересчитывает деньги
         if passport.status == "CLOSED":
             return
+
+        # 🔥 STATE REPAIR: Гарантируем, что цена входа не равна 0 перед расчетом PnL
+        if not passport.position_entry_price or float(passport.position_entry_price) == 0.0:
+            passport.position_entry_price = float(passport.entry_price or 0.0)
+            self.logger.warning(f"🔧 STATE REPAIR: Восстановлен position_entry_price из entry_price ({passport.position_entry_price}) для {passport.passport_id}")
+
         passport.tp1_activated = True
         closed_qty = abs(payload.get("closed_qty", 0))
         
@@ -359,6 +380,12 @@ class PassportManager:
         # 🔥 ИДЕМПОТЕНТНОСТЬ: повторное событие по уже закрытому паспорту не пересчитывает деньги
         if passport.status == "CLOSED":
             return
+
+        # 🔥 STATE REPAIR: Гарантируем, что цена входа не равна 0 перед расчетом PnL
+        if not passport.position_entry_price or float(passport.position_entry_price) == 0.0:
+            passport.position_entry_price = float(passport.entry_price or 0.0)
+            self.logger.warning(f"🔧 STATE REPAIR: Восстановлен position_entry_price из entry_price ({passport.position_entry_price}) для {passport.passport_id}")
+  
         passport.tp1_activated = True
         passport.tp2_activated = True
         
@@ -447,13 +474,23 @@ class PassportManager:
     def _handle_recovery_open(self, passport, payload: Dict):
         """Восстановление позиции при старте или дрейфе."""
         passport.status = "OPEN"
-        passport.position_size = abs(payload.get("position_size", passport.position_size))
-        passport.position_entry_price = payload.get("entry_price", passport.entry_price)
+        passport.position_size = abs(float(payload.get("position_size", passport.position_size) or 0))
         
-        # При восстановлении считаем проектный PnL
+        # 🔥 ИСПРАВЛЕНИЕ: Надежное восстановление цены входа
+        rec_price = payload.get("entry_price") or payload.get("avg_price")
+        try:
+            _px = float(rec_price) if rec_price else 0.0
+        except (ValueError, TypeError):
+            _px = 0.0
+            
+        if _px > 0:
+            passport.position_entry_price = _px
+        elif not passport.position_entry_price or float(passport.position_entry_price) == 0.0:
+            passport.position_entry_price = float(passport.entry_price or 0.0)
+            self.logger.warning(f"⚠️ RECOVERY_OPEN: Нет корректной цены в payload. Fallback к цене сигнала: {passport.position_entry_price}")
+        
         passport.calculate_projected_pnls()
         
-        # Активируем Guard только если платформа не в состоянии слепоты
         if getattr(passport, 'platform_health', 'HEALTHY') != 'BLIND':
             passport.guard_status = "active"
         
