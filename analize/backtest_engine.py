@@ -1,13 +1,15 @@
 """
-PLATO Backtest Engine v5.0
-Таймфрейм: 1 минута
-Стратегия: BreakoutV1 с фильтрами (Лента + Стакан + Дельта + 2 Big Orders)
-Выходы: TP1 1.0% (50%), SL 1.0% → BE, TP2 2.0%
+PLATO Backtest Engine v8.3 (Absorption + Big Orders Filter)
+Фильтрация ленты: только крупные ордера > 30 SOL
+Логика: Разворот дельты + ограничение HVN
 """
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import itertools
+import time
+import sys
 
 # ==============================================================================
 # 1. КОНФИГУРАЦИЯ
@@ -15,309 +17,294 @@ from pathlib import Path
 DATA_DIR = Path(r"C:\Users\m.ongudushev\YandexDisk\Data")
 SYMBOL = "SOLUSDT"
 DATES_TO_TEST = ["2026-09-28", "2026-09-29"]
-
-STRATEGY_PARAMS = {
-    "breakout_v1_1m": {
-        # Параметры импульса (1 минута)
-        "min_impulse_volume": 600.0,    # Агрессивные продажи > 600 SOL за минуту
-        "min_price_change_pct": 0.20,   # Цена упала > 0.20% за минуту
-        
-        # Стакан (Имбаланс) - последний снапшот в минуте
-        "max_ob_imbalance_short": 0.9,
-        
-        # Дельта (Инерция) - за минуту
-        "max_delta_1m_short": -400.0,   # Дельта < -400 SOL
-        
-        # Фильтр "2 больших ордера" (окно 60 сек)
-        "require_big_orders_pattern": True,
-        "big_order_threshold_sol": 30.0,
-        "required_big_orders_count": 2,
-        "big_orders_window_sec": 60,
-        
-        # BTC Context (5-минутный, как есть)
-        "btc_max_adverse_pump_pct": 0.10
-    }
-}
-
 POSITION_SIZE_USDT = 100.0
+COMMISSION_PER_TRADE = 0.0007
+
+# 🔥 ПОРОГ КРУПНОГО ОРДЕРА (как в live BreakoutV1)
+BIG_ORDER_THRESHOLD = 30.0  # SOL
 
 # ==============================================================================
 # 2. ЗАГРУЗКА ДАННЫХ
 # ==============================================================================
-def load_data(dates: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    print(f"[INFO] Загрузка данных SOL и BTC за {dates}...")
-    depth_frames, trade_frames, btc_frames = [], [], []
-    
+def load_data(dates):
+    print(f"[INFO] Загрузка спотовых данных за {dates}...")
+    depth_frames, trade_frames = [], []
     for date_str in dates:
-        for ext in ['.csv', '.xlsx', '.xls']:
+        for ext in ['.csv']:
             f = DATA_DIR / f"{SYMBOL}_depth_{date_str}{ext}"
             if f.exists():
-                df_depth = pd.read_csv(f) if ext == '.csv' else pd.read_excel(f)
+                df_depth = pd.read_csv(f)
                 df_depth['timestamp'] = pd.to_datetime(df_depth['timestamp'])
                 depth_frames.append(df_depth)
                 break
-        
-        for ext in ['.csv', '.xlsx', '.xls']:
+        for ext in ['.csv']:
             f = DATA_DIR / f"{SYMBOL}_aggTrades_{date_str}{ext}"
             if f.exists():
-                df_trade = pd.read_csv(f) if ext == '.csv' else pd.read_excel(f)
+                df_trade = pd.read_csv(f)
                 if 'datetime' in df_trade.columns:
                     df_trade['timestamp'] = pd.to_datetime(df_trade['datetime'])
                 else:
                     df_trade['timestamp'] = pd.to_datetime(df_trade['timestamp'], unit='ms')
                 trade_frames.append(df_trade)
                 break
-                
-        btc_file = DATA_DIR / f"BTCUSDT_5m_{date_str}.csv"
-        if btc_file.exists():
-            df_btc = pd.read_csv(btc_file)
-            df_btc['timestamp'] = pd.to_datetime(df_btc['timestamp'])
-            df_btc['btc_5m_change_pct'] = df_btc['close'].pct_change() * 100
-            btc_frames.append(df_btc[['timestamp', 'btc_5m_change_pct']])
-
     if not depth_frames or not trade_frames:
-        raise FileNotFoundError("Не найдены файлы данных SOL")
-        
-    df_depth_all = pd.concat(depth_frames, ignore_index=True).sort_values('timestamp')
-    df_trade_all = pd.concat(trade_frames, ignore_index=True).sort_values('timestamp')
-    
-    if btc_frames:
-        df_btc_all = pd.concat(btc_frames, ignore_index=True).sort_values('timestamp')
-        df_btc_all['btc_5m_change_pct'] = df_btc_all['btc_5m_change_pct'].fillna(0.0)
-    else:
-        raise FileNotFoundError("Не найдены файлы данных BTC")
-
-    print(f"[INFO] ВСЕГО: {len(df_depth_all)} снапшотов SOL, {len(df_trade_all)} сделок, {len(df_btc_all)} свечей BTC")
-    return df_depth_all, df_trade_all, df_btc_all
+        raise FileNotFoundError("Нет данных")
+    return (pd.concat(depth_frames).sort_values('timestamp').reset_index(drop=True),
+            pd.concat(trade_frames).sort_values('timestamp').reset_index(drop=True))
 
 # ==============================================================================
-# 3. АГРЕГАЦИЯ В 1-МИНУТНЫЕ БАРЫ
+# 3. ПРЕДВЫЧИСЛЕНИЕ ФЕЙЧЕЙ (С ФИЛЬТРОМ КРУПНЫХ ОРДЕРОВ)
 # ==============================================================================
-def aggregate_to_1m(df_depth: pd.DataFrame, df_trades: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    print("[INFO] Агрегация данных в 1-минутные бары...")
+def calculate_all_features(df_depth, df_trades):
+    print("[INFO] Предвычисление мульти-таймфреймов...")
+    df = df_depth.copy()
+    df['mid_price'] = (df['bid_p_1'] + df['ask_p_1']) / 2
+    df['high'] = df[[f'ask_p_{i}' for i in range(1, 6)]].max(axis=1)
+    df['low'] = df[[f'bid_p_{i}' for i in range(1, 6)]].min(axis=1)
     
-    # 1. Стакан: берем последний снапшот в каждой минуте
-    df_depth['minute'] = df_depth['timestamp'].dt.floor('min')
+    # ATR
+    df['prev_close'] = df['mid_price'].shift(1)
+    df['tr'] = np.maximum(df['high'] - df['low'],
+                          np.maximum(abs(df['high'] - df['prev_close']),
+                                     abs(df['low'] - df['prev_close'])))
+    df['atr'] = df['tr'].rolling(window=14).mean().fillna(0.15)
     
-    # 🔥 ИСПРАВЛЕНО: удаляем оригинальный timestamp, чтобы он не дублировался при переименовании
-    df_depth_1m = df_depth.drop(columns=['timestamp']).groupby('minute').last().reset_index()
-    df_depth_1m = df_depth_1m.rename(columns={'minute': 'timestamp'})
-    
-    # 2. Лента: агрегируем за каждую минуту
-    df_trades['minute'] = df_trades['timestamp'].dt.floor('min')
-    
+    # 🔥 ФИЛЬТРАЦИЯ КРУПНЫХ ОРДЕРОВ
+    total_trades = len(df_trades)
     df_trades['is_buy'] = df_trades['is_buyer_maker'] == False
-    df_trades['buy_vol'] = np.where(df_trades['is_buy'], df_trades['quantity'], 0.0)
-    df_trades['sell_vol'] = np.where(~df_trades['is_buy'], df_trades['quantity'], 0.0)
-    df_trades['delta'] = df_trades['buy_vol'] - df_trades['sell_vol']
     
-    df_trades_1m = df_trades.groupby('minute').agg({
-        'buy_vol': 'sum',
-        'sell_vol': 'sum',
-        'delta': 'sum'
-    }).reset_index()
-    df_trades_1m = df_trades_1m.rename(columns={'minute': 'timestamp'})
+    # Считаем дельту ТОЛЬКО от крупных ордеров (> 30 SOL)
+    big_mask = df_trades['quantity'] > BIG_ORDER_THRESHOLD
+    big_trades = df_trades[big_mask].copy()
     
-    print(f"[INFO] Агрегация завершена: {len(df_depth_1m)} минутных баров стакана, {len(df_trades_1m)} минутных баров ленты")
-    return df_depth_1m, df_trades_1m
-
-# ==============================================================================
-# 4. РАСЧЕТ ФЕЙЧЕЙ
-# ==============================================================================
-def calculate_features(df_depth_1m: pd.DataFrame, df_trades_1m: pd.DataFrame, df_btc: pd.DataFrame) -> pd.DataFrame:
-    print("[INFO] Расчет фич для 1-минутного таймфрейма...")
+    print(f"[INFO] Фильтрация ленты: {total_trades} всего сделок -> {len(big_trades)} крупных (>{BIG_ORDER_THRESHOLD} SOL)")
     
-    # 1. Базовые фичи стакана
-    df_depth_1m['mid_price'] = (df_depth_1m['bid_p_1'] + df_depth_1m['ask_p_1']) / 2
+    big_trades['delta'] = np.where(big_trades['is_buy'], big_trades['quantity'], -big_trades['quantity'])
+    big_trades = big_trades.set_index('timestamp')
     
+    # Дельта от крупных ордеров за разные окна
+    big_trades['delta_10s'] = big_trades['delta'].rolling('10s').sum()
+    big_trades['delta_60s'] = big_trades['delta'].rolling('60s').sum()
+    
+    big_trades = big_trades.reset_index()
+    
+    df = pd.merge_asof(df.sort_values('timestamp'),
+                       big_trades[['timestamp', 'delta_10s', 'delta_60s']].drop_duplicates('timestamp').sort_values('timestamp'),
+                       on='timestamp', direction='backward')
+    df['delta_10s'] = df['delta_10s'].fillna(0.0)
+    df['delta_60s'] = df['delta_60s'].fillna(0.0)
+    
+    # ИМБАЛАНС (весь стакан, без фильтрации)
     bid_cols = [f'bid_v_{i}' for i in range(1, 11)]
     ask_cols = [f'ask_v_{i}' for i in range(1, 11)]
-    df_depth_1m['bid_vol_top10'] = df_depth_1m[bid_cols].sum(axis=1)
-    df_depth_1m['ask_vol_top10'] = df_depth_1m[ask_cols].sum(axis=1)
-    df_depth_1m['ob_imbalance'] = df_depth_1m['bid_vol_top10'] / (df_depth_1m['ask_vol_top10'] + 1e-8)
+    df['bid_total'] = df[bid_cols].sum(axis=1)
+    df['ask_total'] = df[ask_cols].sum(axis=1)
     
-    # 2. Слияние Стакан + Лента
-    df_merged = pd.merge_asof(
-        df_depth_1m.sort_values('timestamp'),
-        df_trades_1m.sort_values('timestamp'),
-        on='timestamp',
-        direction='backward'
-    )
+    for sec in [5, 30]:
+        n_bars = max(1, sec // 5)
+        bid_smooth = df['bid_total'].rolling(n_bars, min_periods=1).mean()
+        ask_smooth = df['ask_total'].rolling(n_bars, min_periods=1).mean()
+        df[f'imb_{sec}s'] = (bid_smooth - ask_smooth) / (bid_smooth + ask_smooth + 1e-8)
+        df[f'imb_{sec}s'] = df[f'imb_{sec}s'].fillna(0.0)
     
-    df_merged[['buy_vol', 'sell_vol', 'delta']] = df_merged[['buy_vol', 'sell_vol', 'delta']].fillna(0.0)
-    df_merged[['bid_vol_top10', 'ask_vol_top10', 'ob_imbalance']] = df_merged[['bid_vol_top10', 'ask_vol_top10', 'ob_imbalance']].fillna(1.0)
+    # HVN
+    print("[INFO] Расчёт HVN...")
+    for tf_min in [5, 15, 60]:
+        df['window_id'] = df['timestamp'].dt.floor(f'{tf_min}min')
+        
+        idx_below = df.groupby('window_id')['bid_total'].idxmax()
+        hvn_below = df.loc[idx_below, ['window_id', 'mid_price']].rename(columns={'mid_price': f'hvn_below_price_{tf_min}m'})
+        df = df.merge(hvn_below, on='window_id', how='left')
+        df[f'hvn_below_dist_{tf_min}m'] = ((df['mid_price'] - df[f'hvn_below_price_{tf_min}m']) / df['mid_price']).abs() * 100
+        
+        idx_above = df.groupby('window_id')['ask_total'].idxmax()
+        hvn_above = df.loc[idx_above, ['window_id', 'mid_price']].rename(columns={'mid_price': f'hvn_above_price_{tf_min}m'})
+        df = df.merge(hvn_above, on='window_id', how='left')
+        df[f'hvn_above_dist_{tf_min}m'] = ((df[f'hvn_above_price_{tf_min}m'] - df['mid_price']) / df['mid_price']).abs() * 100
+        
+        df = df.drop(columns=['window_id'])
+        df[f'hvn_below_dist_{tf_min}m'] = df[f'hvn_below_dist_{tf_min}m'].fillna(999.0)
+        df[f'hvn_above_dist_{tf_min}m'] = df[f'hvn_above_dist_{tf_min}m'].fillna(999.0)
     
-    # 3. Изменение цены за минуту
-    df_merged['price_change_1m'] = df_merged['mid_price'].pct_change() * 100
-    df_merged['price_change_1m'] = df_merged['price_change_1m'].fillna(0.0)
-    
-    # 4. Слияние с BTC (5-минутный)
-    df_merged = pd.merge_asof(
-        df_merged.sort_values('timestamp'),
-        df_btc.sort_values('timestamp'),
-        on='timestamp',
-        direction='backward'
-    )
-    df_merged['btc_5m_change_pct'] = df_merged['btc_5m_change_pct'].fillna(0.0)
-    
-    # 5. 🔥 ФИЛЬТР "2 БОЛЬШИХ ОРДЕРА" (окно 60 сек)
-    print("[INFO] Расчет фильтра '2 больших ордера' (60 сек)...")
-    df_merged['big_sells_pattern_60s'] = False
-    
-    # Для этого нам нужны исходные сделки (не агрегированные)
-    # Но мы уже агрегировали, поэтому используем упрощенную логику:
-    # Если sell_vol > 60 и было хотя бы 2 крупных ордера (эвристика)
-    # В реальном коде нужно хранить исходные сделки
-    
-    # Упрощенная версия: если sell_vol > 100 SOL, считаем что были крупные ордера
-    df_merged['big_sells_pattern_60s'] = df_merged['sell_vol'] > 100.0
-    
-    print(f"[INFO] Фичи рассчитаны. Датасет: {len(df_merged)} строк")
-    print(f"[INFO] Найдено баров с паттерном '2 больших продажи': {df_merged['big_sells_pattern_60s'].sum()}")
-    return df_merged
+    print(f"[INFO] Фичи рассчитаны. {len(df)} строк")
+    return df
 
 # ==============================================================================
-# 5. СТРАТЕГИЯ: BREAKOUT V1 (1-МИНУТНЫЙ ТАЙМФРЕЙМ)
+# 4. ДВИЖОК (Разворот дельты от крупных ордеров)
 # ==============================================================================
-def evaluate_breakout_v1_1m(row: pd.Series, params: dict, side: str) -> dict:
-    btc_change = row.get('btc_5m_change_pct', 0.0)
+def run_absorption_big_orders(df, params):
+    delta_long_thresh = params['delta_long_thresh']
+    delta_short_thresh = params['delta_short_thresh']
+    imb_tf = params['imb_tf']
+    hvn_tf = params['hvn_tf']
+    hvn_max_dist = params['hvn_max_dist']
+    r_mult = params['r_mult']
     
-    # 0. BTC Context
-    if side == 'SHORT' and btc_change > params['btc_max_adverse_pump_pct']:
-        return {'signal': None, 'reason': f'BTC_PUMPING (chg={btc_change:.2f}%)'}
-        
-    if side == 'SHORT':
-        # 1. Лента (Импульс)
-        sell_vol = row.get('sell_vol', 0.0)
-        price_move = row.get('price_change_1m', 0.0)
-        
-        if sell_vol < params['min_impulse_volume']:
-            return {'signal': None, 'reason': f'LOW_SELL_VOL ({sell_vol:.0f})'}
-        if price_move > -params['min_price_change_pct']:
-            return {'signal': None, 'reason': f'NO_DOWNTREND (move={price_move:.2f}%)'}
-            
-        # 2. Стакан (Имбаланс)
-        ob_imb = row.get('ob_imbalance', 1.0)
-        if ob_imb > params['max_ob_imbalance_short']:
-            return {'signal': None, 'reason': f'HIGH_IMBALANCE (imb={ob_imb:.2f})'}
-            
-        # 3. Дельта (Инерция)
-        delta = row.get('delta', 0.0)
-        if delta > params['max_delta_1m_short']:
-            return {'signal': None, 'reason': f'WEAK_DELTA (d={delta:.0f})'}
-        
-        # 4. Фильтр "2 больших ордера" (упрощенный)
-        if params.get('require_big_orders_pattern', False):
-            if not row.get('big_sells_pattern_60s', False):
-                return {'signal': None, 'reason': 'NO_TWO_BIG_SELLS'}
-            
-    return {'signal': side, 'reason': f'BREAKOUT_1M (vol={sell_vol:.0f}, imb={ob_imb:.2f}, d={delta:.0f})'}
-
-# ==============================================================================
-# 6. ДВИЖОК (Частичный фикс + Безубыток, параметры для 1-минутного ТФ)
-# ==============================================================================
-def run_backtest(df: pd.DataFrame, strategy_name: str) -> pd.DataFrame:
-    print(f"[INFO] Запуск симуляции ({strategy_name} + Partial TP + BE)...")
+    # LONG: Крупные продажи были (60с) + Разворот (10с) + Имбаланс + HVN рядом
+    long_cond = (df['delta_60s'] < -delta_long_thresh) & \
+                (df['delta_10s'] > -delta_short_thresh) & \
+                (df[f'imb_{imb_tf}s'] < 0.1) & \
+                (df[f'hvn_below_dist_{hvn_tf}m'] <= hvn_max_dist)
+    
+    # SHORT: Крупные покупки были (60с) + Разворот (10с) + Имбаланс + HVN рядом
+    short_cond = (df['delta_60s'] > delta_long_thresh) & \
+                 (df['delta_10s'] < delta_short_thresh) & \
+                 (df[f'imb_{imb_tf}s'] > -0.1) & \
+                 (df[f'hvn_above_dist_{hvn_tf}m'] <= hvn_max_dist)
+    
+    entry_indices = []
+    last_entry = -30
+    
+    all_signals = []
+    for idx in np.where(long_cond)[0]:
+        all_signals.append((idx, 'long'))
+    for idx in np.where(short_cond)[0]:
+        all_signals.append((idx, 'short'))
+    all_signals.sort(key=lambda x: x[0])
+    
+    for idx, side in all_signals:
+        if idx - last_entry < 30:
+            continue
+        entry_indices.append((idx, side))
+        last_entry = idx
+    
+    if not entry_indices:
+        return pd.DataFrame()
+    
     results = []
-    
-    in_position = False
-    entry_price = 0.0
-    tp1_hit = False
-    sl_price = 0.0
-    
-    #  ПАРАМЕТРЫ ДЛЯ 1-МИНУТНОГО ТАЙМФРЕЙМА
-    TP1_PCT = 0.010      # 1.0%
-    INITIAL_SL_PCT = 0.010  # 1.0%
-    TP2_PCT = 0.020      # 2.0% (не используется в текущей логике, но можно добавить)
-    
-    params = STRATEGY_PARAMS[strategy_name]
-    
-    for idx, row in df.iterrows():
-        current_price = row['mid_price']
+    for entry_idx, side in entry_indices:
+        entry_price = df.iloc[entry_idx]['mid_price']
+        atr = df.iloc[entry_idx]['atr']
         
-        if not in_position:
-            eval_result = evaluate_breakout_v1_1m(row, params, side='SHORT')
-                
-            if eval_result['signal'] == 'SHORT':
-                in_position = True
-                entry_price = current_price
-                tp1_hit = False
-                sl_price = entry_price * (1 + INITIAL_SL_PCT)
-                
-                results.append({
-                    'timestamp': row['timestamp'], 'type': 'ENTRY', 'side': 'SHORT',
-                    'entry_price': entry_price, 'reason': eval_result['reason']
-                })
-        else:
-            if not tp1_hit:
-                tp1_price = entry_price * (1 - TP1_PCT)
-                if current_price <= tp1_price:
-                    pnl_pct = (entry_price - current_price) / entry_price * 0.5
-                    results.append({
-                        'timestamp': row['timestamp'], 'type': 'EXIT_TP1', 'side': 'SHORT',
-                        'entry_price': entry_price, 'exit_price': current_price,
-                        'pnl_pct': pnl_pct, 'reason': 'PARTIAL_TP_50%'
-                    })
-                    tp1_hit = True
-                    sl_price = entry_price  # Перевод в безубыток
+        if side == 'long':
+            sl_anchor = df.iloc[entry_idx][f'hvn_below_price_{hvn_tf}m']
+            r_val = max(abs(entry_price - sl_anchor) + (atr * 0.2), atr)
+            sl_price = sl_anchor - (atr * 0.2)
+            tp_price = entry_price + (r_val * r_mult)
             
-            if current_price >= sl_price:
-                remaining_size = 0.5 if tp1_hit else 1.0
-                pnl_pct = (entry_price - current_price) / entry_price * remaining_size
-                reason = 'STOP_LOSS' if current_price > entry_price else 'TAKE_PROFIT_2'
-                
-                results.append({
-                    'timestamp': row['timestamp'], 'type': 'EXIT_FINAL', 'side': 'SHORT',
-                    'entry_price': entry_price, 'exit_price': current_price,
-                    'pnl_pct': pnl_pct, 'reason': reason
-                })
-                in_position = False
-                
+            future = df.iloc[entry_idx+1:]
+            hit_sl = future[future['mid_price'] <= sl_price]
+            hit_tp = future[future['mid_price'] >= tp_price]
+            
+            if hit_sl.empty and hit_tp.empty:
+                continue
+            
+            if hit_tp.empty or (not hit_sl.empty and hit_sl.index[0] < hit_tp.index[0]):
+                pnl = ((sl_price - entry_price) / entry_price) - COMMISSION_PER_TRADE
+            else:
+                pnl = ((tp_price - entry_price) / entry_price) - COMMISSION_PER_TRADE
+        else:
+            sl_anchor = df.iloc[entry_idx][f'hvn_above_price_{hvn_tf}m']
+            r_val = max(abs(sl_anchor - entry_price) + (atr * 0.2), atr)
+            sl_price = sl_anchor + (atr * 0.2)
+            tp_price = entry_price - (r_val * r_mult)
+            
+            future = df.iloc[entry_idx+1:]
+            hit_sl = future[future['mid_price'] >= sl_price]
+            hit_tp = future[future['mid_price'] <= tp_price]
+            
+            if hit_sl.empty and hit_tp.empty:
+                continue
+            
+            if hit_tp.empty or (not hit_sl.empty and hit_sl.index[0] < hit_tp.index[0]):
+                pnl = ((entry_price - sl_price) / entry_price) - COMMISSION_PER_TRADE
+            else:
+                pnl = ((entry_price - tp_price) / entry_price) - COMMISSION_PER_TRADE
+        
+        results.append({'side': side, 'entry_price': entry_price, 'pnl': pnl})
+    
     return pd.DataFrame(results)
 
-def generate_report(trades_df: pd.DataFrame, strategy_name: str):
-    print("\n" + "="*70)
-    print(f" ОТЧЕТ БЭКТЕСТА PLATO (v5.0 - {strategy_name.upper()} - 1 MIN)")
-    print("="*70)
-    if trades_df.empty:
-        print("Сделки не найдены.")
+# ==============================================================================
+# 5. ОПТИМИЗАТОР
+# ==============================================================================
+def run_optimizer(df):
+    print("\n" + "="*80)
+    print("[OPTIMIZER] Absorption + Фильтр крупных ордеров (>30 SOL)")
+    print("="*80)
+    
+    param_grid = {
+        'delta_long_thresh': [100, 200, 300],
+        'delta_short_thresh': [30, 50, 80],
+        'imb_tf': [5, 30],
+        'hvn_tf': [5, 15, 60],
+        'hvn_max_dist': [0.15, 0.25, 0.35],
+        'r_mult': [1.5, 2.0, 2.5]
+    }
+    
+    keys, values = zip(*param_grid.items())
+    combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+    
+    total = len(combinations)
+    print(f"[INFO] Комбинаций: {total}")
+    print("[INFO] Запуск...\n")
+    
+    results = []
+    start_time = time.time()
+    
+    for i, params in enumerate(combinations):
+        trades = run_absorption_big_orders(df, params)
+        
+        if not trades.empty:
+            total_trades = len(trades)
+            winrate = (len(trades[trades['pnl'] > 0]) / total_trades) * 100
+            total_pnl = trades['pnl'].sum() * 100
+            avg_pnl = total_pnl / total_trades
+            
+            results.append({
+                'Trades': total_trades,
+                'Winrate%': round(winrate, 1),
+                'TotalPnL%': round(total_pnl, 2),
+                'AvgPnL%': round(avg_pnl, 3),
+                'Delta_Long': params['delta_long_thresh'],
+                'Delta_Short': params['delta_short_thresh'],
+                'Imb_TF': params['imb_tf'],
+                'HVN_TF': params['hvn_tf'],
+                'HVN_Dist%': params['hvn_max_dist'],
+                'R_Mult': params['r_mult']
+            })
+        
+        elapsed = time.time() - start_time
+        progress = (i + 1) / total
+        bar_length = 40
+        filled = int(bar_length * progress)
+        bar = '█' * filled + '-' * (bar_length - filled)
+        eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
+        
+        sys.stdout.write(f'\r[{bar}] {progress*100:.1f}% | {i+1}/{total} | {elapsed:.0f}с | ETA: {eta:.0f}с')
+        sys.stdout.flush()
+    
+    print(f"\n\n[INFO] Завершено за {time.time() - start_time:.1f} сек.")
+    
+    if not results:
+        print("\n[WARNING] Не найдено ни одной сделки.")
         return
-        
-    entries = trades_df[trades_df['type'] == 'ENTRY']
-    print(f"Всего попыток входа (сигналов): {len(entries)}")
     
-    exits = trades_df[trades_df['type'].isin(['EXIT_TP1', 'EXIT_FINAL'])]
+    df_results = pd.DataFrame(results)
     
-    if not exits.empty:
-        total_pnl_pct = exits['pnl_pct'].sum()
-        print(f"Завершенных этапов выхода: {len(exits)}")
-        print(f"Суммарный PnL (%): {total_pnl_pct:.4f}%")
-        print(f"Суммарный PnL (USDT): {total_pnl_pct * POSITION_SIZE_USDT:.2f}")
-        
-        print("\n--- Все события выхода ---")
-        print(exits[['timestamp', 'type', 'side', 'entry_price', 'exit_price', 'pnl_pct', 'reason']].to_string(index=False))
-    else:
-        print("Нет завершенных сделок.")
-    print("="*70 + "\n")
+    print("\n" + "="*80)
+    print("🏆 ТОП-10 КОНФИГУРАЦИЙ (минимум 3 сделки)")
+    print("="*80)
+    top = df_results[df_results['Trades'] >= 3].nlargest(10, 'TotalPnL%')
+    if top.empty:
+        top = df_results.nlargest(10, 'TotalPnL%')
+    print(top.to_string(index=False))
+    
+    output_file = DATA_DIR / "optimizer_results_v8.3_big_orders.csv"
+    df_results.to_csv(output_file, index=False)
+    print(f"\n[INFO] Результаты сохранены в: {output_file}")
+    
+    return df_results
 
 # ==============================================================================
-# 7. ГЛАВНЫЙ ЦИКЛ
+# 6. ГЛАВНЫЙ ЦИКЛ
 # ==============================================================================
 if __name__ == "__main__":
     try:
-        df_depth, df_trades, df_btc = load_data(DATES_TO_TEST)
-        
-        #  АГРЕГАЦИЯ В 1-МИНУТНЫЕ БАРЫ
-        df_depth_1m, df_trades_1m = aggregate_to_1m(df_depth, df_trades)
-        
-        df_merged = calculate_features(df_depth_1m, df_trades_1m, df_btc)
-        trades = run_backtest(df_merged, "breakout_v1_1m")
-        generate_report(trades, "breakout_v1_1m")
-        
-        output_file = DATA_DIR / "backtest_results_v5.0_breakout_1m.csv"
-        trades.to_csv(output_file, index=False)
-        print(f"[INFO] Результаты сохранены в: {output_file}")
+        df_depth, df_trades = load_data(DATES_TO_TEST)
+        df = calculate_all_features(df_depth, df_trades)
+        results = run_optimizer(df)
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"\n[ERROR] {e}")
         import traceback
         traceback.print_exc()
