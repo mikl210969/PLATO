@@ -42,7 +42,7 @@ class AbsorptionStrategyV2(AdaptiveStrategy):  # 🔥 Класс остался 
         self.min_confidence = config.get('min_confidence', 0.6)
         self.min_wall_updates = config.get('min_wall_updates', 30)
         
-        #  Хранилище активных сетапов (State Machine)
+        # 🗄️ Хранилище активных сетапов (State Machine)
         self.active_setups: Dict[str, Dict[str, Any]] = {}
         
         logger.info(f"✅ [{self.__class__.__name__}] Инициализирована V4 (Retest). "
@@ -138,13 +138,30 @@ class AbsorptionStrategyV2(AdaptiveStrategy):  # 🔥 Класс остался 
         # ========================================================================
         # ФАЗА 1: Поиск нового касания стены (Инициация сетапа)
         # ========================================================================
-        # Получаем данные для фильтрации
-        # ⚠️ ВАЖНО: Проверь индексы окон delta в твоем features.py!
-        # Обычно windows[0] - короткое (10с), windows[2] или [3] - длинное (60с)
-        delta_short = snap['delta']['windows'][0]['velocity']  # 10 сек
-        delta_long = snap['delta']['windows'][3]['velocity']   # 60 сек
-        imbalance = snap['imbalance']['imbalance']
         
+        # 🔥 БЕЗОПАСНОЕ ИЗВЛЕЧЕНИЕ ДЕЛЬТЫ (работает и со списком, и со словарём)
+        delta_windows = snap['delta']['windows']
+        delta_short = 0.0
+        delta_long = 0.0
+
+        if isinstance(delta_windows, dict):
+            keys = list(delta_windows.keys())
+            # Пытаемся взять индекс 0 (короткое) и 3 (длинное), если их нет — берем первое и последнее
+            short_key = 0 if 0 in keys else keys[0]
+            long_key = 3 if 3 in keys else keys[-1]
+            
+            val_short = delta_windows[short_key]
+            val_long = delta_windows[long_key]
+            
+            # Значение может быть словарём {'velocity': X} или сразу числом
+            delta_short = val_short.get('velocity', 0.0) if isinstance(val_short, dict) else float(val_short)
+            delta_long = val_long.get('velocity', 0.0) if isinstance(val_long, dict) else float(val_long)
+        else:
+            # Fallback на случай, если это всё-таки список
+            delta_short = delta_windows[0].get('velocity', 0.0) if delta_windows and isinstance(delta_windows[0], dict) else 0.0
+            delta_long = delta_windows[-1].get('velocity', 0.0) if delta_windows and isinstance(delta_windows[-1], dict) else 0.0
+
+        imbalance = snap['imbalance']['imbalance']
         walls_bid = snap['walls'].get('walls_bid', [])
         walls_ask = snap['walls'].get('walls_ask', [])
 
@@ -155,7 +172,7 @@ class AbsorptionStrategyV2(AdaptiveStrategy):  # 🔥 Класс остался 
             if wall.get('update_count', 0) < self.min_wall_updates:
                 continue
             
-            #  ДОКАЗАННЫЙ ЭДЖ: Delta Turnaround (Big Orders > 30 SOL)
+            # 🔥 ДОКАЗАННЫЙ ЭДЖ: Delta Turnaround (Big Orders > 30 SOL)
             # Дельта за 60с < -200 (был удар продаж), за 10с > -30 (разворот)
             if delta_long < -200 and delta_short > -30 and imbalance < 0.1:
                 self.active_setups[setup_key] = {

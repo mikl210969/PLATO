@@ -13,7 +13,7 @@
         "bypass_filters": false
       },
       "absorption_v2": {
-        "enabled": false,
+        "enabled": true,
         "log_input_stream": false,
         "bypass_filters": false
       },

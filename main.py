@@ -321,42 +321,55 @@ class Platform:
 
         asyncio.create_task(context_updater_loop())
         logger.info("✅ Фоновая задача VolumeContextManager активирована")
-        # ========================================================================        
-
-        # 15. Стратегии
-        strategies_config = self.config.get('strategies', {})
-        debug_mode = self.config.get('debug_mode', {})
-        strategies_debug = debug_mode.get('strategies', {})
+        # ========================================================================
+        # 🔥 15. Инициализация стратегий (Условная, на основе флага 'enabled')
+        # ========================================================================
         
+        # Получаем главный словарь стратегий из конфига
+        strategies_config = self.config.get('strategies', {})
+        
+        # 1. WallFade Strategy
         wall_fade_config = strategies_config.get('wall_fade', {})
-        wall_fade_debug = strategies_debug.get('wall_fade_v3', {})
-        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
-        self.wall_fade = WallFadeStrategyV3(
-            config=wall_fade_config, 
-            atr_value=0.5,  # Или твое значение
-            context_manager=self.volume_context_manager
-        )
-        self.wall_fade.subscribe_to_events(self.bus)
+        if wall_fade_config.get('enabled', False):
+            self.wall_fade = WallFadeStrategyV3(
+                config=wall_fade_config, 
+                atr_value=0.5,
+                context_manager=self.volume_context_manager
+            )
+            self.wall_fade.subscribe_to_events(self.bus)
+            logger.info("✅ WallFadeStrategyV3 включена и инициализирована")
+        else:
+            self.wall_fade = None
+            logger.info(" WallFadeStrategyV3 ОТКЛЮЧЕНА (enabled=false)")
 
+        # 2. Absorption Strategy (Наша целевая V4)
         absorption_config = strategies_config.get('absorption', {})
-        absorption_debug = strategies_debug.get('absorption_v2', {})
-        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
-        self.absorption = AbsorptionStrategyV2(
-            config=absorption_config, 
-            atr_value=0.5,  # Или твое значение
-            context_manager=self.volume_context_manager
-        )
-        self.absorption.subscribe_to_events(self.bus)
+        if absorption_config.get('enabled', False):
+            self.absorption = AbsorptionStrategyV2(
+                config=absorption_config, 
+                atr_value=0.5,
+                context_manager=self.volume_context_manager
+            )
+            self.absorption.subscribe_to_events(self.bus)
+            logger.info("✅ AbsorptionStrategyV2 включена и инициализирована")
+        else:
+            self.absorption = None
+            logger.info("⛔ AbsorptionStrategyV2 ОТКЛЮЧЕНА (enabled=false)")
 
+        # 3. Breakout Strategy
         breakout_config = strategies_config.get('breakout', {})
-        breakout_debug = strategies_debug.get('breakout_v1', {})
-        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
-        self.breakout = BreakoutStrategyV1(
-            config=breakout_config, 
-            atr_value=0.5,  # Или твое значение ATR
-            context_manager=self.volume_context_manager
-        )
-        self.breakout.subscribe_to_events(self.bus)    
+        if breakout_config.get('enabled', False):
+            self.breakout = BreakoutStrategyV1(
+                config=breakout_config, 
+                atr_value=0.5,
+                context_manager=self.volume_context_manager
+            )
+            self.breakout.subscribe_to_events(self.bus)
+            logger.info("✅ BreakoutStrategyV1 включена и инициализирована")
+        else:
+            self.breakout = None
+            logger.info("⛔ BreakoutStrategyV1 ОТКЛЮЧЕНА (enabled=false)")
+        # ======================================================================== 
 
         # 16. DeltaMonitor Factory
         self.delta_monitors = MonitorFactory.create_delta_monitors(
