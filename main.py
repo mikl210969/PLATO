@@ -39,6 +39,8 @@ from trading.order_verifier import OrderVerifier
 from strategies.wall_fade_v3 import WallFadeStrategyV3
 from strategies.absorption_v2 import AbsorptionStrategyV2
 from strategies.breakout_v1 import BreakoutStrategyV1
+from strategies.sniper_v6 import SniperV6  # 🔥 ДОБАВИТЬ Э
+
 
 from datetime import datetime, timezone
 
@@ -91,6 +93,9 @@ class Platform:
         strategies = self.config.get('strategies', {})
         breakout = strategies.get('breakout', '❌ NOT FOUND IN strategies')
         logger.info(f"🔹 [BREAKOUT] {json.dumps(breakout, indent=2, ensure_ascii=False)}")
+        # 🔥 ДОБАВИТЬ ЭТО: Чтение и логирование конфига Sniper V6
+        sniper_v6 = self.config.get('sniper_v6', {})
+        logger.info(f"🎯 [SNIPER_V6] {json.dumps(sniper_v6, indent=2, ensure_ascii=False)}")        
         
         logger.info("="*60)
         # ========================================================================
@@ -351,12 +356,24 @@ class Platform:
         breakout_config = strategies_config.get('breakout', {})
         breakout_debug = strategies_debug.get('breakout_v1', {})
         # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
+        # Инициализация Breakout (ОДИН РАЗ!)
         self.breakout = BreakoutStrategyV1(
             config=breakout_config, 
-            atr_value=0.5,  # Или твое значение ATR
+            atr_value=0.5,
             context_manager=self.volume_context_manager
         )
-        self.breakout.subscribe_to_events(self.bus)    
+        self.breakout.subscribe_to_events(self.bus)
+
+        # 🔥 ИНИЦИАЛИЗАЦИЯ SNIPER V6
+        sniper_config = self.config.get('sniper_v6', {})
+        self.sniper_v6 = SniperV6(
+            config=sniper_config,
+            atr_value=0.5,
+            context_manager=self.volume_context_manager
+        )
+        self.sniper_v6.subscribe_to_events(self.bus)
+        print("🎯 [DEBUG INIT] SniperV6 инициализирована и подписана на события!")
+            
 
         # 16. DeltaMonitor Factory
         self.delta_monitors = MonitorFactory.create_delta_monitors(
@@ -474,9 +491,8 @@ class Platform:
         # 2. Если паспорта нет (или он закрыт), формируем сигналы
         # 🔥 ВАЖНО: Этот блок теперь находится ВНЕ блока if, поэтому он выполнится!
         signals = []
-        print(f"🔍 Стратегии: wall_fade={self.wall_fade is not None}, absorption={self.absorption is not None}, breakout={self.breakout is not None}")
-        
-        for strategy in [self.wall_fade, self.absorption, self.breakout]:
+        print(f"🔍 Стратегии: wall_fade={self.wall_fade is not None}, absorption={self.absorption is not None}, breakout={self.breakout is not None}, sniper_v6={self.sniper_v6 is not None}")        
+        for strategy in [self.wall_fade, self.absorption, self.breakout, self.sniper_v6]:
             if strategy is None:
                 print("⚠️ Одна из стратегий равна None!")
                 continue

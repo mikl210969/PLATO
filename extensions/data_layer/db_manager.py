@@ -12,6 +12,28 @@ class DatabaseManager:
         self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
 
+    def init_ust_table(self):
+        """Инициализирует таблицу для хранения исторических уровней УСТ."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ust_levels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                level_price REAL NOT NULL,
+                side TEXT NOT NULL,          -- 'bid' или 'ask'
+                created_at REAL NOT NULL,    -- Unix timestamp
+                tests_count INTEGER DEFAULT 1,
+                is_active INTEGER DEFAULT 1  -- 1 = True, 0 = False
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ust_symbol_active 
+            ON ust_levels(symbol, is_active, created_at DESC)
+        """)
+        conn.commit()
+        logger.info("✅ Таблица ust_levels создана или уже существует")
+
     def _get_connection(self) -> sqlite3.Connection:
         if self._conn is None:
             # check_same_thread=False безопасен при использовании только одной записывающей операции за раз 

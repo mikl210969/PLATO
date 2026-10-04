@@ -141,7 +141,8 @@ class AbsorptionStrategyV2(AdaptiveStrategy):  # 🔥 Класс остался 
         # Получаем данные для фильтрации
         # ⚠️ ВАЖНО: Проверь индексы окон delta в твоем features.py!
         # Обычно windows[0] - короткое (10с), windows[2] или [3] - длинное (60с)
-        delta_short = snap['delta']['windows'][0]['velocity']  # 10 сек
+        delta_short = snap['delta']['windows'][3]['velocity']   # 3 секунды
+        # Если есть другие, замени [1] на [30], а [2] на [300]
         delta_long = snap['delta']['windows'][3]['velocity']   # 60 сек
         imbalance = snap['imbalance']['imbalance']
         
