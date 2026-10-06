@@ -10,29 +10,6 @@
   "atr_multiplier_tp1": 0.5,
   "atr_multiplier_tp2": 1.0,
 
-  "debug_mode": {
-    "enabled": true,
-    "force_test_signal_every_sec": 60,
-    "fixed_lot_size": 7.0,
-    "fixed_sl_distance": 0.25,
-    "fixed_tp1_distance": 0.25,
-    "fixed_tp2_distance": 0.50,
-    "strategies": {
-      "wall_fade_v3": { 
-        "enabled": true, 
-        "log_input_stream": true, 
-        "bypass_filters": true 
-      },
-      "absorption_v2": { 
-        "enabled": true, 
-        "log_input_stream": true, 
-        "bypass_filters": true 
-      },
-      "breakout_v1": { 
-        "enabled": true, 
-        "log_input_stream": true, 
-        "bypass_filters": true 
-      },
   "sniper_v6": {
     "enabled": true,
     "log_input_stream": false,
@@ -52,8 +29,31 @@
     "historical_ust_rr_improvement": 1.1,
     "historical_ust_max_distance_mult": 2.0,
     "cooldown_sec": 120
-  }
+  },
 
+  "debug_mode": {
+    "enabled": true,
+    "force_test_signal_every_sec": 60,
+    "fixed_lot_size": 7.0,
+    "fixed_sl_distance": 0.25,
+    "fixed_tp1_distance": 0.25,
+    "fixed_tp2_distance": 0.50,
+    "strategies": {
+      "wall_fade_v3": { 
+        "enabled": false, 
+        "log_input_stream": false, 
+        "bypass_filters": false 
+      },
+      "absorption_v2": { 
+        "enabled": false, 
+        "log_input_stream": false, 
+        "bypass_filters": false 
+      },
+      "breakout_v1": { 
+        "enabled": false, 
+        "log_input_stream": false, 
+        "bypass_filters": false 
+      }
     }
   }
 }

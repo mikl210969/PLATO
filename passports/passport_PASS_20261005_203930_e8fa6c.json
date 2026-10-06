@@ -1,0 +1,81 @@
+{
+  "passport_id": "PASS_20261005_203930_e8fa6c",
+  "symbol": "SOLUSDT",
+  "status": "CANCELED",
+  "signal_id": "SniperV6_SOLUSDT_1791232770_Smart_TP2_(Base)",
+  "strategy": "SniperV6",
+  "side": "long",
+  "entry_price": 96.0,
+  "confidence": 0.74,
+  "sl_price": 95.85,
+  "tp1_price": 96.25,
+  "tp2_price": 96.5,
+  "position_size": 0.0,
+  "position_entry_price": 0.0,
+  "orders": [
+    {
+      "order_id": 4217605835,
+      "client_order_id": "SOLU_SniperV6_e8fa6c_1791232770",
+      "status": "NEW",
+      "type": "LIMIT",
+      "side": "long",
+      "price": 96.0,
+      "quantity": 7.0
+    }
+  ],
+  "created_at": "2026-10-05T20:39:30.039561+00:00",
+  "updated_at": "2026-10-05T20:41:57.238251+00:00",
+  "closed_at": null,
+  "timeline": [
+    {
+      "timestamp": "2026-10-05T20:39:30.708502+00:00",
+      "event": "STATUS: ORDER_SENT",
+      "details": "Order sent to exchange"
+    },
+    {
+      "timestamp": "2026-10-05T20:41:57.238251+00:00",
+      "event": "STATUS: CANCELED",
+      "details": "RECONCILER: order absent on exchange"
+    }
+  ],
+  "exit_reason": "",
+  "exit_price": 0.0,
+  "gross_pnl": 0.0,
+  "commission": 0.0,
+  "net_pnl": 0.0,
+  "tp1_activated": false,
+  "tp2_activated": false,
+  "sl_activated": false,
+  "sizing_info": {
+    "base_risk_usdt": 30.0,
+    "adjusted_risk_usdt": 30.0,
+    "smart_multiplier": 1.0,
+    "smart_reason": "BTC FLAT → нейтральный режим",
+    "btc_trend": "FLAT",
+    "btc_regime": "FLAT",
+    "base_sl_distance": 0.25,
+    "adjusted_sl_distance": 0.15,
+    "sl_multiplier": 0.6,
+    "sl_reason": "Сильная дельта +175.4 → узкий SL (×0.6)",
+    "symbol_delta": 175.37,
+    "sl_distance": 0.15,
+    "final_quantity": 7.0,
+    "max_size_cap": 7.0,
+    "fallback_used": false
+  },
+  "platform_health": "HEALTHY",
+  "guard_status": "inactive",
+  "tp1_projected_pnl": 0.0,
+  "tp2_projected_pnl": 0.0,
+  "sl_projected_pnl": 0.0,
+  "breakeven_projected_pnl": 0.0,
+  "target_size": 0.0,
+  "filled_qty": 0.0,
+  "remaining_order_qty": 0.0,
+  "avg_price": 0.0,
+  "real_pnl": 0.0,
+  "realized_pnl": 0.0,
+  "tp1_pnl": 0.0,
+  "tp2_pnl": 0.0,
+  "sl_pnl": 0.0
+}

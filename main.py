@@ -326,53 +326,70 @@ class Platform:
 
         asyncio.create_task(context_updater_loop())
         logger.info("✅ Фоновая задача VolumeContextManager активирована")
-        # ========================================================================        
-
-        # 15. Стратегии
+        # ========================================================================
+        # 15. Стратегии и Детекторы
+        # ========================================================================
         strategies_config = self.config.get('strategies', {})
         debug_mode = self.config.get('debug_mode', {})
         strategies_debug = debug_mode.get('strategies', {})
         
+        # 🔥 ЖЕСТКОЕ ЧТЕНИЕ SNIPER_V6 (ищет в корне ИЛИ внутри блока 'trading')
+        sniper_config = self.config.get('sniper_v6', {}) or self.config.get('trading', {}).get('sniper_v6', {})
+        print(f"🔥 [DEBUG CONFIG] Найденный sniper_config: {sniper_config}")
+        if not sniper_config or not sniper_config.get('enabled'):
+            sniper_config = debug_mode.get('strategies', {}).get('sniper_v6', {})
+        
+        print(f"🔥 [DEBUG CONFIG] Найденный sniper_config: {sniper_config}")
+
+        # --- Wall Fade V3 ---
         wall_fade_config = strategies_config.get('wall_fade', {})
-        wall_fade_debug = strategies_debug.get('wall_fade_v3', {})
-        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
-        self.wall_fade = WallFadeStrategyV3(
-            config=wall_fade_config, 
-            atr_value=0.5,  # Или твое значение
-            context_manager=self.volume_context_manager
-        )
-        self.wall_fade.subscribe_to_events(self.bus)
+        if wall_fade_config.get('enabled', False):
+            self.wall_fade = WallFadeStrategyV3(config=wall_fade_config, atr_value=0.5, context_manager=self.volume_context_manager)
+            self.wall_fade.subscribe_to_events(self.bus)
+        else:
+            self.wall_fade = None
 
+        # --- Absorption V2 ---
         absorption_config = strategies_config.get('absorption', {})
-        absorption_debug = strategies_debug.get('absorption_v2', {})
-        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
-        self.absorption = AbsorptionStrategyV2(
-            config=absorption_config, 
-            atr_value=0.5,  # Или твое значение
-            context_manager=self.volume_context_manager
-        )
-        self.absorption.subscribe_to_events(self.bus)
+        if absorption_config.get('enabled', False):
+            self.absorption = AbsorptionStrategyV2(config=absorption_config, atr_value=0.5, context_manager=self.volume_context_manager)
+            self.absorption.subscribe_to_events(self.bus)
+        else:
+            self.absorption = None
 
+        # --- Breakout V1 ---
         breakout_config = strategies_config.get('breakout', {})
-        breakout_debug = strategies_debug.get('breakout_v1', {})
-        # 🔥 V13 ADAPTIVE: Передаем volume_context_manager в стратегию
-        # Инициализация Breakout (ОДИН РАЗ!)
-        self.breakout = BreakoutStrategyV1(
-            config=breakout_config, 
-            atr_value=0.5,
-            context_manager=self.volume_context_manager
-        )
-        self.breakout.subscribe_to_events(self.bus)
+        if breakout_config.get('enabled', False):
+            self.breakout = BreakoutStrategyV1(config=breakout_config, atr_value=0.5, context_manager=self.volume_context_manager)
+            self.breakout.subscribe_to_events(self.bus)
+        else:
+            self.breakout = None
+
+        # 🔥 ИНИЦИАЛИЗАЦИЯ UST DETECTOR
+        from extensions.ust_detector import UstDetector
+        self.ust_detector = UstDetector(symbol=self.symbol, rest_client=self.rest, db_manager=self.db)
+        logger.info("✅ UstDetector инициализирован")
+        
+        async def periodic_ust_scan():
+            await self.ust_detector.scan_and_save_levels()
+            while True:
+                await asyncio.sleep(300)
+                await self.ust_detector.scan_and_save_levels()
+        asyncio.create_task(periodic_ust_scan())
 
         # 🔥 ИНИЦИАЛИЗАЦИЯ SNIPER V6
-        sniper_config = self.config.get('sniper_v6', {})
-        self.sniper_v6 = SniperV6(
-            config=sniper_config,
-            atr_value=0.5,
-            context_manager=self.volume_context_manager
-        )
-        self.sniper_v6.subscribe_to_events(self.bus)
-        print("🎯 [DEBUG INIT] SniperV6 инициализирована и подписана на события!")
+        if sniper_config.get('enabled', False):
+            self.sniper_v6 = SniperV6(
+                config=sniper_config,
+                atr_value=0.5,
+                context_manager=self.volume_context_manager,
+                ust_detector=self.ust_detector
+            )
+            self.sniper_v6.subscribe_to_events(self.bus)
+            logger.info("🎯 [DEBUG INIT] SniperV6 ВКЛЮЧЕНА И ГОТОВА К РАБОТЕ!")
+        else:
+            self.sniper_v6 = None
+            logger.warning("⚪ [DEBUG INIT] SniperV6 ОТКЛЮЧЕНА")
             
 
         # 16. DeltaMonitor Factory

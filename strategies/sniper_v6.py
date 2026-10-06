@@ -6,7 +6,6 @@ import time
 import logging
 from typing import Optional, Dict, Any
 
-# 🔥 Импорт базовых классов и типов платформы
 from strategies.adaptive_strategy import AdaptiveStrategy
 from strategies.wall_fade_v3 import EnrichedSignal
 from extensions.data_layer.db_manager import DatabaseManager
@@ -15,13 +14,13 @@ from core.logger import get_logger
 logger = get_logger(__name__)
 
 class SniperV6(AdaptiveStrategy):
-    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5, context_manager=None):
+    def __init__(self, config: Dict[str, Any], atr_value: float = 0.5, context_manager=None, ust_detector=None):
         super().__init__(context_manager)
         self.config = config
         self.atr_value = atr_value
+        self.ust_detector = ust_detector  # 🔥 ДОБАВЛЕНО: Детектор УСТ
         self._last_signal_time = 0.0
         
-        # Параметры из конфига (с fallback на дефолтные значения из бэктестов)
         snp_cfg = config.get('sniper_v6', {})
         self.force_test_signal = snp_cfg.get('force_test_signal', False)
         self.test_signal_interval = snp_cfg.get('test_signal_interval', 60)
@@ -42,16 +41,15 @@ class SniperV6(AdaptiveStrategy):
         self.hist_ust_rr_imp = snp_cfg.get('historical_ust_rr_improvement', 1.1)
         self.hist_ust_max_dist = snp_cfg.get('historical_ust_max_distance_mult', 2.0)
 
-        # Инициализация БД для исторических УСТ
         try:
             self.db = DatabaseManager()
             self.db.init_ust_table()
         except Exception as e:
             logger.error(f"❌ [SniperV6] Ошибка инициализации БД: {e}")
             self.db = None
-        print(f"🎯 [DEBUG INIT] SniperV6: force_test_signal={self.force_test_signal}, cooldown={self.cooldown_sec}") # <-- ДОБАВИТЬ
+            
+        print(f"🎯 [DEBUG INIT] SniperV6: force_test_signal={self.force_test_signal}, cooldown={self.cooldown_sec}")
 
-        
     def subscribe_to_events(self, event_bus):
         pass
 
@@ -60,12 +58,10 @@ class SniperV6(AdaptiveStrategy):
         symbol = context.get('symbol', 'SOLUSDT')
         current_price = context.get('current_price', 0.0)
         
-        # 1. Тестовый режим
         if self.force_test_signal and (now - self._last_signal_time >= self.test_signal_interval):
             self._last_signal_time = now
             return self._create_test_signal(symbol, current_price, now)
 
-        # 2. Проверка свежести данных
         features = context.get('features')
         if not features or not features.is_fresh(now):
             return None
@@ -73,32 +69,51 @@ class SniperV6(AdaptiveStrategy):
         snap = features.snapshot()
         atr = self.atr_value if self.atr_value > 0 else (context.get('atr', 0.15) or 0.15)
         
-        # 3. Извлечение фич
         walls_bid = snap.get('walls', {}).get('walls_bid', [])
         walls_ask = snap.get('walls', {}).get('walls_ask', [])
         delta_windows = snap.get('delta', {}).get('windows', {})
         current_delta_vel = delta_windows.get(self.delta_window_sec, {}).get('velocity', 0.0)
+        
+        # Получаем средний объем стены для двойной проверки аномальности
+        avg_wall_vol = snap.get('walls', {}).get('avg_wall_volume', 1.0)
 
         best_signal = None
         best_confidence = 0.0
 
-        # 4. ПОИСК СДЕЛОК (LONG и SHORT)
         for side, walls in [('long', walls_bid), ('short', walls_ask)]:
             for wall in walls:
-                # Фильтр 1: Качество стены (CV и возраст уже отфильтрованы в WallsFeature, проверяем размер)
+                # 🔥 ФИЛЬТР 1: Наличие УСТ рядом со стеной (Главное условие!)
+                ust = None
+                if self.ust_detector:
+                    ust = self.ust_detector.find_nearest_ust(
+                        current_price=current_price,
+                        direction=side,
+                        max_distance_pct=0.005  # 0.5% радиус
+                    )
+                    if not ust:
+                        logger.debug(f"⚪ [SniperV6] Стена {wall['price']} отклонена: УСТ не найден в радиусе 0.5%")
+                        continue  # Нет УСТ рядом с этой стеной → пропускаем
+                    
+                    # Бонус к уверенности, если УСТ сильный
+                    wall_confidence = wall.get('confidence', 0.5)
+                    if ust.get('coefficient', 0) >= 0.7:
+                        wall_confidence += 0.1
+                else:
+                    wall_confidence = wall.get('confidence', 0.5)
+
+                #  ФИЛЬТР 2: Аномальный объем в стакане (Двойная проверка)
+                if wall.get('size', 0) < (avg_wall_vol * self.min_wall_size_mult):
+                    continue  # Стена недостаточно крупная
+                
+                # 🔥 ФИЛЬТР 3: Устойчивость стены (CV)
                 if wall.get('cv', 1.0) > self.max_wall_cv:
                     continue
                 
-                # Фильтр 2: Аномальный размер (например, > 3x от среднего, что уже заложено в WallsFeature, 
-                # но мы можем добавить доп. проверку на абсолютный размер, если нужно)
-                
-                # Фильтр 3: Поглощение дельты (Delta Shift)
-                # Для LONG (bid стена): мы хотим, чтобы продажи (отриц. дельта) ослабевали или развернулись
-                # Для упрощения в реальном времени: проверяем, что дельта не идет агрессивно ПРОТИВ нас
+                # 🔥 ФИЛЬТР 4: Поглощение дельты (Delta Shift)
                 if side == 'long' and current_delta_vel < -self.delta_shift_min:
-                    continue # Продавцы слишком сильны, стена может не выдержать
+                    continue  # Продавцы слишком сильны
                 if side == 'short' and current_delta_vel > self.delta_shift_min:
-                    continue # Покупатели слишком сильны
+                    continue  # Покупатели слишком сильны
 
                 # 5. РАСЧЕТ УРОВНЕЙ
                 entry_price = wall['price']
@@ -107,21 +122,16 @@ class SniperV6(AdaptiveStrategy):
                 sl_price = entry_price - risk if side == 'long' else entry_price + risk
                 tp1_price = entry_price + (risk * self.tp1_mult) if side == 'long' else entry_price - (risk * self.tp1_mult)
                 
-                # 6. УМНЫЙ TP2 (Smart TP2 vs Исторический УСТ)
-                tp2_price, tp2_reason = self._calculate_smart_tp2(
-                    entry_price, side, risk, atr, symbol
-                )
+                tp2_price, tp2_reason = self._calculate_smart_tp2(entry_price, side, risk, atr, symbol)
 
-                # Проверка минимального R:R
                 reward = abs(tp2_price - entry_price)
                 if (reward / risk) < 2.0:
                     continue
 
                 qty = self.fixed_lot_size
-                conf = wall.get('confidence', 0.5) + 0.3 # Бонус за стратегию
                 
-                if conf > best_confidence:
-                    best_confidence = conf
+                if wall_confidence > best_confidence:
+                    best_confidence = wall_confidence
                     best_signal = {
                         'side': side,
                         'entry_price': round(entry_price, 2),
@@ -130,10 +140,10 @@ class SniperV6(AdaptiveStrategy):
                         'tp2_price': round(tp2_price, 2),
                         'qty': qty,
                         'edge_price': wall['price'],
-                        'tp2_reason': tp2_reason
+                        'tp2_reason': tp2_reason,
+                        'ust_price': ust.get('price') if ust else None  # <-- ИСПРАВЛЕНО
                     }
 
-        # 7. ФИНАЛЬНАЯ ВАЛИДАЦИЯ И COOLDOWN
         if not best_signal:
             return None
             
@@ -143,12 +153,13 @@ class SniperV6(AdaptiveStrategy):
         self._last_signal_time = now
         side_str = best_signal['side'].upper()
         
+        ust_info = f" | УСТ: {best_signal['ust_price']}" if best_signal.get('ust_price') else ""
         logger.info(f"🎯 [SniperV6] СИГНАЛ: {side_str} | Entry: {best_signal['entry_price']} | "
                     f"SL: {best_signal['sl_price']} | TP1: {best_signal['tp1_price']} | "
-                    f"TP2: {best_signal['tp2_price']} ({best_signal['tp2_reason']})")
+                    f"TP2: {best_signal['tp2_price']} ({best_signal['tp2_reason']}){ust_info}")
 
         return EnrichedSignal(
-            signal_id=f"SniperV6_{symbol}_{int(now)}_{best_signal['tp2_reason'].replace(' ', '_')}",  # 🔥 Добавил причину в ID
+            signal_id=f"SniperV6_{symbol}_{int(now)}_{best_signal['tp2_reason'].replace(' ', '_')}",
             symbol=symbol,
             side=best_signal['side'],
             entry_price=best_signal['entry_price'],
@@ -166,46 +177,37 @@ class SniperV6(AdaptiveStrategy):
                 "tp1_price": best_signal['tp1_price'],
                 "tp2_price": best_signal['tp2_price']
             }
-            #  metadata убран, так как EnrichedSignal его не поддерживает
-       
         )
 
     def _calculate_smart_tp2(self, entry_price: float, side: str, risk: float, atr: float, symbol: str):
-        """Рассчитывает TP2: Smart (2.5-4.0) или Исторический УСТ, если он лучше."""
         base_tp2 = entry_price + (risk * self.base_tp2_mult) if side == 'long' else entry_price - (risk * self.base_tp2_mult)
         smart_dist = abs(base_tp2 - entry_price)
         smart_rr = self.base_tp2_mult
 
-        # Попытка найти исторический УСТ
         hist_tp2 = None
         hist_rr = 0.0
         hist_reason = "Smart TP2"
 
         if self.db:
             try:
-                # Ищем активные УСТ за последние 5 дней (432000 сек)
-                cutoff_time = time.time() - 432000
+                cutoff_time = time.time() - 432000 # 5 дней
                 query = """
-                    SELECT level_price, side FROM ust_levels 
+                    SELECT price, direction FROM ust_levels 
                     WHERE symbol = ? AND is_active = 1 AND created_at > ?
-                    ORDER BY created_at DESC
+                    ORDER BY coefficient DESC
                 """
                 rows = self.db.execute(query, (symbol, cutoff_time))
                 
                 for row in rows:
-                    ust_price = row['level_price']
-                    ust_side = row['side']
+                    ust_price = row['price']
+                    ust_dir = row['direction']
                     
-                    # Проверка направления
-                    if side == 'long' and ust_price <= entry_price:
-                        continue
-                    if side == 'short' and ust_price >= entry_price:
-                        continue
+                    if side == 'long' and ust_dir != 'bull': continue
+                    if side == 'short' and ust_dir != 'bear': continue
                     
                     ust_dist = abs(ust_price - entry_price)
                     ust_rr = ust_dist / risk
                     
-                    # Условия замены: R:R лучше на 10%+ И расстояние не дальше 2x от Smart TP2
                     if ust_rr > (smart_rr * self.hist_ust_rr_imp) and ust_dist <= (smart_dist * self.hist_ust_max_dist):
                         if hist_tp2 is None or ust_rr > hist_rr:
                             hist_tp2 = ust_price
@@ -217,12 +219,10 @@ class SniperV6(AdaptiveStrategy):
         if hist_tp2 is not None:
             return hist_tp2, hist_reason
         else:
-            # Если исторического нет, применяем простую логику Smart TP2 (можно расширить дельтой/стаканом как в бэктесте)
-            # Для краткости здесь оставляем base, но можно добавить логику из test_smart_tp2.py
             return base_tp2, "Smart TP2 (Base)"
 
     def _create_test_signal(self, symbol: str, current_price: float, now: float) -> EnrichedSignal:
-        side = 'short' # Для теста
+        side = 'short'
         sl_price = round(current_price + self.atr_value * self.atr_mult_sl, 2)
         tp1_price = round(current_price - (sl_price - current_price) * self.tp1_mult, 2)
         tp2_price = round(current_price - (sl_price - current_price) * self.base_tp2_mult, 2)
