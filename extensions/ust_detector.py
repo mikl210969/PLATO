@@ -135,7 +135,7 @@ class UstDetector:
                 if last_price and abs(swing['price'] - last_price) / last_price < self.min_distance_pct:
                     continue
                 
-                direction = 'bear' if swing['type'] == 'low' else 'bull'
+                direction = 'bull' if swing['type'] == 'low' else 'bear'
                 breakout_found = False
                 
                 for j in range(swing['index'] + 5, min(swing['index'] + 100, len(df_5m))):
