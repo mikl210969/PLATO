@@ -6,7 +6,7 @@ RiskManager следит за ценой (PRICE_UPDATE из WS) и при пер
 закрывает позицию рыночными ордерами.
 
 Поведение:
-- TP1: закрыть 50% остатка, перенести SL в безубыток.
+- TP1: закрыть 50% остатка, перенести SL в безубыток + буфер 0.15% на комиссии.
 - TP2: закрыть остаток полностью.
 - SL: закрыть остаток полностью.
 - Идемпотентность: каждый уровень стреляет ровно один раз (флаги *_done).
@@ -62,7 +62,8 @@ class RiskManager:
             "message": "RiskManager initialized (internal stop mode)",
             "max_price_age_sec": self._max_price_age
         })
-        self._guard_lock = asyncio.Lock()  # 🔥 НОВОЕ: Lock для синхронизации
+        self._guard_lock = asyncio.Lock()
+
     # ============================================================
     # СЛУЖЕБНОЕ
     # ============================================================
@@ -113,7 +114,6 @@ class RiskManager:
                 atr_value=atr_value
             )
             
-            # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ: PassportManager сам обновит поля, timeline и сохранит на диск
             await self.passport_manager.apply_change(
                 passport_id=passport_id,
                 change_type="LEVELS_UPDATED",
@@ -124,7 +124,6 @@ class RiskManager:
                 }
             )
 
-        # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ для регистрации guard
         await self.passport_manager.apply_change(
             passport_id=passport_id,
             change_type="GUARD_REGISTERED",
@@ -179,8 +178,7 @@ class RiskManager:
         return passport_id in self._guards
 
     def sync_guard_remaining(self, passport_id: str, size: float):
-        """🔥 Приводит guard['remaining'] к размеру позиции с биржи:
-        TP1/TP2 закрывают настоящую половину, а не половину фантазии."""
+        """🔥 Приводит guard['remaining'] к размеру позиции с биржи."""
         guard = self._guards.get(passport_id)
         if guard is None:
             return
@@ -191,9 +189,7 @@ class RiskManager:
 
     async def ensure_guard_registered(self, passport):
         """Гарантированная регистрация guard через REST-фоллбэк."""
-        # 🔥 ЗАЩИТА 1: asyncio.Lock для атомарности операции
         async with self._guard_lock:
-            # 🔥 ЗАЩИТА 2: Повторная проверка внутри lock (double-check)
             if passport.passport_id in self._guards:
                 return
 
@@ -202,7 +198,6 @@ class RiskManager:
                 "message": "DriftMonitor detected open position without guard. Forcing registration."
             })
 
-            #  ЗАЩИТА 3: Пересчет уровней если нужно
             if passport.sl_price == 0 or passport.tp1_price == 0:
                 atr_value = self.config.get('trading', {}).get('atr_value', 0.5)
                 levels = self.trader.calculate_exit_levels(
@@ -210,7 +205,6 @@ class RiskManager:
                     entry_price=passport.position_entry_price or passport.entry_price,
                     atr_value=atr_value
                 )
-                # Проверяем результат
                 levels_ok = await self.passport_manager.apply_change(
                     passport_id=passport.passport_id,
                     change_type="LEVELS_UPDATED",
@@ -227,7 +221,6 @@ class RiskManager:
                     })
                     return
 
-            # 🔥 ЗАЩИТА 4: Регистрация guard с проверкой результата
             guard_ok = await self.passport_manager.apply_change(
                 passport_id=passport.passport_id,
                 change_type="GUARD_REGISTERED",
@@ -239,7 +232,6 @@ class RiskManager:
                 }
             )
             
-            # 🔥 ЗАЩИТА 5: Регистрируем в памяти ТОЛЬКО если apply_change успешен
             if guard_ok:
                 self._register_guard_in_memory(passport)
                 self._log("guard_registered_success", {
@@ -258,6 +250,10 @@ class RiskManager:
     # ============================================================
 
     async def _on_account_update(self, event: Event):
+        """
+        Пассивная синхронизация: если позиция закрылась по внешней причине
+        (ручное закрытие, нативный стоп биржи), обновляем внутреннее состояние.
+        """
         payload = event.payload or {}
 
         updates = []
@@ -288,28 +284,47 @@ class RiskManager:
                     })
                     continue
 
+                # 🔥 ЕСЛИ РАЗМЕР УМЕНЬШИЛСЯ НА ~50% — ЭВРИСТИКА TP1
+                # (позиция закрылась по внешней причине, но мы должны обновить SL)
                 guard['remaining'] = size
                 if guard['lot'] > 0 and size < guard['lot'] * 0.99 and not guard['tp1_done']:
                     guard['tp1_done'] = True
                     passport = self.passport_manager.get(passport_id)
                     if passport:
-                        be = passport.position_entry_price or passport.entry_price or 0.0
-                        if be > 0:
-                            guard['sl_price'] = be
-                            # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ для переноса SL
-                            await self.passport_manager.apply_change(
-                                passport_id=passport_id,
-                                change_type="SL_MOVED_TO_BREAKEVEN",
-                                payload={
-                                    "price": be,
-                                    "reason": "TP1_HIT"
-                                }
-                            )
-                            self._log("tp1_derived_from_exchange", {
+                        # 🔥 РАСЧЕТ БЕЗУБЫТКА С БУФЕРОМ НА КОМИССИИ (0.15%)
+                        # Единообразно с логикой в _check_guard
+                        commission_buffer = 0.0015
+                        entry_px = float(passport.position_entry_price or passport.entry_price or 0.0)
+                        
+                        if entry_px <= 0:
+                            self._log("tp1_derived_no_entry_price", {
                                 "passport_id": passport_id,
-                                "remaining": size,
-                                "sl_breakeven": be
+                                "message": "Нет цены входа, используем текущий SL"
                             })
+                            continue
+                        
+                        if passport.side == 'long':
+                            be = entry_px * (1 + commission_buffer)
+                        else:
+                            be = entry_px * (1 - commission_buffer)
+                        
+                        be = round(be, 2)
+                        guard['sl_price'] = be
+                        
+                        await self.passport_manager.apply_change(
+                            passport_id=passport_id,
+                            change_type="SL_MOVED_TO_BREAKEVEN",
+                            payload={
+                                "price": be,
+                                "reason": "TP1_DERIVED_FROM_EXCHANGE"
+                            }
+                        )
+                        self._log("tp1_derived_from_exchange", {
+                            "passport_id": passport_id,
+                            "remaining": size,
+                            "sl_breakeven": be,
+                            "buffer_pct": "0.15%"
+                        })
 
     async def _on_position_closed(self, event: Event):
         payload = event.payload
@@ -350,9 +365,7 @@ class RiskManager:
                 return
             
             if passport.status in (PassportStatus.OPEN.value, PassportStatus.PARTIAL_CLOSE.value):
-                # 🔥 АТОМАРНАЯ РЕГИСТРАЦИЯ: используем lock
                 async with self._guard_lock:
-                    # Повторная проверка внутри lock
                     if passport.passport_id not in self._guards:
                         await self.passport_manager.apply_change(
                             passport_id=passport.passport_id,
@@ -380,7 +393,6 @@ class RiskManager:
     async def _check_guard(self, passport: TradePassport, guard: Dict, price: float):
         is_short = guard['side'] == 'short'
 
-        # 🔥 ЗАЩИТА: Проверяем валидность цены
         if not price or price <= 0:
             self._log("invalid_price_skip", {
                 "passport_id": passport.passport_id,
@@ -389,7 +401,7 @@ class RiskManager:
             })
             return
 
-        # 🔥 TP1: частичное закрытие + SL в безубыток
+        # 🔥 TP1: частичное закрытие + SL в безубыток + буфер на комиссии
         if not guard['tp1_done'] and guard['tp1_price'] > 0:
             hit = price <= guard['tp1_price'] if is_short else price >= guard['tp1_price']
             if hit:
@@ -400,16 +412,25 @@ class RiskManager:
                     ok = await self._close_market(passport, guard, qty, 'TP1_HIT')
                     if ok:
                         guard['remaining'] = round(guard['remaining'] - qty, 2)
-                        # 🔥 ЗАЩИТА: Используем fallback если оба значения None
-                        be = passport.position_entry_price or passport.entry_price or 0
-                        if be <= 0:
-                            self._log("tp1_breakeven_zero", {
-                                "passport_id": passport.passport_id,
-                                "message": "Внимание: breakeven price = 0, используем текущую цену"
-                            })
-                            be = price
                         
-                        # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ
+                        # 🔥 РАСЧЕТ ЧЕСТНОГО БЕЗУБЫТКА С БУФЕРОМ НА КОМИССИИ (0.15%)
+                        commission_buffer = 0.0015
+                        entry_px = float(passport.position_entry_price or passport.entry_price or price)
+                        
+                        if passport.side == 'long':
+                            be = entry_px * (1 + commission_buffer)
+                        else:
+                            be = entry_px * (1 - commission_buffer)
+                        
+                        be = round(be, 2)
+                        
+                        self._log("tp1_breakeven_calculated", {
+                            "passport_id": passport.passport_id,
+                            "entry_price": entry_px,
+                            "be_price_with_buffer": be,
+                            "buffer_pct": "0.15%"
+                        })
+                        
                         await self.passport_manager.apply_change(
                             passport_id=passport.passport_id,
                             change_type="TP1_HIT",
@@ -420,12 +441,15 @@ class RiskManager:
                             }
                         )
                         
-                        self._log("tp1_triggered", {
+                        # 🔥 КРИТИЧЕСКИ ВАЖНО: Обновляем цену SL во внутреннем словаре guard!
+                        guard['sl_price'] = be
+                        
+                        self._log("tp1_triggered_and_sl_updated", {
                             "passport_id": passport.passport_id,
                             "price": price,
                             "closed_qty": qty,
                             "remaining": guard['remaining'],
-                            "sl_breakeven": be
+                            "new_internal_sl": be
                         })
                     else:
                         guard['tp1_done'] = False
@@ -451,7 +475,6 @@ class RiskManager:
                     ok = await self._close_market(passport, guard, qty, 'TP2_HIT')
                     if ok:
                         guard['remaining'] = 0.0
-                        # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ
                         await self.passport_manager.apply_change(
                             passport_id=passport.passport_id,
                             change_type="TP2_HIT",
@@ -490,10 +513,7 @@ class RiskManager:
                     ok = await self._close_market(passport, guard, qty, 'SL_HIT')
                     if ok:
                         guard['remaining'] = 0.0
-                        # 🔥 БИРЖА-ЦЕНТРИЧНО: гасим входной лимитник сразу после закрытия,
-                        # чтобы остаток не исполнился в пустую позицию
                         await self._cancel_entry_orders(passport)
-                        # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ
                         await self.passport_manager.apply_change(
                             passport_id=passport.passport_id,
                             change_type="SL_HIT",
@@ -626,7 +646,6 @@ class RiskManager:
                 "error": str(e)
             })
 
-
     async def _full_close_qty(self, passport: TradePassport, guard: Dict) -> float:
         qty = round(float(guard['remaining']), 2)
         try:
@@ -660,7 +679,6 @@ class RiskManager:
             if order_id and order.get('status') in ('NEW', 'PARTIALLY_FILLED'):
                 result = await self.trader.cancel_order(symbol, order_id)
                 if result:
-                    # 🔥 ЕДИНЫЙ МЕТОД ИЗМЕНЕНИЯ для отмены ордера
                     await self.passport_manager.apply_change(
                         passport_id=passport.passport_id,
                         change_type="ORDER_CANCELLED",

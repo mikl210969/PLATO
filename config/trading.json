@@ -26,7 +26,7 @@
     "max_wall_cv": 0.15,
     "delta_window_sec": 3,
     "delta_shift_min": 500.0,
-    "historical_ust_rr_improvement": 1.1,
+    "historical_ust_rr_improvement": 1.0,
     "historical_ust_max_distance_mult": 2.0,
     "cooldown_sec": 120
   },
