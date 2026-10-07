@@ -3,10 +3,28 @@
   "recalc_interval_sec": 60,
   "lookback_candles": 20,
   "baseline_avg_vol": 100.0,
-  "dry_run": true,
+  "dry_run": false,
   "regimes": {
-    "calm": {"vol_ratio_max": 0.7, "overrides": {"min_wall_volume": 10, "price_distance_pct": 0.3}},
-    "normal": {"vol_ratio_max": 2.0, "overrides": {"min_wall_volume": 20, "price_distance_pct": 0.5}},
-    "volatile": {"vol_ratio_max": 999, "overrides": {"min_wall_volume": 50, "price_distance_pct": 1.0}}
+    "calm": { 
+      "vol_ratio_max": 0.7, 
+      "overrides": { 
+        "min_wall_volume": 10, 
+        "price_distance_pct": 0.2 
+      }
+    },
+    "normal": { 
+      "vol_ratio_max": 2.0, 
+      "overrides": { 
+        "min_wall_volume": 20, 
+        "price_distance_pct": 0.3 
+      }
+    },
+    "volatile": { 
+      "vol_ratio_max": 999, 
+      "overrides": { 
+        "min_wall_volume": 50, 
+        "price_distance_pct": 0.4 
+      }
+    }
   }
 }

@@ -207,11 +207,14 @@ class SniperV6(AdaptiveStrategy):
                     ust_dir = row['direction']
                     coef = row.get('coefficient', 0)
                     
-                    if side == 'long' and ust_dir != 'bull': 
-                        logger.info(f"   ⏭️ Пропуск УСТ {ust_price}: направление '{ust_dir}' != 'bull'")
+                    # 🔥 ИСПРАВЛЕНО: Для TP2 ищем уровень ПРОТИВОПОЛОЖНОГО направления
+                    # LONG TP2 → ищем сопротивление (bear) выше цены
+                    # SHORT TP2 → ищем поддержку (bull) ниже цены
+                    if side == 'long' and ust_dir != 'bear': 
+                        logger.info(f"   ⏭️ Пропуск УСТ {ust_price}: для LONG TP2 нужно 'bear', получено '{ust_dir}'")
                         continue
-                    if side == 'short' and ust_dir != 'bear': 
-                        logger.info(f"   ⏭️ Пропуск УСТ {ust_price}: направление '{ust_dir}' != 'bear'")
+                    if side == 'short' and ust_dir != 'bull': 
+                        logger.info(f"   ️ Пропуск УСТ {ust_price}: для SHORT TP2 нужно 'bull', получено '{ust_dir}'")
                         continue
                     
                     ust_dist = abs(ust_price - entry_price)

@@ -7,21 +7,9 @@
     "fixed_tp1_distance": 0.25,
     "fixed_tp2_distance": 0.50,
     "strategies": {
-      "wall_fade_v3": {
-        "enabled": false,
-        "log_input_stream": false,
-        "bypass_filters": false
-      },
-      "absorption_v2": {
-        "enabled": false,
-        "log_input_stream": false,
-        "bypass_filters": false
-      },
-      "breakout_v1": {
-        "enabled": false,
-        "log_input_stream": false,
-        "bypass_filters": false
-      }
+      "wall_fade_v3": { "enabled": false, "log_input_stream": false, "bypass_filters": false },
+      "absorption_v2": { "enabled": false, "log_input_stream": false, "bypass_filters": false },
+      "breakout_v1": { "enabled": false, "log_input_stream": false, "bypass_filters": false }
     }
   },
   "btc_context": {
@@ -34,38 +22,10 @@
     "baseline_avg_vol": 100.0,
     "dry_run": false,
     "regimes": {
-      "calm": {
-        "vol_ratio_max": 0.7,
-        "overrides": {
-          "min_confidence": 0.75,
-          "price_distance_pct": 0.3,
-          "bypass_filters": false
-        }
-      },
-      "normal": {
-        "vol_ratio_max": 2.0,
-        "overrides": {
-          "min_confidence": 0.6,
-          "price_distance_pct": 0.5,
-          "bypass_filters": false
-        }
-      },
-      "volatile": {
-        "vol_ratio_max": 5.0,
-        "overrides": {
-          "min_confidence": 0.8,
-          "price_distance_pct": 0.8,
-          "bypass_filters": false
-        }
-      },
-      "impulsive": {
-        "vol_ratio_max": 999.0,
-        "overrides": {
-          "min_confidence": 0.95,
-          "price_distance_pct": 1.5,
-          "bypass_filters": false
-        }
-      }
+      "calm": { "vol_ratio_max": 0.7, "overrides": { "min_confidence": 0.75, "price_distance_pct": 0.2, "bypass_filters": false } },
+      "normal": { "vol_ratio_max": 2.0, "overrides": { "min_confidence": 0.6, "price_distance_pct": 0.3, "bypass_filters": false } },
+      "volatile": { "vol_ratio_max": 5.0, "overrides": { "min_confidence": 0.8, "price_distance_pct": 0.4, "bypass_filters": false } },
+      "impulsive": { "vol_ratio_max": 999.0, "overrides": { "min_confidence": 0.95, "price_distance_pct": 0.5, "bypass_filters": false } }
     }
   },
   "walls": {
@@ -87,7 +47,7 @@
     "fixed_tp2_distance": 0.50,
     "bypass_filters": false,
     "min_confidence": 0.6,
-    "price_distance_pct": 0.8,
+    "price_distance_pct": 0.5,
     "cooldown_sec": 30
   },
   "absorption": {
@@ -102,7 +62,7 @@
     "cooldown_sec": 30,
     "min_confidence": 0.6,
     "min_wall_updates": 30,
-    "price_distance_pct": 0.8,
+    "price_distance_pct": 0.5,
     "bounce_threshold_pct": 0.0025,
     "bounce_max_time_sec": 90,
     "max_drift_pct": 0.006,
@@ -133,21 +93,17 @@
     "force_test_signal": false,
     "test_signal_interval": 60,
     "fixed_lot_size": 7.0,
-    
     "atr_mult_sl": 1.0,
     "tp1_mult": 1.5,
     "base_tp2_mult": 2.5,
     "max_tp2_mult": 4.0,
     "min_tp2_mult": 2.0,
-    
-    "min_wall_size_mult": 3.0,
+    "min_wall_size_mult": 4.0,
     "min_wall_age_sec": 3.0,
     "max_wall_cv": 0.15,
-    
     "delta_window_sec": 3,
     "delta_shift_min": 500.0,
-    
-    "historical_ust_rr_improvement": 1.1,
+    "historical_ust_rr_improvement": 1.0,
     "historical_ust_max_distance_mult": 2.0,
     "cooldown_sec": 120
   }
