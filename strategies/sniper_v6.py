@@ -197,22 +197,21 @@ class SniperV6(AdaptiveStrategy):
                     ORDER BY coefficient DESC
                 """
                 rows = self.db.execute(query, (symbol, cutoff_time))
-                
-                # 🔥 ДИАГНОСТИКА: Сколько всего уровней найдено?
                 rows_list = list(rows)
-                logger.debug(f"🔍 [TP2 DEBUG] Найдено {len(rows_list)} исторических УСТ для {symbol}. Ищем улучшение для R:R > {smart_rr * self.hist_ust_rr_imp:.2f}")
+                
+                # 🔥 ИЗМЕНЕНО: logger.info вместо logger.debug
+                logger.info(f"🔍 [TP2 DEBUG] Найдено {len(rows_list)} исторических УСТ для {symbol}. Ищем улучшение для R:R > {smart_rr * self.hist_ust_rr_imp:.2f}")
                 
                 for row in rows_list:
                     ust_price = row['price']
                     ust_dir = row['direction']
                     coef = row.get('coefficient', 0)
                     
-                    # 🔥 ДИАГНОСТИКА: Проверка направления
                     if side == 'long' and ust_dir != 'bull': 
-                        logger.debug(f"   ⏭️ Пропуск УСТ {ust_price}: направление '{ust_dir}' != 'bull'")
+                        logger.info(f"   ⏭️ Пропуск УСТ {ust_price}: направление '{ust_dir}' != 'bull'")
                         continue
                     if side == 'short' and ust_dir != 'bear': 
-                        logger.debug(f"   ⏭️ Пропуск УСТ {ust_price}: направление '{ust_dir}' != 'bear'")
+                        logger.info(f"   ⏭️ Пропуск УСТ {ust_price}: направление '{ust_dir}' != 'bear'")
                         continue
                     
                     ust_dist = abs(ust_price - entry_price)
@@ -221,20 +220,18 @@ class SniperV6(AdaptiveStrategy):
                     required_rr = smart_rr * self.hist_ust_rr_imp
                     max_allowed_dist = smart_dist * self.hist_ust_max_dist
                     
-                    # 🔥 ДИАГНОСТИКА: Проверка условий R:R и дистанции
                     if ust_rr <= required_rr:
-                        logger.debug(f"   ⏭️ Пропуск УСТ {ust_price}: R:R={ust_rr:.2f} <= требуемого {required_rr:.2f}")
+                        logger.info(f"   ⏭️ Пропуск УСТ {ust_price}: R:R={ust_rr:.2f} <= требуемого {required_rr:.2f}")
                         continue
                     if ust_dist > max_allowed_dist:
-                        logger.debug(f"   ⏭️ Пропуск УСТ {ust_price}: Дистанция {ust_dist:.2f} > макс. {max_allowed_dist:.2f}")
+                        logger.info(f"   ⏭️ Пропуск УСТ {ust_price}: Дистанция {ust_dist:.2f} > макс. {max_allowed_dist:.2f}")
                         continue
                     
-                    # Если дошли сюда, уровень подходит!
                     if hist_tp2 is None or ust_rr > hist_rr:
                         hist_tp2 = ust_price
                         hist_rr = ust_rr
                         hist_reason = f"Истор.УСТ {ust_price:.2f} (coef:{coef})"
-                        logger.debug(f"   ✅ НАЙДЕН ЛУЧШИЙ УСТ: {ust_price} с R:R={ust_rr:.2f}")
+                        logger.info(f"   ✅ НАЙДЕН ЛУЧШИЙ УСТ: {ust_price} с R:R={ust_rr:.2f}")
                         
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка запроса УСТ из БД: {e}")
